@@ -88,7 +88,9 @@ class ToolLoop:
         self.executor = executor
         self.max_rounds = max_rounds
 
-    def run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope) -> LoopResult:
+    def run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope,
+            require_final: bool = False) -> LoopResult:
+        """require_final: after the round limit, ask once more for the answer with tools switched off."""
         loop_id = str(uuid.uuid4())
         tools = self.registry.openai_schema(tool_names)
         messages: list[dict[str, Any]] = [dict(message) for message in request.messages]
@@ -124,4 +126,9 @@ class ToolLoop:
                         if isinstance(item, Material):
                             materials.setdefault((item.source, item.content_hash), item)
                 messages.append(_tool_message(call_id, value))
+        if require_final and status == "max_rounds":
+            messages.append({"role": "user", "content": "工具轮数已用完。不要再调用工具，直接按本阶段要求返回最终 JSON。"})
+            estimate, limit = self.context.estimate(messages)
+            if limit is None or estimate <= limit:
+                final = _parse_final(self.model.tool_round(request, messages, tools, tool_choice="none"))
         return LoopResult(status, rounds, loop_id, tuple(materials.values()), final)

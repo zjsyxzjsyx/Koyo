@@ -79,12 +79,13 @@ class OpenAICompatibleModel:
 
     def _chat_messages(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                        request: ModelRequest | None = None, max_tokens: int | None = None,
-                       thinking: str | None = None, timeout_seconds: float = 60) -> dict[str, Any]:
+                       thinking: str | None = None, timeout_seconds: float = 60,
+                       tool_choice: str = "auto") -> dict[str, Any]:
         body: dict[str, Any] = {"model": self.model, "temperature": 0,
             "messages": messages}
         if tools:
             body["tools"] = tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = tool_choice
         output_cap = max_tokens if max_tokens is not None else self.output_reserve
         if output_cap is not None:
             body["max_tokens"] = output_cap
@@ -168,11 +169,12 @@ class OpenAICompatibleModel:
         return self._parse_json_message(message)
 
     def tool_round(self, request: ModelRequest, messages: list[dict[str, Any]],
-                   tools: list[dict[str, Any]]) -> dict[str, Any]:
+                   tools: list[dict[str, Any]], tool_choice: str = "auto") -> dict[str, Any]:
         """One round of a bounded tool loop; returns the raw assistant message."""
         reserve = request.budget.get("output_reserve_tokens")
         max_tokens = reserve if type(reserve) is int and reserve > 0 else None
-        return self._chat_messages(messages, tools, request=request, max_tokens=max_tokens)
+        return self._chat_messages(messages, tools, request=request, max_tokens=max_tokens,
+                                   tool_choice=tool_choice)
 
     def summarize(self, lesson: str, corrections: list[str]) -> str:
         response = self._json("为跨天追问生成有来源的简明讲解摘要。保留已确认要点、纠正和不确定项；不推断用户已理解。返回 summary 字符串。",

@@ -12,6 +12,7 @@ from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
+from .files import read_file_spec, write_file_spec
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
 from .toolloop import LoopResult, ToolLoop, query_leak_check
@@ -41,7 +42,8 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
 
 
 class LearningRuntime:
-    def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None):
+    def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None,
+                 write_roots: Sequence[Path] = ()):
         self.store = store
         self.model = model
         self.search = search
@@ -50,6 +52,11 @@ class LearningRuntime:
             self.tools.register(web_search_spec(search))
         if fetcher is not None:
             self.tools.register(fetch_url_spec(fetcher))
+        # read_file only reaches files already approved for the current step.
+        self._readable: list[str] = []
+        self.tools.register(read_file_spec(lambda: self._readable))
+        if write_roots:
+            self.tools.register(write_file_spec(list(write_roots)))
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.max_tool_rounds = 5
         self.last_loop: LoopResult | None = None
@@ -228,6 +235,7 @@ class LearningRuntime:
             remote.append("本地资料不足时，经 Exa 联网搜索补充（只发送查询词）")
         if not approve(materials, self.model.endpoint, remote):
             raise ValueError("未获发送资料授权；学习未开始")
+        self._readable = [item.source for item in materials if item.kind == "local"]
         fetch_scope = ToolScope(frozenset({"network"}), point=point)
         for url in urls:
             materials.extend(self.executor.run("fetch_url", {"url": url}, fetch_scope).value)
@@ -270,7 +278,9 @@ class LearningRuntime:
         scope = ToolScope(frozenset({"read", "network"}), point=point,
                           check=query_leak_check((item for item in materials if item.kind != "web"), point))
         if callable(getattr(self.model, "tool_round", None)):
-            request = self.context.build(ContextTask("gather", point, current_input=gap))
+            files = "；".join(self._readable)
+            request = self.context.build(ContextTask(
+                "gather", point, current_input=gap + (f"\n可用 read_file 读取的本地资料：{files}" if files else "")))
             names = [name for name in self.tools.names()
                      if self.tools.get(name).permission in ("read", "network")]
             loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds)
@@ -286,7 +296,7 @@ class LearningRuntime:
                                       (f"tool_loop_{self.last_loop.status}", request.build_id))
             # Whatever the loop found is a public supplement, not a user-chosen source.
             found = [Material("web", item.source, item.content_hash, item.content, item.reason)
-                     for item in self.last_loop.materials]
+                     for item in self.last_loop.materials if item.kind != "local"]
             return found, f"（工具循环：{self.last_loop.reason}）"
         # Scripted models without tool rounds propose one query; a rejected one falls back to the point.
         proposed = self.model.search_query(point, gap)
@@ -305,7 +315,8 @@ class LearningRuntime:
         return sources
 
     def clarify(self, kp_id: str, question: str, attempt_id: str | None = None,
-                source_message_id: str | None = None) -> dict[str, str]:
+                source_message_id: str | None = None,
+                confirm: Callable[[Any, dict[str, Any]], bool] | None = None) -> dict[str, str]:
         if not question.strip():
             raise ValueError("澄清问题不能为空")
         point = self.store.get_knowledge_point(kp_id)
@@ -316,12 +327,15 @@ class LearningRuntime:
         if hasattr(self.model, "set_trace_context"):
             self.model.set_trace_context(kp_id, attempt_id)
         sources = self.sources_for(kp_id)
+        task = ContextTask("clarify", point["title"], kp_id, attempt_id, current_input=question,
+                           sources=tuple(sources), source_message_id=source_message_id, current_note_id=note_id)
         try:
-            result = self._invoke(ContextTask("clarify", point["title"], kp_id, attempt_id,
-                                              current_input=question, sources=tuple(sources),
-                                              source_message_id=source_message_id,
-                                              current_note_id=note_id),
-                                  lambda: self.model.clarify(point["title"], question, sources))
+            result = None
+            # Tools are open only while learning; self-tests and reviews never get a loop.
+            if attempt_id is None and source_message_id is None and callable(getattr(self.model, "tool_round", None)):
+                result = self._clarify_with_tools(task, kp_id, sources, confirm)
+            if result is None:
+                result = self._invoke(task, lambda: self.model.clarify(point["title"], question, sources))
         except (ContextBudgetError, ModelContextOverflowError, LessonSummaryBudgetError):
             result = self._clarify_in_parts(kp_id, point["title"], question, attempt_id,
                                             sources, source_message_id)
@@ -331,6 +345,26 @@ class LearningRuntime:
             raise ValueError("模型未能给出有效澄清解释；问题仍可稍后重试")
         self.store.explain_note(note_id, explanation)
         return {"explanation": explanation.strip(), "followup": followup.strip()}
+
+    def _clarify_with_tools(self, task: ContextTask, kp_id: str, sources: list[dict[str, Any]],
+                            confirm: Callable[[Any, dict[str, Any]], bool] | None) -> dict[str, Any] | None:
+        """Clarify while learning with read tools and confirmed note writes; None falls back to a plain call."""
+        names = [name for name in self.tools.names() if self.tools.get(name).permission in ("read", "write_file")]
+        self._readable = [str(item["source"]) for item in sources if item.get("kind") == "local"]
+        request = self.context.build(task)
+        scope = ToolScope(frozenset({"read", "write_file"}), confirm=confirm, kp_id=kp_id, point=task.point)
+        try:
+            self.last_loop = ToolLoop(self.model, self.context, self.tools, self.executor,
+                                      self.max_tool_rounds).run(request, names, scope, require_final=True)
+        except Exception:
+            with self.store.transaction():
+                self.store.db.execute("UPDATE context_builds SET status='model_error' WHERE id=?", (request.build_id,))
+            raise
+        with self.store.transaction():
+            self.store.db.execute("UPDATE context_builds SET status=? WHERE id=?",
+                                  (f"tool_loop_{self.last_loop.status}", request.build_id))
+        final = self.last_loop.final
+        return final if isinstance(final.get("explanation"), str) and final["explanation"].strip() else None
 
     def _clarify_in_parts(self, kp_id: str, point: str, question: str, attempt_id: str | None,
                           sources: list[dict[str, str]], source_message_id: str | None) -> dict[str, Any]:

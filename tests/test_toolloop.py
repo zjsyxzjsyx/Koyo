@@ -32,8 +32,11 @@ class ToolModel(FakeModel):
         self.rounds = list(rounds)
         self.seen = []
 
-    def tool_round(self, request, messages, tools):
+    def tool_round(self, request, messages, tools, tool_choice="auto"):
         self.seen.append((request.stage, [dict(m) for m in messages], tools))
+        self.choices = getattr(self, "choices", []) + [tool_choice]
+        if tool_choice == "none":
+            return getattr(self, "forced_final", done())
         step = self.rounds.pop(0) if self.rounds else done()
         return step if "role" in step else {"role": "assistant", "content": None, "tool_calls": step["calls"]}
 
@@ -65,7 +68,7 @@ def test_model_can_search_several_times_before_teaching(tmp_path):
     assert [row["round"] for row in rows] == [1, 2, 3]
     assert len({row["loop_id"] for row in rows}) == 1 and rows[0]["loop_id"] == service.last_loop.loop_id
     stage, messages, tools = model.seen[-1]
-    assert stage == "gather" and tools == service.tools.openai_schema(["web_search"])
+    assert stage == "gather" and tools == service.tools.openai_schema(["read_file", "web_search"])
     tool_messages = [m for m in messages if m["role"] == "tool"]
     assert len(tool_messages) == 3 and "可靠解释" in tool_messages[0]["content"]
     assert len(store.materials_for(kp)) == 4

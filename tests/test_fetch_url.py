@@ -156,7 +156,7 @@ def test_loop_can_fetch_a_page_as_a_public_supplement(tmp_path):
     kp, _, sources = service.prepare("二叉树遍历", path, lambda *_: True)
     assert [(s.kind, s.source) for s in sources if s.kind != "local"] == [("web", other)]
     tools = {tool["function"]["name"] for tool in model.seen[0][2]}
-    assert tools == {"web_search", "fetch_url"}
+    assert tools == {"web_search", "fetch_url", "read_file"}
 
 
 def test_loop_url_carrying_local_text_is_rejected(tmp_path):

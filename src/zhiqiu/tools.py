@@ -45,6 +45,10 @@ class ToolSpec:
     max_retries: int = 0
     max_output_chars: int = 20_000
     requires_confirmation: bool = False
+    # Tool-intrinsic argument rules beyond the schema (e.g. allowed paths); runs before the gate.
+    precheck: Callable[[dict[str, Any]], None] | None = None
+    # Text shown to the user when the call needs confirmation.
+    describe: Callable[[dict[str, Any]], str] | None = None
 
     def __post_init__(self) -> None:
         if self.permission not in PERMISSIONS:
@@ -243,6 +247,8 @@ class ToolExecutor:
             if not spec:
                 raise ToolError("not_found", f"未注册的工具：{name}")
             validate_args(spec.params, args)
+            if spec.precheck:
+                spec.precheck(args)
             if scope.check:
                 try:
                     scope.check(spec, args)

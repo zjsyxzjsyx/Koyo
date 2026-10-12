@@ -247,7 +247,7 @@ def test_resumed_lesson_reuses_runtime_across_clarifications(tmp_path, monkeypat
         def __init__(self):
             self.questions = []
 
-        def clarify(self, kp_id, question):
+        def clarify(self, kp_id, question, **kwargs):
             self.questions.append((kp_id, question))
             return {"explanation": "合成解释", "followup": ""}
 

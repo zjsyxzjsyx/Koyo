@@ -4,13 +4,14 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
 
 from .materials import Material
 from .diagnostics import check_capacity, check_model
+from .files import write_roots_from_env
 from .local_env import load_local_env
 from .memory import MemoryService
 from .model import OpenAICompatibleModel
@@ -19,6 +20,7 @@ from .retrieval import rank_lessons
 from .runtime import LearningRuntime
 from .search import ExaSearch
 from .store import Store
+from .tools import ToolSpec
 
 app = typer.Typer(help="知秋：本地资料学习与复习", no_args_is_help=False)
 memory_app = typer.Typer(help="显式管理跨会话学习偏好")
@@ -37,7 +39,7 @@ def context_store(ctx: typer.Context) -> Store:
 def runtime(store: Store) -> LearningRuntime:
     model = OpenAICompatibleModel(audit=store.record_llm_call)
     exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
-    return LearningRuntime(store, model, exa, exa)
+    return LearningRuntime(store, model, exa, exa, write_roots_from_env())
 
 
 def show_status(store: Store, full: bool = False) -> None:
@@ -161,6 +163,11 @@ def _approve(materials: list[Material], endpoint: str, remote: list[str] | None 
     for item in remote or []:
         typer.echo(f"  {item}")
     return typer.confirm("允许本次学习发送这些内容吗？", default=False)
+
+
+def _confirm_tool(spec: ToolSpec, args: dict[str, Any]) -> bool:
+    typer.echo(spec.describe(args) if spec.describe else f"工具 {spec.name}：{args}")
+    return typer.confirm("允许执行吗？", default=False)
 
 
 def _session(store: Store, service: LearningRuntime, attempt_id: str) -> None:
@@ -310,7 +317,7 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
             continue
         if command.startswith("/question "):
             try:
-                clarified = service.clarify(kp_id, command.split(" ", 1)[1])
+                clarified = service.clarify(kp_id, command.split(" ", 1)[1], confirm=_confirm_tool)
                 typer.echo(clarified["explanation"])
                 if clarified["followup"]:
                     typer.echo(f"可继续思考：{clarified['followup']}")
@@ -346,7 +353,7 @@ def _resume_lesson(store: Store, session_id: str) -> None:
         if command.startswith("/question "):
             try:
                 service = service or runtime(store)
-                clarified = service.clarify(lesson["kp_id"], command.split(" ", 1)[1])
+                clarified = service.clarify(lesson["kp_id"], command.split(" ", 1)[1], confirm=_confirm_tool)
                 typer.echo(clarified["explanation"])
                 if clarified["followup"]:
                     typer.echo(f"可继续思考：{clarified['followup']}")
