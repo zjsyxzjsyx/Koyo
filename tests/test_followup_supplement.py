@@ -6,7 +6,7 @@ from zhiqiu.clock import FixedClock
 from zhiqiu.materials import combined_hash
 from zhiqiu.quality import label_template
 from zhiqiu.runtime import LearningRuntime
-from zhiqiu.store import Store
+from zhiqiu.store import SCHEMA_VERSION, Store
 
 
 def store_at(tmp_path):
@@ -107,7 +107,7 @@ def test_v10_database_gains_follow_up_and_supplement_columns(tmp_path):
     store.db.execute("PRAGMA user_version=10")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 9)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert "supplement" in {r["name"] for r in reopened.db.execute("PRAGMA table_info(dimension_scores)")}
     assert "followup_of" in {r["name"] for r in reopened.db.execute("PRAGMA table_info(questions)")}
     assert path.with_suffix(".sqlite.pre-v11.bak").exists()

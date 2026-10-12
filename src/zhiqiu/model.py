@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from .context import ModelRequest, _model_budget, _optional_int
+from .search import WEB_SEARCH_DESCRIPTION, WEB_SEARCH_PARAMS
+from .tools import function_schema
 
 
 class ModelContextOverflowError(ValueError):
@@ -175,9 +177,7 @@ class OpenAICompatibleModel:
 
     def search_query(self, point: str, gap: str) -> str | None:
         self.point = point
-        schema = {"type": "function", "function": {"name": "web_search",
-                  "description": "Search the web for reliable material missing from local sources",
-                  "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+        schema = function_schema("web_search", WEB_SEARCH_DESCRIPTION, WEB_SEARCH_PARAMS)
         message = self._chat("本地资料不足。请调用 web_search，查询字符串只包含知识点和缺口，不得包含本地资料原文。",
                              {"knowledge_point": point, "gap": gap}, [schema])
         for call in message.get("tool_calls") or []:

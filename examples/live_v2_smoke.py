@@ -124,7 +124,7 @@ def main(all_model_questions: bool = False) -> dict[str, object]:
                     "last_context_status": last_build["status"] if last_build else None,
                     "question_response_shape": question_shape or None,
                     "llm_calls": store.db.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0],
-                    "web_calls": store.db.execute("SELECT COUNT(*) FROM search_calls").fetchone()[0]}
+                    "web_calls": store.db.execute("SELECT COUNT(*) FROM tool_calls WHERE tool='web_search'").fetchone()[0]}
         finally:
             store.close()
 

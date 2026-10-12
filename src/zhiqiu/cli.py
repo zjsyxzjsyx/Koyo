@@ -571,7 +571,7 @@ def forget(ctx: typer.Context, point: str) -> None:
     kp = store.get_knowledge_point(point)
     if not kp:
         pending = any(store.db.execute(f"SELECT 1 FROM {table} WHERE point=? LIMIT 1", (point,)).fetchone()
-                      for table in ("material_checks", "context_builds", "llm_calls", "search_calls"))
+                      for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls"))
         if not pending:
             raise typer.BadParameter("未知知识点")
         if typer.confirm(f"永久删除 {point} 的未完成资料检查与调用记录？", default=False):

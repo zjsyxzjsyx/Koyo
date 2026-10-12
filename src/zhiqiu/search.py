@@ -4,9 +4,12 @@ import hashlib
 import os
 from typing import Protocol
 
-import httpx
-
 from .materials import Material
+from .tools import ToolError, ToolSpec, post_json
+
+WEB_SEARCH_DESCRIPTION = "Search the web for reliable material missing from local sources"
+WEB_SEARCH_PARAMS = {"type": "object", "additionalProperties": False, "required": ["query"],
+                     "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 600}}}
 
 
 class Search(Protocol):
@@ -14,6 +17,8 @@ class Search(Protocol):
 
 
 class ExaSearch:
+    timeout_s = 30.0
+
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("ZHIQIU_EXA_API_KEY", "") or os.getenv("EXA_API_KEY", "")
         if not self.api_key:
@@ -21,16 +26,12 @@ class ExaSearch:
 
     def search(self, query: str) -> list[Material]:
         if not query.strip() or len(query) > 600:
-            raise ValueError("搜索查询长度无效")
-        with httpx.Client(timeout=30) as client:
-            response = client.post("https://api.exa.ai/search",
-                json={"query": query, "type": "auto", "numResults": 5,
-                      "contents": {"highlights": True}},
-                headers={"x-api-key": self.api_key, "Content-Type": "application/json"})
-            response.raise_for_status()
-            data = response.json()
+            raise ToolError("invalid_args", "搜索查询长度无效")
+        data = post_json("https://api.exa.ai/search",
+                         {"query": query, "type": "auto", "numResults": 5, "contents": {"highlights": True}},
+                         {"x-api-key": self.api_key, "Content-Type": "application/json"}, self.timeout_s)
         result = []
-        for item in data.get("results") or []:
+        for item in (data.get("results") if isinstance(data, dict) else None) or []:
             if not isinstance(item, dict):
                 continue
             url = item.get("url") or ""
@@ -42,3 +43,10 @@ class ExaSearch:
             result.append(Material("web", url, hashlib.sha256(content.encode()).hexdigest(), content,
                                    f"Exa Search: {item.get('title', '')}"))
         return result
+
+
+def web_search_spec(search: Search) -> ToolSpec:
+    """web_search as a registered tool; the same declaration is what the model sees."""
+    return ToolSpec("web_search", WEB_SEARCH_DESCRIPTION, WEB_SEARCH_PARAMS, "network",
+                    lambda args: search.search(args["query"]), source="zhiqiu.search",
+                    timeout_s=getattr(search, "timeout_s", 30.0), max_retries=1, max_output_chars=20_000)

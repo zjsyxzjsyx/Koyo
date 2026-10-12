@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 from zhiqiu.clock import FixedClock
 from zhiqiu.cli import app
-from zhiqiu.store import Store
+from zhiqiu.store import SCHEMA_VERSION, Store
 
 
 def test_v1_migration_keeps_business_state_and_creates_backup(tmp_path):
@@ -43,7 +43,7 @@ def test_v1_migration_keeps_business_state_and_creates_backup(tmp_path):
         db.close()
 
     reopened = Store(path, FixedClock(date(2026, 10, 2)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert reopened.trace("attempt")["review"][0]["total"] == 75
     assert reopened.db.execute("SELECT due_date FROM review_tasks").fetchone()[0] == "2026-10-03"
     assert reopened.db.execute("SELECT difficulty FROM questions").fetchone()[0] == "legacy_unset"
@@ -70,7 +70,7 @@ def test_v9_upgrade_preserves_existing_v2_derived_records(tmp_path):
     store.db.execute("PRAGMA user_version=9")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 2)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert reopened.db.execute("SELECT COUNT(*) FROM material_checks").fetchone()[0] == 1
     assert reopened.db.execute("SELECT COUNT(*) FROM clarification_chunks").fetchone()[0] == 1
     assert reopened.db.execute("SELECT content FROM messages WHERE id=?", (source,)).fetchone()[0] == "先访问根节点"

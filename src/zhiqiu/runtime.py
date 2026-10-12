@@ -12,8 +12,9 @@ from .materials import Material, combined_hash, read_local
 from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
-from .search import Search
+from .search import Search, web_search_spec
 from .store import Store, new_id
+from .tools import ToolExecutor, ToolRegistry, ToolScope
 
 
 def _supplement(grade: dict[str, Any]) -> str:
@@ -43,6 +44,10 @@ class LearningRuntime:
         self.store = store
         self.model = model
         self.search = search
+        self.tools = ToolRegistry()
+        if search is not None:
+            self.tools.register(web_search_spec(search))
+        self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.context = ContextManager(store, model)
         # Grading one over-budget original answer in segments stays off until its
         # human-labelled long-answer samples pass; a user must also ask for it.
@@ -216,12 +221,8 @@ class LearningRuntime:
             # local files to the knowledge point entered by the user.
             proposed_query = self.model.search_query(point, str(assessment.get("gap", "")))
             query = point if materials else proposed_query or point
-            try:
-                web = self.search.search(query)
-            except Exception:
-                self.store.record_search_call(point, query, 0, "error")
-                raise
-            self.store.record_search_call(point, query, len(web), "ok")
+            web = self.executor.run("web_search", {"query": query},
+                                    ToolScope(frozenset({"network"}), point=point)).value
             if not web:
                 raise ValueError("Web 未找到可靠资料；学习未开始")
             gap = str(assessment.get("gap", "")).strip()

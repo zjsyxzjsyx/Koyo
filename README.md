@@ -24,7 +24,8 @@
 │  ├─ memory.py       显式语义记忆、情景摘要与旧讲解摘要
 │  ├─ retrieval.py    旧讲解追问的可解释排序
 │  ├─ materials.py    本地资料读取、范围限制和内容哈希
-│  ├─ search.py       Exa Search 适配器
+│  ├─ search.py       Exa Search 适配器与 web_search 工具声明
+│  ├─ tools.py        工具声明、注册、参数校验、执行闸门、重试、截断与审计
 │  ├─ quality.py      人工标注模板与评分质量检查
 │  ├─ diagnostics.py  模型联通、预算与窗口容量检查
 │  ├─ local_env.py    读取项目根目录的 .env
@@ -46,7 +47,8 @@ flowchart LR
     CTX --> ST
     RT --> MOD[模型适配 model.py]
     RT --> MAT[本地资料 materials.py]
-    RT --> WEB[搜索适配 search.py]
+    RT --> TOOLS[工具层 tools.py]
+    TOOLS --> WEB[搜索适配 search.py]
     RT --> SCORE[评分校验 scoring.py]
     RT --> ST
     MOD --> LLM[OpenAI 兼容模型服务]
@@ -100,6 +102,16 @@ flowchart TD
 程序拒绝以下评分并让模型重评，校验失败的原因会反馈给重试：同一维度出现多项、漏评或重评某道题、引文不在原答中、未答题带有证据、分数不在 0–4。重试仍未通过则进入 `awaiting_review`。
 
 原答本身超预算时，尝试进入 `awaiting_review`，原答保留。可用 `submit-final` 另存一份精简的评分答案，再用 `resume` 继续。评原答的分段路径（`resume ATTEMPT_ID --grade-original`）把原答按段落、句子边界切成无重叠且覆盖全文的片段，逐段提取正确点、错误点、未决点与短引文，进度按尝试、答案、内容哈希、规则版本和模型版本缓存，汇总时检查跨片矛盾。该路径默认关闭，需设置 `ZHIQIU_LONG_ANSWER_SEGMENTS=1`。
+
+## 工具层
+
+工具调用由程序决定在哪一步发生，模型最多提出参数。每个工具用 `ToolSpec` 声明名称、参数（JSON Schema 子集，必须 `additionalProperties=false`）、权限类别（`read`、`network`、`write_file`、`external_mcp`）、超时、重试次数和输出上限；同名工具重复注册直接报错，并写明两边的来源。模型看到的函数声明由同一份声明生成。
+
+所有调用经过 `ToolExecutor.run`，顺序为：查找 → 参数校验（只校验、不纠正，失败不执行）→ 闸门（本步骤未允许该权限类别时拒绝；需要确认的工具在缺少确认回调、回调出错或用户拒绝时一律拒绝）→ 执行 → 截断输出 → 审计。失败用固定的错误类型表示：`invalid_args`、`denied`、`timeout`、`network`、`rate_limited`、`upstream`、`not_found`、`internal`；只有 `network`、`timeout`、`rate_limited` 按指数退避重试。网络请求流式读取响应，每读一块检查一次总时限，超时即中断。
+
+每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
+
+目前注册的工具只有 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次）；有本地资料时，搜索查询仍固定为知识点名称。
 
 ## 记忆与跨天追问
 
@@ -173,7 +185,7 @@ uv run zhiqiu --db .\state.sqlite evaluate --labels .\human-labels.json
 uv run --python 3.12 --extra test python -m pytest -q
 ```
 
-测试覆盖迁移与回滚、会话恢复、幂等任务、只读提醒、上下文预算与审计、记忆失效、多题评分与证据校验、待评阅恢复、长答分段、旧讲解排序和诊断逻辑；均使用脚本化模型，不需要密钥。
+测试覆盖迁移与回滚、会话恢复、幂等任务、只读提醒、上下文预算与审计、记忆失效、多题评分与证据校验、待评阅恢复、长答分段、旧讲解排序、工具层（校验、闸门、重试、总时限、审计）和诊断逻辑；均使用脚本化模型，不需要密钥。
 
 模型联通、预算与窗口容量用 `check-model` 检查，只发送公开合成文本，不输出密钥、请求正文或模型答复：
 
@@ -192,7 +204,7 @@ uv run zhiqiu check-model --capacity
 Remove-Item Env:ZHIQIU_MODEL_BUDGETS
 ```
 
-真实服务的端到端检查（使用临时数据库和公开合成资料，不读取个人学习资料）：
+真实服务检查只使用公开合成内容，不读取个人学习资料。`live_smoke.py` 让模型发出一次 `web_search` 工具调用，再经工具层调用 Exa，不打开数据库；`live_v2_smoke.py` 在临时数据库中跑完整学习流程：
 
 ```powershell
 uv run --python 3.12 python examples/live_smoke.py

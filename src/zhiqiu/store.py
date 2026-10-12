@@ -17,7 +17,7 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def new_id() -> str:
@@ -73,6 +73,7 @@ class Store:
             "llm_calls": """SELECT id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,
                 tokens_in,tokens_out,status,created_at FROM llm_calls""",
             "search_calls": "SELECT id,point,query,result_count,status,created_at FROM search_calls",
+            "tool_calls": "SELECT * FROM tool_calls",
             "metrics": "SELECT * FROM metrics",
             "sessions": "SELECT * FROM sessions",
             "messages": "SELECT * FROM messages",
@@ -429,6 +430,17 @@ class Store:
                     result_json TEXT NOT NULL, created_at TEXT NOT NULL,
                     UNIQUE(attempt_id,answer_id,answer_hash,start_char,end_char,model_version,rubric_version))""")
                 self.db.execute("PRAGMA user_version=12")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 13:
+            with self.transaction():
+                # One audit row per tool call; search_calls stays as read-only history.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS tool_calls (
+                    id TEXT PRIMARY KEY, tool TEXT NOT NULL, source TEXT, permission TEXT,
+                    kp_id TEXT, attempt_id TEXT, session_id TEXT, point TEXT NOT NULL DEFAULT '',
+                    loop_id TEXT, round INTEGER, args_summary_json TEXT, confirmed INTEGER,
+                    status TEXT NOT NULL, error_kind TEXT, attempts INTEGER NOT NULL,
+                    latency_ms INTEGER NOT NULL, result_count INTEGER, output_chars INTEGER NOT NULL,
+                    truncated INTEGER NOT NULL, created_at TEXT NOT NULL)""")
+                self.db.execute("PRAGMA user_version=13")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -679,11 +691,21 @@ class Store:
                     self.db.execute("UPDATE context_builds SET budget_json=? WHERE id=?",
                                     (json.dumps(budget), build_id))
 
-    def record_search_call(self, point: str, query: str, result_count: int, status: str) -> None:
+    def record_tool_call(self, details: dict[str, Any]) -> None:
+        confirmed = details.get("confirmed")
         with self.transaction():
-            self.db.execute("""INSERT INTO search_calls
-                (id,point,query,result_count,status,created_at) VALUES(?,?,?,?,?,?)""",
-                            (new_id(), point, query, result_count, status, self._ts()))
+            self.db.execute("""INSERT INTO tool_calls
+                (id,tool,source,permission,kp_id,attempt_id,session_id,point,loop_id,round,args_summary_json,
+                 confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,truncated,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (details["id"], details["tool"], details.get("source"), details.get("permission"),
+                 details.get("kp_id"), details.get("attempt_id"), details.get("session_id"),
+                 details.get("point") or "", details.get("loop_id"), details.get("round"),
+                 json.dumps(details.get("args_summary"), ensure_ascii=False),
+                 None if confirmed is None else int(bool(confirmed)), details["status"],
+                 details.get("error_kind"), details["attempts"], details["latency_ms"],
+                 details.get("result_count"), details["output_chars"], int(bool(details.get("truncated"))),
+                 self._ts()))
 
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
@@ -1090,6 +1112,9 @@ class Store:
                     JOIN reviews r ON r.id=t.review_id WHERE r.attempt_id=?""", (attempt_id,))],
                 "events": [dict(r) for r in self.db.execute("SELECT * FROM events WHERE attempt_id=? ORDER BY id", (attempt_id,))],
                 "llm_calls": [dict(r) for r in self.db.execute("SELECT * FROM llm_calls WHERE attempt_id=? ORDER BY created_at", (attempt_id,))],
+                "tool_calls": [dict(r) for r in self.db.execute("""SELECT c.* FROM tool_calls c, attempts a
+                    JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=? AND (c.attempt_id=a.id
+                    OR (c.attempt_id IS NULL AND (c.kp_id=a.kp_id OR c.point=k.title))) ORDER BY c.rowid""", (attempt_id,))],
                 "context_builds": [dict(r) for r in self.db.execute("SELECT * FROM context_builds WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
                 "clarification_chunks": [dict(r) for r in self.db.execute("""SELECT c.* FROM clarification_chunks c
                     JOIN attempts a ON a.kp_id=c.kp_id WHERE a.id=? ORDER BY c.rowid""", (attempt_id,))],
@@ -1230,7 +1255,7 @@ class Store:
                   "dimension_scores", "review_question_assessments", "review_evidence", "review_batches",
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
-                  "search_calls", "metrics")
+                  "search_calls", "tool_calls", "metrics")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:
@@ -1243,6 +1268,7 @@ class Store:
             self.db.execute("DELETE FROM receipts WHERE attempt_id IN (SELECT id FROM attempts WHERE kp_id=?)", (kp_id,))
             self.db.execute("DELETE FROM llm_calls WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM search_calls WHERE point=?", (point["title"],))
+            self.db.execute("DELETE FROM tool_calls WHERE kp_id=? OR point=?", (kp_id, point["title"]))
             self.db.execute("DELETE FROM context_builds WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM material_checks WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM knowledge_points WHERE id=?", (kp_id,))
@@ -1253,7 +1279,7 @@ class Store:
             raise ValueError("knowledge point exists; use forget")
         with self.transaction():
             count = sum(self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE point=?", (point,)).fetchone()[0]
-                        for table in ("material_checks", "context_builds", "llm_calls", "search_calls"))
-            for table in ("material_checks", "context_builds", "llm_calls", "search_calls"):
+                        for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls"))
+            for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls"):
                 self.db.execute(f"DELETE FROM {table} WHERE point=?", (point,))
             return count > 0

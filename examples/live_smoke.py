@@ -1,33 +1,33 @@
-"""Minimal real-provider check using only public, synthetic learning text.
+"""Minimal real-provider check using only a public, synthetic knowledge point.
 
-Run after setting the model variables and ZHIQIU_EXA_API_KEY. This script never reads
-the user's learning files or stores responses in the project database.
+Reads the project .env, asks the model for a web_search tool call, then runs the
+query through the tool layer against Exa. It never reads the user's learning files
+or opens the project database; the full learning flow is covered by live_v2_smoke.py.
 """
 
+from zhiqiu.local_env import load_local_env
 from zhiqiu.model import OpenAICompatibleModel
-from zhiqiu.search import ExaSearch
+from zhiqiu.search import ExaSearch, web_search_spec
+from zhiqiu.tools import ToolExecutor, ToolRegistry, ToolScope
 
 
-def main() -> None:
-    model = OpenAICompatibleModel()
-    search = ExaSearch()
+def main() -> dict[str, object]:
+    load_local_env()
     point = "二叉树中序遍历"
-    source = [{"kind": "local", "source": "synthetic-public-example",
-               "content_hash": "synthetic-public-example",
-               "content": "二叉树中序遍历按左子树、根节点、右子树的顺序访问节点。",
-               "reason": "公开合成测试文本"}]
-    assessment = model.assess(point, source)
-    if not isinstance(assessment.get("sufficient"), bool):
-        raise RuntimeError("模型资料充分性响应缺少布尔值")
-    lesson = model.teach(point, source)
-    if not isinstance(lesson.get("lesson"), str) or not lesson["lesson"].strip():
-        raise RuntimeError("模型教学响应缺少 lesson")
+    model = OpenAICompatibleModel()
     proposed_query = model.search_query(point, "定义与应用")
-    query = proposed_query or point
-    web = search.search(query)
-    print({"model_assessment": "ok", "model_lesson": "ok",
-           "model_tool_query": bool(proposed_query), "exa_sources": len(web)})
+    registry = ToolRegistry()
+    registry.register(web_search_spec(ExaSearch()))
+    audits: list[dict[str, object]] = []
+    web = ToolExecutor(registry, audits.append).run(
+        "web_search", {"query": proposed_query or point}, ToolScope(frozenset({"network"}), point=point)).value
+    if not web or not all(item.source.startswith("https://") for item in web):
+        raise RuntimeError("Exa 未返回可用的 https 资料")
+    audit = audits[-1]
+    return {"model_tool_query": bool(proposed_query), "exa_sources": len(web),
+            "status": audit["status"], "attempts": audit["attempts"], "latency_ms": audit["latency_ms"],
+            "output_chars": audit["output_chars"], "truncated": audit["truncated"]}
 
 
 if __name__ == "__main__":
-    main()
+    print(main())

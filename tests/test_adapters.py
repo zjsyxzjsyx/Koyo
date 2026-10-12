@@ -43,9 +43,37 @@ class FakeClient:
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
 
 
+class FakeStream:
+    def __init__(self, body, status_code=200):
+        self.status_code = status_code
+        self.chunks = [json.dumps(body, ensure_ascii=False).encode()]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def iter_bytes(self):
+        yield from self.chunks
+
+
+class FakeStreamClient(FakeClient):
+    def stream(self, method, url, **kwargs):
+        self.requests.append((method, url, kwargs))
+        return FakeStream(self.post(url, **kwargs).body)
+
+    def post(self, url, **kwargs):
+        return FakeClient.post(self, url, **kwargs) if url != "https://api.exa.ai/search" else FakeResponse(
+            {"results": [
+                {"url": "https://example.org/page", "title": "原理", "highlights": ["具体解释", "示例"]},
+                {"url": "https://example.org/fallback", "title": "补充", "highlights": None, "text": "可用原文"},
+                {"url": "http://example.org/insecure", "highlights": ["不采纳"]}]})
+
+
 def test_exa_search_contract(monkeypatch):
     FakeClient.requests = []
-    monkeypatch.setattr("zhiqiu.search.httpx.Client", FakeClient)
+    monkeypatch.setattr("zhiqiu.tools.httpx.Client", FakeStreamClient)
     result = ExaSearch(api_key="test-key").search("二叉树遍历")
     assert len(result) == 2
     assert result[0].source == "https://example.org/page"
