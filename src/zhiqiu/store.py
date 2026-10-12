@@ -12,6 +12,7 @@ from typing import Any, Iterator
 
 from fsrs import Card, Rating, Scheduler
 
+from . import queries
 from .clock import Clock
 from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assessments_for, calculate,
                       rating_for)
@@ -53,7 +54,7 @@ class Store:
 
     @staticmethod
     def _business_snapshot(db: sqlite3.Connection) -> dict[str, tuple[tuple[Any, ...], ...]]:
-        queries = {
+        snapshot_sql = {
             "knowledge_points": "SELECT id,title,parent_id,state,difficulty_streak,created_at FROM knowledge_points",
             "materials": "SELECT * FROM materials",
             "attempts": "SELECT * FROM attempts",
@@ -95,7 +96,7 @@ class Store:
         }
         existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         return {table: tuple(sorted((tuple(row) for row in db.execute(query)), key=repr))
-                for table, query in queries.items() if table in existing}
+                for table, query in snapshot_sql.items() if table in existing}
 
     def _migrate_existing(self, version: int) -> None:
         # SQLite backup makes a consistent snapshot even when a previous process
@@ -869,13 +870,7 @@ class Store:
             return answer_id
 
     def qa_for(self, attempt_id: str) -> list[sqlite3.Row]:
-        return self.db.execute("""SELECT q.id question_id,q.seq,q.dimension,q.text question,
-            q.difficulty,q.difficulty_basis,q.rubric_version,q.followup_of,
-            a.id answer_id,a.text answer,
-            (SELECT id FROM scoring_submissions s WHERE s.answer_id=a.id ORDER BY rowid DESC LIMIT 1) scoring_submission_id,
-            (SELECT text FROM scoring_submissions s WHERE s.answer_id=a.id ORDER BY rowid DESC LIMIT 1) scoring_text
-            FROM questions q LEFT JOIN answers a ON a.question_id=q.id
-            WHERE q.attempt_id=? ORDER BY q.seq""", (attempt_id,)).fetchall()
+        return queries.qa_for(self.db, attempt_id)
 
     def mark_awaiting_review(self, attempt_id: str, detail: str) -> dict[str, Any]:
         with self.transaction():
@@ -1076,52 +1071,13 @@ class Store:
         return output
 
     def due_tasks(self) -> list[sqlite3.Row]:
-        return self.db.execute("""SELECT t.*,k.title FROM review_tasks t JOIN knowledge_points k ON k.id=t.kp_id
-            WHERE k.state='active' AND t.state IN ('pending','started') AND t.next_remind_date<=?
-            ORDER BY t.original_due_date,t.created_at,t.kp_id""", (self.clock.today().isoformat(),)).fetchall()
+        return queries.due_tasks(self.db, self.clock.today().isoformat())
 
     def status(self) -> dict[str, Any]:
-        return {"due": [dict(row) for row in self.due_tasks()],
-                "open_attempts": [dict(r) for r in self.db.execute("""SELECT a.*,k.title FROM attempts a
-                    JOIN knowledge_points k ON k.id=a.kp_id WHERE a.state IN
-                    ('in_progress','paused','awaiting_review','needs_self_test') ORDER BY a.started_at""")],
-                "needs_relearn": [dict(r) for r in self.db.execute("SELECT id,title FROM knowledge_points WHERE state='needs_relearn' ORDER BY title")]}
+        return queries.status(self.db, self.clock.today().isoformat())
 
     def trace(self, attempt_id: str) -> dict[str, Any]:
-        attempt = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-        if not attempt:
-            raise ValueError("unknown attempt")
-        return {"attempt": dict(attempt), "questions": [dict(r) for r in self.qa_for(attempt_id)],
-                "sessions": [dict(r) for r in self.db.execute("SELECT * FROM sessions WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
-                "messages": [dict(r) for r in self.db.execute("""SELECT m.* FROM messages m
-                    JOIN sessions s ON s.id=m.session_id WHERE s.attempt_id=? ORDER BY s.rowid,m.rowid""", (attempt_id,))],
-                "message_materials": [dict(r) for r in self.db.execute("""SELECT mm.* FROM message_materials mm
-                    JOIN messages m ON m.id=mm.message_id JOIN sessions s ON s.id=m.session_id
-                    WHERE s.attempt_id=? ORDER BY m.rowid""", (attempt_id,))],
-                "review": [dict(r) for r in self.db.execute("SELECT * FROM reviews WHERE attempt_id=?", (attempt_id,))],
-                "dimension_scores": [dict(r) for r in self.db.execute("""SELECT d.* FROM dimension_scores d
-                    JOIN reviews r ON r.id=d.review_id WHERE r.attempt_id=?
-                    ORDER BY CASE d.dimension WHEN 'concept' THEN 1 WHEN 'mechanism' THEN 2 ELSE 3 END""", (attempt_id,))],
-                "question_assessments": [dict(r) for r in self.db.execute("""SELECT qa.* FROM review_question_assessments qa
-                    JOIN reviews r ON r.id=qa.review_id WHERE r.attempt_id=? ORDER BY qa.rowid""", (attempt_id,))],
-                "review_evidence": [dict(r) for r in self.db.execute("""SELECT e.* FROM review_evidence e
-                    JOIN reviews r ON r.id=e.review_id WHERE r.attempt_id=? ORDER BY e.rowid""", (attempt_id,))],
-                "review_batches": [dict(r) for r in self.db.execute("SELECT * FROM review_batches WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
-                "answer_segments": [dict(r) for r in self.db.execute("SELECT * FROM answer_segments WHERE attempt_id=? ORDER BY start_char", (attempt_id,))],
-                "tasks": [dict(r) for r in self.db.execute("""SELECT t.* FROM review_tasks t
-                    JOIN reviews r ON r.id=t.review_id WHERE r.attempt_id=?""", (attempt_id,))],
-                "events": [dict(r) for r in self.db.execute("SELECT * FROM events WHERE attempt_id=? ORDER BY id", (attempt_id,))],
-                "llm_calls": [dict(r) for r in self.db.execute("SELECT * FROM llm_calls WHERE attempt_id=? ORDER BY created_at", (attempt_id,))],
-                "tool_calls": [dict(r) for r in self.db.execute("""SELECT c.* FROM tool_calls c, attempts a
-                    JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=? AND (c.attempt_id=a.id
-                    OR (c.attempt_id IS NULL AND (c.kp_id=a.kp_id OR c.point=k.title))) ORDER BY c.rowid""", (attempt_id,))],
-                "context_builds": [dict(r) for r in self.db.execute("SELECT * FROM context_builds WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
-                "clarification_chunks": [dict(r) for r in self.db.execute("""SELECT c.* FROM clarification_chunks c
-                    JOIN attempts a ON a.kp_id=c.kp_id WHERE a.id=? ORDER BY c.rowid""", (attempt_id,))],
-                "episodic_memories": [dict(r) for r in self.db.execute("SELECT * FROM episodic_memories WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
-                "generation_jobs": [dict(r) for r in self.db.execute("""SELECT j.* FROM generation_jobs j
-                    JOIN reviews r ON r.id=j.source_id WHERE j.kind='episode' AND r.attempt_id=? ORDER BY j.rowid""",
-                    (attempt_id,))]}
+        return queries.trace(self.db, attempt_id)
 
     def add_note(self, kp_id: str, kind: str, text: str, explanation: str = "",
                  attempt_id: str | None = None, source_message_id: str | None = None) -> str:

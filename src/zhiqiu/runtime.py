@@ -13,6 +13,7 @@ from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
 from .files import read_file_spec, write_file_spec
+from .queries import query_tool_specs
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
 from .toolloop import LoopResult, ToolLoop, query_leak_check
@@ -57,6 +58,8 @@ class LearningRuntime:
         self.tools.register(read_file_spec(lambda: self._readable))
         if write_roots:
             self.tools.register(write_file_spec(list(write_roots)))
+        for spec in query_tool_specs(lambda query: query(store.db), lambda: store.clock.today().isoformat()):
+            self.tools.register(spec)
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.max_tool_rounds = 5
         self.last_loop: LoopResult | None = None

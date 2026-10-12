@@ -139,7 +139,7 @@ def test_learning_clarification_can_read_and_write_with_confirmation(tmp_path):
     rows = [tuple(r) for r in store.db.execute("SELECT tool,status,confirmed,round FROM tool_calls ORDER BY rowid")]
     assert rows == [("read_file", "ok", None, 1), ("write_file", "ok", 1, 2)]
     stage, messages, tools = model.seen[-1]
-    assert stage == "clarify" and {t["function"]["name"] for t in tools} == {"read_file", "write_file"}
+    assert stage == "clarify" and {t["function"]["name"] for t in tools} == {"read_file", "write_file"} | {"zhiqiu_status", "zhiqiu_due", "zhiqiu_knowledge_point", "zhiqiu_trace"}
     assert store.db.execute("SELECT explanation FROM notes WHERE kind='clarification'").fetchone()[0] == "已整理并写入笔记"
 
 

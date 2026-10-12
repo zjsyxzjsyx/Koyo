@@ -68,7 +68,8 @@ def test_model_can_search_several_times_before_teaching(tmp_path):
     assert [row["round"] for row in rows] == [1, 2, 3]
     assert len({row["loop_id"] for row in rows}) == 1 and rows[0]["loop_id"] == service.last_loop.loop_id
     stage, messages, tools = model.seen[-1]
-    assert stage == "gather" and tools == service.tools.openai_schema(["read_file", "web_search"])
+    assert stage == "gather" and tools == service.tools.openai_schema(
+        ["read_file", "web_search", "zhiqiu_due", "zhiqiu_knowledge_point", "zhiqiu_status", "zhiqiu_trace"])
     tool_messages = [m for m in messages if m["role"] == "tool"]
     assert len(tool_messages) == 3 and "可靠解释" in tool_messages[0]["content"]
     assert len(store.materials_for(kp)) == 4
