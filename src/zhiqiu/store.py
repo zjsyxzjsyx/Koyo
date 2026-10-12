@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -11,7 +13,11 @@ from typing import Any, Iterator
 from fsrs import Card, Rating, Scheduler
 
 from .clock import Clock
-from .scoring import DimensionGrade, calculate, rating_for
+from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assessments_for, calculate,
+                      rating_for)
+
+# Opening an older file migrates a backed-up copy first, then swaps it in.
+SCHEMA_VERSION = 12
 
 
 def new_id() -> str:
@@ -21,7 +27,7 @@ def new_id() -> str:
 class Store:
     """The authority for learning state. Every state change is one SQLite transaction."""
 
-    def __init__(self, path: Path, clock: Clock | None = None):
+    def __init__(self, path: Path, clock: Clock | None = None, *, _shadow: bool = False):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or Clock()
@@ -29,10 +35,108 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA busy_timeout=10000")
-        self._migrate()
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        existing = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_points'"
+        ).fetchone() is not None
+        try:
+            if existing and version < SCHEMA_VERSION and not _shadow:
+                self._migrate_existing(version)
+            else:
+                self._migrate()
+        except BaseException:
+            self.db.close()
+            raise
 
     def close(self) -> None:
         self.db.close()
+
+    @staticmethod
+    def _business_snapshot(db: sqlite3.Connection) -> dict[str, tuple[tuple[Any, ...], ...]]:
+        queries = {
+            "knowledge_points": "SELECT id,title,parent_id,state,difficulty_streak,created_at FROM knowledge_points",
+            "materials": "SELECT * FROM materials",
+            "attempts": "SELECT * FROM attempts",
+            "questions": "SELECT id,attempt_id,seq,dimension,text,asked_at FROM questions",
+            "answers": "SELECT * FROM answers",
+            "reviews": "SELECT * FROM reviews",
+            "dimension_scores": "SELECT review_id,dimension,score,rationale FROM dimension_scores",
+            "review_revisions": "SELECT * FROM review_revisions",
+            "fsrs_cycles": "SELECT * FROM fsrs_cycles",
+            "fsrs_logs": "SELECT * FROM fsrs_logs",
+            "review_tasks": "SELECT * FROM review_tasks",
+            "attempt_tasks": "SELECT * FROM attempt_tasks",
+            "notes": "SELECT * FROM notes",
+            "consents": "SELECT * FROM consents",
+            "receipts": "SELECT * FROM receipts",
+            "events": "SELECT * FROM events",
+            "llm_calls": """SELECT id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,
+                tokens_in,tokens_out,status,created_at FROM llm_calls""",
+            "search_calls": "SELECT id,point,query,result_count,status,created_at FROM search_calls",
+            "metrics": "SELECT * FROM metrics",
+            "sessions": "SELECT * FROM sessions",
+            "messages": "SELECT * FROM messages",
+            "message_materials": "SELECT * FROM message_materials",
+            "scoring_submissions": "SELECT * FROM scoring_submissions",
+            "review_question_assessments": "SELECT * FROM review_question_assessments",
+            "review_evidence": "SELECT * FROM review_evidence",
+            "summaries": "SELECT * FROM summaries",
+            "semantic_memories": "SELECT * FROM semantic_memories",
+            "episodic_memories": "SELECT * FROM episodic_memories",
+            "generation_jobs": "SELECT * FROM generation_jobs",
+            "cross_day_queries": "SELECT * FROM cross_day_queries",
+            "review_batches": "SELECT * FROM review_batches",
+            "answer_segments": "SELECT * FROM answer_segments",
+            "material_checks": "SELECT * FROM material_checks",
+            "clarification_chunks": "SELECT * FROM clarification_chunks",
+            "context_builds": """SELECT id,kp_id,session_id,attempt_id,stage,template_version,
+                source_ids_json,excluded_json,budget_json,status,created_at FROM context_builds""",
+        }
+        existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {table: tuple(sorted((tuple(row) for row in db.execute(query)), key=repr))
+                for table, query in queries.items() if table in existing}
+
+    def _migrate_existing(self, version: int) -> None:
+        # SQLite backup makes a consistent snapshot even when a previous process
+        # did not exit cleanly. Migrate the copy and swap only after comparison.
+        mode = self.db.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        if mode != "delete":
+            raise RuntimeError("database journal must be closed before migration")
+        before = self._business_snapshot(self.db)
+        backup = self.path.with_suffix(self.path.suffix +
+                                       (f".pre-v{max(2, version + 1)}.bak"))
+        if backup.exists():
+            backup = backup.with_name(f"{backup.name}.{new_id()}")
+        temporary_backup = backup.with_name(f"{backup.name}.{new_id()}.tmp")
+        working = self.path.with_name(f"{self.path.name}.{new_id()}.migrating")
+        try:
+            for target_path in (temporary_backup, working):
+                target = sqlite3.connect(target_path)
+                try:
+                    self.db.backup(target)
+                finally:
+                    target.close()
+            os.replace(temporary_backup, backup)
+            shadow = Store(working, self.clock, _shadow=True)
+            try:
+                if shadow.db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise sqlite3.IntegrityError("migrated copy failed integrity check")
+                if shadow.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("migrated copy failed foreign key check")
+                after = self._business_snapshot(shadow.db)
+                if any(after.get(table) != rows for table, rows in before.items()):
+                    raise sqlite3.IntegrityError("migration changed V1 scores or business state")
+            finally:
+                shadow.close()
+            self.db.close()
+            os.replace(working, self.path)
+            self.db = sqlite3.connect(self.path, isolation_level=None, timeout=10)
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.execute("PRAGMA busy_timeout=10000")
+        finally:
+            temporary_backup.unlink(missing_ok=True)
+            working.unlink(missing_ok=True)
 
     def _migrate(self) -> None:
         self.db.executescript("""
@@ -116,6 +220,215 @@ class Store:
             result_count INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS metrics (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
         """)
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    attempt_id TEXT REFERENCES attempts(id) ON DELETE CASCADE,
+                    session_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL)""")
+                self.db.execute("CREATE INDEX sessions_lookup ON sessions(kp_id, session_date, attempt_id)")
+                self.db.execute("""CREATE TABLE messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    attempt_id TEXT REFERENCES attempts(id) ON DELETE CASCADE,
+                    question_id TEXT REFERENCES questions(id) ON DELETE CASCADE,
+                    answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE,
+                    note_id TEXT REFERENCES notes(id) ON DELETE CASCADE,
+                    source_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL)""")
+                self.db.execute("CREATE INDEX messages_session_order ON messages(session_id, created_at)")
+                self.db.execute("CREATE UNIQUE INDEX messages_question_once ON messages(question_id) WHERE question_id IS NOT NULL")
+                self.db.execute("CREATE UNIQUE INDEX messages_answer_once ON messages(answer_id) WHERE answer_id IS NOT NULL")
+                self.db.execute("""CREATE TABLE message_materials (
+                    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    material_id TEXT NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+                    PRIMARY KEY(message_id, material_id))""")
+                if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("foreign key check failed during migration")
+                self.db.execute("PRAGMA user_version=2")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
+            with self.transaction():
+                self.db.execute("ALTER TABLE questions ADD COLUMN difficulty TEXT NOT NULL DEFAULT 'legacy_unset'")
+                self.db.execute("ALTER TABLE questions ADD COLUMN difficulty_basis TEXT NOT NULL DEFAULT ''")
+                self.db.execute("ALTER TABLE questions ADD COLUMN rubric_version TEXT NOT NULL DEFAULT 'v1'")
+                self.db.execute("""CREATE TRIGGER questions_difficulty_fixed
+                    BEFORE UPDATE OF difficulty,difficulty_basis,rubric_version ON questions
+                    BEGIN SELECT RAISE(ABORT, 'question difficulty is fixed after creation'); END""")
+                self.db.execute("ALTER TABLE dimension_scores RENAME TO dimension_scores_legacy")
+                self.db.execute("""CREATE TABLE dimension_scores (
+                    review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                    dimension TEXT NOT NULL,
+                    score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 4),
+                    rationale TEXT NOT NULL,
+                    rubric_version TEXT NOT NULL,
+                    PRIMARY KEY(review_id, dimension))""")
+                self.db.execute("""CREATE TABLE scoring_submissions (
+                    id TEXT PRIMARY KEY,
+                    answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL)""")
+                self.db.execute("""CREATE TABLE review_question_assessments (
+                    review_id TEXT NOT NULL,
+                    dimension TEXT NOT NULL,
+                    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+                    answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE,
+                    submission_id TEXT REFERENCES scoring_submissions(id) ON DELETE SET NULL,
+                    judgment TEXT NOT NULL,
+                    PRIMARY KEY(review_id, dimension, question_id),
+                    FOREIGN KEY(review_id, dimension) REFERENCES dimension_scores(review_id, dimension) ON DELETE CASCADE)""")
+                self.db.execute("""CREATE TABLE review_evidence (
+                    id TEXT PRIMARY KEY,
+                    review_id TEXT NOT NULL,
+                    dimension TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    quote TEXT NOT NULL,
+                    start_char INTEGER NOT NULL,
+                    end_char INTEGER NOT NULL,
+                    FOREIGN KEY(review_id, dimension, question_id)
+                        REFERENCES review_question_assessments(review_id, dimension, question_id) ON DELETE CASCADE)""")
+                old_scores = self.db.execute("SELECT * FROM dimension_scores_legacy").fetchall()
+                for row in old_scores:
+                    self.db.execute("INSERT INTO dimension_scores VALUES(?,?,?,?,?)",
+                                    (row["review_id"], row["dimension"], row["score"], row["rationale"], "v1"))
+                    self.db.execute("INSERT INTO review_question_assessments VALUES(?,?,?,?,?,?)",
+                                    (row["review_id"], row["dimension"], row["question_id"], row["answer_id"],
+                                     None, "legacy_assessed"))
+                    answer = self.db.execute("SELECT text FROM answers WHERE id=?", (row["answer_id"],)).fetchone()
+                    start = answer[0].find(row["evidence"]) if answer else -1
+                    if start < 0:
+                        raise sqlite3.IntegrityError("legacy score evidence is not in its answer")
+                    self.db.execute("INSERT INTO review_evidence VALUES(?,?,?,?,?,?,?)",
+                                    (new_id(), row["review_id"], row["dimension"], row["question_id"],
+                                     row["evidence"], start, start + len(row["evidence"])))
+                self.db.execute("DROP TABLE dimension_scores_legacy")
+                if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("foreign key check failed during score migration")
+                self.db.execute("PRAGMA user_version=3")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE summaries (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    source_hash TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+                    generator_version TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, UNIQUE(kind,source_message_id,source_hash))""")
+                self.db.execute("""CREATE TABLE semantic_memories (
+                    id TEXT PRIMARY KEY, kp_id TEXT REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    scope_key TEXT NOT NULL, key TEXT NOT NULL, content TEXT NOT NULL,
+                    source TEXT NOT NULL, revision INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+                self.db.execute("CREATE UNIQUE INDEX semantic_active_key ON semantic_memories(scope_key,key) WHERE active=1")
+                self.db.execute("""CREATE TABLE episodic_memories (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+                    review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                    source_hash TEXT NOT NULL, summary TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    generator_version TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(review_id,source_hash))""")
+                self.db.execute("""CREATE TABLE generation_jobs (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL, source_id TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(kind,source_id,source_hash))""")
+                self.db.execute("""CREATE TABLE context_builds (
+                    id TEXT PRIMARY KEY, kp_id TEXT REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+                    attempt_id TEXT REFERENCES attempts(id) ON DELETE CASCADE,
+                    stage TEXT NOT NULL, template_version TEXT NOT NULL,
+                    source_ids_json TEXT NOT NULL, excluded_json TEXT NOT NULL,
+                    budget_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)""")
+                self.db.execute("""CREATE TRIGGER scoring_submissions_immutable
+                    BEFORE UPDATE ON scoring_submissions
+                    BEGIN SELECT RAISE(ABORT, 'scoring submission is immutable'); END""")
+                self.db.execute("ALTER TABLE llm_calls ADD COLUMN context_build_id TEXT")
+                self.db.execute("ALTER TABLE llm_calls ADD COLUMN stage TEXT")
+                self.db.execute("ALTER TABLE llm_calls ADD COLUMN session_id TEXT")
+                self.db.execute("ALTER TABLE search_calls ADD COLUMN kp_id TEXT")
+                self.db.execute("ALTER TABLE search_calls ADD COLUMN session_id TEXT")
+                if self.db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("foreign key check failed during context migration")
+                self.db.execute("PRAGMA user_version=4")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE cross_day_queries (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    candidate_ids_json TEXT NOT NULL, results_json TEXT NOT NULL,
+                    next_index INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+                    synthesis TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(kp_id,question,source_hash))""")
+                self.db.execute("PRAGMA user_version=5")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 6:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE review_batches (
+                    id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+                    dimension TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    question_ids_json TEXT NOT NULL, result_json TEXT NOT NULL,
+                    model_version TEXT NOT NULL, rubric_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(attempt_id,dimension,source_hash))""")
+                self.db.execute("PRAGMA user_version=6")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 7:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE material_checks (
+                    id TEXT PRIMARY KEY, point TEXT NOT NULL, source TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, start_char INTEGER NOT NULL,
+                    end_char INTEGER NOT NULL, model_version TEXT NOT NULL,
+                    template_version TEXT NOT NULL, result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(point,source,content_hash,start_char,end_char,model_version,template_version))""")
+                self.db.execute("PRAGMA user_version=7")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 8:
+            with self.transaction():
+                self.db.execute("ALTER TABLE context_builds ADD COLUMN point TEXT")
+                self.db.execute("""UPDATE context_builds SET point=(SELECT point FROM llm_calls
+                    WHERE context_build_id=context_builds.id LIMIT 1) WHERE kp_id IS NULL""")
+                self.db.execute("PRAGMA user_version=8")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 9:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE clarification_chunks (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    source_id TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    question_hash TEXT NOT NULL, start_char INTEGER NOT NULL, end_char INTEGER NOT NULL,
+                    model_version TEXT NOT NULL, template_version TEXT NOT NULL,
+                    result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(kp_id,source_id,source_hash,question_hash,start_char,end_char,model_version,template_version))""")
+                self.db.execute("PRAGMA user_version=9")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 10:
+            with self.transaction():
+                self.db.execute("""CREATE TABLE synthesis_batches (
+                    id TEXT PRIMARY KEY, kp_id TEXT NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+                    question_hash TEXT NOT NULL, input_hash TEXT NOT NULL,
+                    model_version TEXT NOT NULL, template_version TEXT NOT NULL,
+                    covered_ids_json TEXT NOT NULL, synthesis TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(kp_id,question_hash,input_hash,model_version,template_version))""")
+                self.db.execute("PRAGMA user_version=10")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 11:
+            with self.transaction():
+                # Fresh schemas already carry these columns; only add what an older file lacks.
+                for table, column, ddl in (("dimension_scores", "supplement", "TEXT NOT NULL DEFAULT ''"),
+                                           ("questions", "followup_of", "TEXT")):
+                    if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                self.db.execute("PRAGMA user_version=11")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 12:
+            with self.transaction():
+                # Per-segment extraction progress for one over-budget original answer.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS answer_segments (
+                    id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+                    answer_id TEXT NOT NULL, answer_hash TEXT NOT NULL,
+                    start_char INTEGER NOT NULL, end_char INTEGER NOT NULL,
+                    model_version TEXT NOT NULL, rubric_version TEXT NOT NULL,
+                    result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(attempt_id,answer_id,answer_hash,start_char,end_char,model_version,rubric_version))""")
+                self.db.execute("PRAGMA user_version=12")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -131,20 +444,245 @@ class Store:
     def _ts(self) -> str:
         return self.clock.now().isoformat()
 
+    def _ensure_session(self, kp_id: str, attempt_id: str | None = None) -> str:
+        today = self.clock.today().isoformat()
+        if attempt_id:
+            owner = self.db.execute("SELECT kp_id FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if not owner or owner["kp_id"] != kp_id:
+                raise ValueError("attempt does not belong to knowledge point")
+            row = self.db.execute("""SELECT id FROM sessions WHERE kp_id=? AND session_date=?
+                AND attempt_id=? ORDER BY rowid DESC LIMIT 1""", (kp_id, today, attempt_id)).fetchone()
+            if row:
+                return row["id"]
+            row = self.db.execute("""SELECT id FROM sessions WHERE kp_id=? AND session_date=?
+                AND attempt_id IS NULL ORDER BY rowid DESC LIMIT 1""", (kp_id, today)).fetchone()
+            if row:
+                self.db.execute("UPDATE sessions SET attempt_id=? WHERE id=?", (attempt_id, row["id"]))
+                return row["id"]
+        else:
+            row = self.db.execute("""SELECT id FROM sessions WHERE kp_id=? AND session_date=?
+                AND attempt_id IS NULL ORDER BY rowid DESC LIMIT 1""", (kp_id, today)).fetchone()
+            if row:
+                return row["id"]
+        session_id = new_id()
+        self.db.execute("INSERT INTO sessions VALUES(?,?,?,?,?)",
+                        (session_id, kp_id, attempt_id, today, self._ts()))
+        return session_id
+
+    def _append_message(self, kp_id: str, role: str, kind: str, content: str,
+                        attempt_id: str | None = None, question_id: str | None = None,
+                        answer_id: str | None = None, note_id: str | None = None,
+                        source_message_id: str | None = None) -> str:
+        if source_message_id and not self.db.execute("""SELECT 1 FROM messages m
+                JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND s.kp_id=?""",
+                (source_message_id, kp_id)).fetchone():
+            raise ValueError("source message does not belong to knowledge point")
+        session_id = self._ensure_session(kp_id, attempt_id)
+        message_id = new_id()
+        self.db.execute("""INSERT INTO messages
+            (id,session_id,role,kind,content,attempt_id,question_id,answer_id,note_id,source_message_id,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (message_id, session_id, role, kind, content, attempt_id, question_id,
+             answer_id, note_id, source_message_id, self._ts()))
+        if role == "assistant" and kind in ("lesson", "lesson_resume", "clarification"):
+            self.db.execute("""INSERT INTO message_materials(message_id,material_id)
+                SELECT ?,id FROM materials WHERE kp_id=? AND active=1""", (message_id, kp_id))
+        return message_id
+
+    def record_message(self, kp_id: str, role: str, kind: str, content: str,
+                       attempt_id: str | None = None, source_message_id: str | None = None) -> str:
+        if role not in ("user", "assistant", "tool") or not kind or not content.strip():
+            raise ValueError("invalid message")
+        with self.transaction():
+            return self._append_message(kp_id, role, kind, content.strip(), attempt_id,
+                                        source_message_id=source_message_id)
+
+    def messages_for(self, kp_id: str, session_id: str | None = None) -> list[sqlite3.Row]:
+        if session_id:
+            return self.db.execute("""SELECT m.* FROM messages m JOIN sessions s ON s.id=m.session_id
+                WHERE s.kp_id=? AND s.id=? ORDER BY m.rowid""", (kp_id, session_id)).fetchall()
+        return self.db.execute("""SELECT m.* FROM messages m JOIN sessions s ON s.id=m.session_id
+            WHERE s.kp_id=? ORDER BY s.rowid,m.rowid""", (kp_id,)).fetchall()
+
+    def correct_message(self, kp_id: str, source_message_id: str, correction: str) -> str:
+        if not correction.strip():
+            raise ValueError("correction cannot be empty")
+        with self.transaction():
+            source = self.db.execute("""SELECT m.id,m.kind FROM messages m JOIN sessions s ON s.id=m.session_id
+                WHERE m.id=? AND s.kp_id=?""", (source_message_id, kp_id)).fetchone()
+            if not source or source["kind"] not in ("lesson", "lesson_resume", "clarification"):
+                raise ValueError("source is not a lesson or clarification")
+            message_id = self._append_message(kp_id, "user", "correction", correction.strip(),
+                                              source_message_id=source_message_id)
+            self.db.execute("UPDATE summaries SET active=0 WHERE source_message_id=?", (source_message_id,))
+            self.db.execute("UPDATE generation_jobs SET status='stale',updated_at=? WHERE kind='lesson_summary' AND source_id=? AND status!='stale'",
+                            (self._ts(), source_message_id))
+            return message_id
+
+    def _episode_source_hash(self, review_id: str) -> str:
+        review = self.db.execute("SELECT total,kind,revised_at FROM reviews WHERE id=?", (review_id,)).fetchone()
+        scores = [tuple(row) for row in self.db.execute("""SELECT dimension,score,rationale FROM dimension_scores
+            WHERE review_id=? ORDER BY dimension""", (review_id,))]
+        payload = {"review": tuple(review), "scores": scores}
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    def _queue_episode_job(self, kp_id: str, review_id: str) -> None:
+        source_hash = self._episode_source_hash(review_id)
+        self.db.execute("""INSERT OR IGNORE INTO generation_jobs
+            (id,kp_id,kind,source_id,source_hash,status,created_at,updated_at)
+            VALUES(?,?, 'episode', ?, ?, 'pending', ?, ?)""",
+            (new_id(), kp_id, review_id, source_hash, self._ts(), self._ts()))
+
+    def pending_lessons(self) -> list[sqlite3.Row]:
+        return self.db.execute("""SELECT s.id session_id,s.kp_id,s.session_date,k.title,
+            m.id lesson_message_id,m.content lesson
+            FROM sessions s JOIN knowledge_points k ON k.id=s.kp_id
+            JOIN messages m ON m.id=(SELECT id FROM messages WHERE session_id=s.id
+                AND kind IN ('lesson','lesson_resume') ORDER BY rowid DESC LIMIT 1)
+            WHERE s.attempt_id IS NULL AND NOT EXISTS(
+                SELECT 1 FROM messages closed WHERE closed.session_id=s.id AND closed.kind='lesson_closed')
+            ORDER BY s.rowid DESC""").fetchall()
+
+    def lesson_candidates(self, kp_id: str) -> list[sqlite3.Row]:
+        return self.db.execute("""SELECT m.id message_id,m.content,s.id session_id,s.session_date
+            FROM messages m JOIN sessions s ON s.id=m.session_id
+            WHERE s.kp_id=? AND m.kind='lesson' ORDER BY s.session_date DESC,m.rowid DESC""",
+            (kp_id,)).fetchall()
+
+    def record_lesson_retrieval(self, kp_id: str, question: str, result: dict[str, Any]) -> None:
+        """Keep why an old lesson was chosen or why the user was asked to choose."""
+        with self.transaction():
+            self._event(kp_id, None, "LessonRetrieval", {
+                "question": question, "decision": result["decision"], "selected": result["selected"],
+                "params": result["params"],
+                "ranked": [{key: item[key] for key in ("message_id", "score", "signals", "reason")}
+                           for item in result["ranked"]]})
+
+    def start_cross_day_query(self, kp_id: str, question: str, candidate_ids: list[str]) -> dict[str, Any]:
+        if not question.strip() or not candidate_ids or len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("question and unique lesson candidates are required")
+        with self.transaction():
+            candidates = {row["message_id"]: row for row in self.lesson_candidates(kp_id)}
+            if any(message_id not in candidates for message_id in candidate_ids):
+                raise ValueError("candidate does not belong to this knowledge point")
+            snapshot = []
+            for message_id in candidate_ids:
+                corrections = [tuple(row) for row in self.db.execute("""SELECT id,content FROM messages
+                    WHERE source_message_id=? AND kind='correction' ORDER BY rowid""", (message_id,))]
+                snapshot.append((message_id, candidates[message_id]["content"], corrections))
+            source_hash = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False).encode()).hexdigest()
+            existing = self.db.execute("""SELECT * FROM cross_day_queries WHERE kp_id=? AND question=?
+                AND source_hash=?""", (kp_id, question.strip(), source_hash)).fetchone()
+            if existing:
+                return dict(existing)
+            query_id = new_id()
+            self.db.execute("""INSERT INTO cross_day_queries
+                (id,kp_id,question,source_hash,candidate_ids_json,results_json,next_index,status,
+                 created_at,updated_at) VALUES(?,?,?,?,?,?,0,'pending',?,?)""",
+                (query_id, kp_id, question.strip(), source_hash,
+                 json.dumps(candidate_ids), "[]", self._ts(), self._ts()))
+            return dict(self.db.execute("SELECT * FROM cross_day_queries WHERE id=?", (query_id,)).fetchone())
+
+    def cross_day_query(self, query_id: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT * FROM cross_day_queries WHERE id=?", (query_id,)).fetchone()
+        if not row:
+            raise ValueError("unknown cross-day query")
+        return dict(row)
+
+    def record_cross_day_result(self, query_id: str, message_id: str, explanation: str) -> dict[str, Any]:
+        if not explanation.strip():
+            raise ValueError("explanation is required")
+        with self.transaction():
+            row = self.cross_day_query(query_id)
+            candidates = json.loads(row["candidate_ids_json"])
+            index = row["next_index"]
+            if index >= len(candidates) or candidates[index] != message_id:
+                raise ValueError("result is not the next candidate")
+            results = json.loads(row["results_json"])
+            results.append({"message_id": message_id, "explanation": explanation.strip()})
+            next_index = index + 1
+            status = "synthesis_pending" if next_index == len(candidates) else "pending"
+            self.db.execute("""UPDATE cross_day_queries SET results_json=?,next_index=?,status=?,error='',
+                updated_at=? WHERE id=?""", (json.dumps(results, ensure_ascii=False), next_index,
+                                             status, self._ts(), query_id))
+            return self.cross_day_query(query_id)
+
+    def fail_cross_day_query(self, query_id: str, error: str) -> None:
+        with self.transaction():
+            self.db.execute("UPDATE cross_day_queries SET status='error',error=?,updated_at=? WHERE id=?",
+                            (error, self._ts(), query_id))
+
+    def complete_cross_day_query(self, query_id: str, synthesis: str) -> dict[str, Any]:
+        if not synthesis.strip():
+            raise ValueError("synthesis is required")
+        with self.transaction():
+            row = self.cross_day_query(query_id)
+            if row["next_index"] != len(json.loads(row["candidate_ids_json"])):
+                raise ValueError("not all candidates have been processed")
+            self.db.execute("""UPDATE cross_day_queries SET status='complete',synthesis=?,error='',updated_at=?
+                WHERE id=?""", (synthesis.strip(), self._ts(), query_id))
+            return self.cross_day_query(query_id)
+
+    def resume_lesson(self, session_id: str) -> dict[str, str]:
+        with self.transaction():
+            row = next((item for item in self.pending_lessons() if item["session_id"] == session_id), None)
+            if not row:
+                raise ValueError("no pending lesson with this session id")
+            source_ids = {item[0] for item in self.db.execute(
+                "SELECT material_id FROM message_materials WHERE message_id=?", (row["lesson_message_id"],))}
+            active_ids = {item[0] for item in self.db.execute(
+                "SELECT id FROM materials WHERE kp_id=? AND active=1", (row["kp_id"],))}
+            if source_ids != active_ids:
+                raise ValueError("lesson materials changed; start learn again with current sources")
+            if row["session_date"] == self.clock.today().isoformat():
+                return dict(row)
+            self.db.execute("""INSERT INTO messages
+                (id,session_id,role,kind,content,created_at) VALUES(?,?,?,?,?,?)""",
+                (new_id(), session_id, "tool", "lesson_closed", "continued in a new session", self._ts()))
+            self._append_message(row["kp_id"], "assistant", "lesson_resume", row["lesson"],
+                                 source_message_id=row["lesson_message_id"])
+            return dict(self.pending_lessons()[0])
+
+    def close_lesson(self, session_id: str) -> None:
+        with self.transaction():
+            if not any(item["session_id"] == session_id for item in self.pending_lessons()):
+                raise ValueError("lesson is not pending")
+            self.db.execute("""INSERT INTO messages
+                (id,session_id,role,kind,content,created_at) VALUES(?,?,?,?,?,?)""",
+                (new_id(), session_id, "tool", "lesson_closed", "ended without self-test", self._ts()))
+
     def _event(self, kp_id: str | None, attempt_id: str | None, kind: str, payload: dict[str, Any]) -> None:
         self.db.execute("INSERT INTO events(kp_id,attempt_id,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                         (kp_id, attempt_id, kind, json.dumps(payload, ensure_ascii=False), self._ts()))
 
     def record_llm_call(self, details: dict[str, Any]) -> None:
         with self.transaction():
-            self.db.execute("INSERT INTO llm_calls VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            self.db.execute("""INSERT INTO llm_calls
+                (id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,tokens_in,tokens_out,status,
+                 created_at,context_build_id,stage,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (new_id(), details.get("kp_id"), details.get("attempt_id"), details["point"], details["model"],
                              details["prompt_hash"], details["latency_ms"], details.get("tokens_in"),
-                             details.get("tokens_out"), details["status"], self._ts()))
+                             details.get("tokens_out"), details["status"], self._ts(), details.get("context_build_id"),
+                             details.get("stage"), details.get("session_id")))
+            build_id = details.get("context_build_id")
+            tokens_in = details.get("tokens_in")
+            tokens_out = details.get("tokens_out")
+            if build_id and any(type(value) is int and value >= 0 for value in (tokens_in, tokens_out)):
+                row = self.db.execute("SELECT budget_json FROM context_builds WHERE id=?", (build_id,)).fetchone()
+                if row:
+                    budget = json.loads(row["budget_json"])
+                    if type(tokens_in) is int and tokens_in >= 0:
+                        budget["verified_input_tokens"] = tokens_in
+                    if type(tokens_out) is int and tokens_out >= 0:
+                        budget["verified_output_tokens"] = tokens_out
+                    budget["verified_token_count_source"] = "provider_usage"
+                    self.db.execute("UPDATE context_builds SET budget_json=? WHERE id=?",
+                                    (json.dumps(budget), build_id))
 
     def record_search_call(self, point: str, query: str, result_count: int, status: str) -> None:
         with self.transaction():
-            self.db.execute("INSERT INTO search_calls VALUES(?,?,?,?,?,?)",
+            self.db.execute("""INSERT INTO search_calls
+                (id,point,query,result_count,status,created_at) VALUES(?,?,?,?,?,?)""",
                             (new_id(), point, query, result_count, status, self._ts()))
 
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
@@ -226,6 +764,7 @@ class Store:
             attempt_id = new_id()
             self.db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?)",
                             (attempt_id, kp_id, kind, "in_progress", self.clock.today().isoformat(), self._ts(), None, None))
+            self._ensure_session(kp_id, attempt_id)
             for task_id in task_ids:
                 self.db.execute("INSERT INTO attempt_tasks VALUES(?,?)", (attempt_id, task_id))
                 self.db.execute("UPDATE review_tasks SET state='started',started_at=COALESCE(started_at,?) WHERE id=?",
@@ -243,6 +782,7 @@ class Store:
                 # from older versions so the same attempt can later be assessed.
                 self.db.execute("DELETE FROM receipts WHERE operation_key=?", (f"finalize:{attempt_id}",))
             self.db.execute("UPDATE attempts SET state='in_progress',ended_at=NULL,finish_reason=NULL WHERE id=?", (attempt_id,))
+            self._ensure_session(row["kp_id"], attempt_id)
             self._event(row["kp_id"], attempt_id, "AttemptResumed", {})
 
     def pause(self, attempt_id: str) -> None:
@@ -253,8 +793,11 @@ class Store:
             self.db.execute("UPDATE attempts SET state='paused' WHERE id=?", (attempt_id,))
             self._event(row["kp_id"], attempt_id, "AttemptPaused", {})
 
-    def add_question(self, attempt_id: str, dimension: str, question: str) -> tuple[str, int]:
-        if dimension not in ("concept", "mechanism", "application") or not question.strip():
+    def add_question(self, attempt_id: str, dimension: str, question: str,
+                     difficulty: str = "basic", difficulty_basis: str = "V1-compatible default",
+                     followup_of: str | None = None) -> tuple[str, int]:
+        if (dimension not in ("concept", "mechanism", "application") or not question.strip()
+                or difficulty not in ("basic", "advanced", "transfer") or not difficulty_basis.strip()):
             raise ValueError("invalid question")
         with self.transaction():
             attempt = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
@@ -263,9 +806,23 @@ class Store:
             seq = self.db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM questions WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
             if seq > 8:
                 raise ValueError("question limit reached")
+            if followup_of is not None:
+                # One clarifying follow-up per answered original question, in the same dimension.
+                target = self.db.execute("""SELECT q.dimension,q.followup_of,a.id answer_id FROM questions q
+                    LEFT JOIN answers a ON a.question_id=q.id WHERE q.id=? AND q.attempt_id=?""",
+                    (followup_of, attempt_id)).fetchone()
+                if (not target or target["answer_id"] is None or target["followup_of"] is not None
+                        or target["dimension"] != dimension
+                        or self.db.execute("SELECT 1 FROM questions WHERE followup_of=?", (followup_of,)).fetchone()):
+                    raise ValueError("invalid follow-up question")
             question_id = new_id()
-            self.db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?)",
-                            (question_id, attempt_id, seq, dimension, question.strip(), self._ts()))
+            self.db.execute("""INSERT INTO questions
+                (id,attempt_id,seq,dimension,text,asked_at,difficulty,difficulty_basis,rubric_version,followup_of)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (question_id, attempt_id, seq, dimension, question.strip(), self._ts(),
+                 difficulty, difficulty_basis.strip(), "difficulty-v1", followup_of))
+            self._append_message(attempt["kp_id"], "assistant", "question", question.strip(),
+                                 attempt_id, question_id=question_id)
             self._event(attempt["kp_id"], attempt_id, "QuestionAsked", {"question_id": question_id, "seq": seq})
             return question_id, seq
 
@@ -284,22 +841,62 @@ class Store:
                 return prior["id"]
             answer_id = new_id()
             self.db.execute("INSERT INTO answers VALUES(?,?,?,?)", (answer_id, question_id, answer, self._ts()))
+            self._append_message(question["kp_id"], "user", "answer", answer,
+                                 question["attempt_id"], answer_id=answer_id)
             self._event(question["kp_id"], question["attempt_id"], "AnswerRecorded", {"answer_id": answer_id})
             return answer_id
 
     def qa_for(self, attempt_id: str) -> list[sqlite3.Row]:
         return self.db.execute("""SELECT q.id question_id,q.seq,q.dimension,q.text question,
-            a.id answer_id,a.text answer FROM questions q LEFT JOIN answers a ON a.question_id=q.id
+            q.difficulty,q.difficulty_basis,q.rubric_version,q.followup_of,
+            a.id answer_id,a.text answer,
+            (SELECT id FROM scoring_submissions s WHERE s.answer_id=a.id ORDER BY rowid DESC LIMIT 1) scoring_submission_id,
+            (SELECT text FROM scoring_submissions s WHERE s.answer_id=a.id ORDER BY rowid DESC LIMIT 1) scoring_text
+            FROM questions q LEFT JOIN answers a ON a.question_id=q.id
             WHERE q.attempt_id=? ORDER BY q.seq""", (attempt_id,)).fetchall()
+
+    def mark_awaiting_review(self, attempt_id: str, detail: str) -> dict[str, Any]:
+        with self.transaction():
+            attempt = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+            if not attempt or attempt["state"] not in ("in_progress", "awaiting_review"):
+                raise ValueError("attempt cannot wait for review")
+            if not self.db.execute("""SELECT 1 FROM answers a JOIN questions q ON q.id=a.question_id
+                WHERE q.attempt_id=?""", (attempt_id,)).fetchone():
+                raise ValueError("no answer to review")
+            self.db.execute("UPDATE attempts SET state='awaiting_review' WHERE id=?", (attempt_id,))
+            self._event(attempt["kp_id"], attempt_id, "ReviewDeferred", {"detail": detail})
+            return {"attempt_id": attempt_id, "kind": "awaiting_review", "detail": detail,
+                    "task_id": None, "due_date": None}
+
+    def submit_scoring_answer(self, answer_id: str, text: str) -> str:
+        if not text.strip():
+            raise ValueError("final answer cannot be empty")
+        with self.transaction():
+            row = self.db.execute("""SELECT a.id,q.attempt_id,t.kp_id,t.state FROM answers a
+                JOIN questions q ON q.id=a.question_id JOIN attempts t ON t.id=q.attempt_id
+                WHERE a.id=?""", (answer_id,)).fetchone()
+            if not row or row["state"] != "awaiting_review":
+                raise ValueError("final scoring answer requires an awaiting review attempt")
+            submission_id = new_id()
+            self.db.execute("INSERT INTO scoring_submissions VALUES(?,?,?,?)",
+                            (submission_id, answer_id, text.strip(), self._ts()))
+            self._event(row["kp_id"], row["attempt_id"], "ScoringAnswerSubmitted",
+                        {"answer_id": answer_id, "submission_id": submission_id})
+            return submission_id
 
     def wrong_points_for(self, kp_id: str) -> list[dict[str, Any]]:
         """Read recent low scores with their original question and answer as review focus."""
         return [dict(row) for row in self.db.execute("""SELECT d.review_id,d.dimension,d.score,
-            d.question_id,q.text question,d.answer_id,a.text answer,d.evidence,d.rationale
+            qa.question_id,q.text question,qa.answer_id,COALESCE(s.text,a.text) answer,
+            COALESCE((SELECT quote FROM review_evidence e WHERE e.review_id=qa.review_id
+                AND e.dimension=qa.dimension AND e.question_id=qa.question_id LIMIT 1),'') evidence,
+            d.rationale
             FROM dimension_scores d JOIN reviews r ON r.id=d.review_id
             JOIN attempts t ON t.id=r.attempt_id
-            JOIN questions q ON q.id=d.question_id
-            JOIN answers a ON a.id=d.answer_id
+            JOIN review_question_assessments qa ON qa.review_id=d.review_id AND qa.dimension=d.dimension
+            JOIN questions q ON q.id=qa.question_id
+            JOIN answers a ON a.id=qa.answer_id
+            LEFT JOIN scoring_submissions s ON s.id=qa.submission_id
             WHERE t.kp_id=? AND d.score<=2
             ORDER BY r.created_at DESC,d.rowid DESC LIMIT 10""", (kp_id,))]
 
@@ -336,11 +933,14 @@ class Store:
                     raise RuntimeError("stored task receipt does not match business state")
                 return prior
             attempt = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-            if not attempt or attempt["state"] != "in_progress":
-                raise ValueError("attempt is not in progress")
+            if not attempt or attempt["state"] not in ("in_progress", "awaiting_review"):
+                raise ValueError("attempt is not ready for review")
             qa = self.qa_for(attempt_id)
-            answers = {row["answer_id"]: (row["question_id"], row["answer"]) for row in qa if row["answer_id"]}
-            result = calculate(grades, answers)
+            answers = {row["answer_id"]: (row["question_id"], row["scoring_text"] or row["answer"])
+                       for row in qa if row["answer_id"]}
+            submissions = {row["answer_id"]: row["scoring_submission_id"] for row in qa if row["answer_id"]}
+            questions = {row["question_id"]: (row["dimension"], row["answer_id"]) for row in qa}
+            result = calculate(grades, answers, questions)
             if result.total is None and answers:
                 raise ValueError("answered attempt cannot be closed as zero-answer")
             if reason == "limit" and result.total is not None:
@@ -355,9 +955,20 @@ class Store:
             self.db.execute("INSERT INTO reviews VALUES(?,?,?,?,?,?,?)",
                             (review_id, attempt_id, kind, result.total, rating, now, None))
             for grade in result.dimensions:
-                self.db.execute("INSERT INTO dimension_scores VALUES(?,?,?,?,?,?,?)",
-                                (review_id, grade.dimension, grade.score, grade.question_id,
-                                 grade.answer_id, grade.evidence, grade.rationale))
+                self.db.execute("""INSERT INTO dimension_scores
+                    (review_id,dimension,score,rationale,rubric_version,supplement) VALUES(?,?,?,?,?,?)""",
+                    (review_id, grade.dimension, grade.score, grade.rationale, RUBRIC_VERSION,
+                     grade.supplement))
+                for item in assessments_for(grade):
+                    self.db.execute("INSERT INTO review_question_assessments VALUES(?,?,?,?,?,?)",
+                                    (review_id, grade.dimension, item.question_id, item.answer_id,
+                                     submissions.get(item.answer_id), item.judgment))
+                    for quote in item.evidence:
+                        text = answers[item.answer_id][1]
+                        start = text.find(quote)
+                        self.db.execute("INSERT INTO review_evidence VALUES(?,?,?,?,?,?,?)",
+                                        (new_id(), review_id, grade.dimension, item.question_id,
+                                         quote, start, start + len(quote)))
             if result.complete:
                 cycle = self.db.execute("SELECT * FROM fsrs_cycles WHERE kp_id=? AND closed_at IS NULL ORDER BY started_at DESC LIMIT 1",
                                         (attempt["kp_id"],)).fetchone()
@@ -404,6 +1015,7 @@ class Store:
                 else:
                     self.db.execute("UPDATE knowledge_points SET difficulty_streak=? WHERE id=?", (streak, attempt["kp_id"]))
             self.db.execute("UPDATE attempts SET state='completed',ended_at=?,finish_reason=? WHERE id=?", (now, reason, attempt_id))
+            self._queue_episode_job(attempt["kp_id"], review_id)
             self._event(attempt["kp_id"], attempt_id, "ReviewSaved", {"review_id": review_id, "kind": kind, "total": result.total})
             if task_id:
                 self._event(attempt["kp_id"], attempt_id, "TaskScheduled", {"task_id": task_id, "due_date": due.isoformat()})
@@ -458,22 +1070,45 @@ class Store:
         if not attempt:
             raise ValueError("unknown attempt")
         return {"attempt": dict(attempt), "questions": [dict(r) for r in self.qa_for(attempt_id)],
+                "sessions": [dict(r) for r in self.db.execute("SELECT * FROM sessions WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
+                "messages": [dict(r) for r in self.db.execute("""SELECT m.* FROM messages m
+                    JOIN sessions s ON s.id=m.session_id WHERE s.attempt_id=? ORDER BY s.rowid,m.rowid""", (attempt_id,))],
+                "message_materials": [dict(r) for r in self.db.execute("""SELECT mm.* FROM message_materials mm
+                    JOIN messages m ON m.id=mm.message_id JOIN sessions s ON s.id=m.session_id
+                    WHERE s.attempt_id=? ORDER BY m.rowid""", (attempt_id,))],
                 "review": [dict(r) for r in self.db.execute("SELECT * FROM reviews WHERE attempt_id=?", (attempt_id,))],
                 "dimension_scores": [dict(r) for r in self.db.execute("""SELECT d.* FROM dimension_scores d
                     JOIN reviews r ON r.id=d.review_id WHERE r.attempt_id=?
                     ORDER BY CASE d.dimension WHEN 'concept' THEN 1 WHEN 'mechanism' THEN 2 ELSE 3 END""", (attempt_id,))],
+                "question_assessments": [dict(r) for r in self.db.execute("""SELECT qa.* FROM review_question_assessments qa
+                    JOIN reviews r ON r.id=qa.review_id WHERE r.attempt_id=? ORDER BY qa.rowid""", (attempt_id,))],
+                "review_evidence": [dict(r) for r in self.db.execute("""SELECT e.* FROM review_evidence e
+                    JOIN reviews r ON r.id=e.review_id WHERE r.attempt_id=? ORDER BY e.rowid""", (attempt_id,))],
+                "review_batches": [dict(r) for r in self.db.execute("SELECT * FROM review_batches WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
+                "answer_segments": [dict(r) for r in self.db.execute("SELECT * FROM answer_segments WHERE attempt_id=? ORDER BY start_char", (attempt_id,))],
                 "tasks": [dict(r) for r in self.db.execute("""SELECT t.* FROM review_tasks t
                     JOIN reviews r ON r.id=t.review_id WHERE r.attempt_id=?""", (attempt_id,))],
                 "events": [dict(r) for r in self.db.execute("SELECT * FROM events WHERE attempt_id=? ORDER BY id", (attempt_id,))],
-                "llm_calls": [dict(r) for r in self.db.execute("SELECT * FROM llm_calls WHERE attempt_id=? ORDER BY created_at", (attempt_id,))]}
+                "llm_calls": [dict(r) for r in self.db.execute("SELECT * FROM llm_calls WHERE attempt_id=? ORDER BY created_at", (attempt_id,))],
+                "context_builds": [dict(r) for r in self.db.execute("SELECT * FROM context_builds WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
+                "clarification_chunks": [dict(r) for r in self.db.execute("""SELECT c.* FROM clarification_chunks c
+                    JOIN attempts a ON a.kp_id=c.kp_id WHERE a.id=? ORDER BY c.rowid""", (attempt_id,))],
+                "episodic_memories": [dict(r) for r in self.db.execute("SELECT * FROM episodic_memories WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
+                "generation_jobs": [dict(r) for r in self.db.execute("""SELECT j.* FROM generation_jobs j
+                    JOIN reviews r ON r.id=j.source_id WHERE j.kind='episode' AND r.attempt_id=? ORDER BY j.rowid""",
+                    (attempt_id,))]}
 
-    def add_note(self, kp_id: str, kind: str, text: str, explanation: str = "", attempt_id: str | None = None) -> str:
+    def add_note(self, kp_id: str, kind: str, text: str, explanation: str = "",
+                 attempt_id: str | None = None, source_message_id: str | None = None) -> str:
         if kind not in ("wrong_point", "clarification", "interest") or not text.strip():
             raise ValueError("invalid note")
         with self.transaction():
             note_id = new_id()
             self.db.execute("INSERT INTO notes VALUES(?,?,?,?,?,?,?,?)",
                             (note_id, kp_id, attempt_id, kind, text.strip(), explanation, 0, self._ts()))
+            if kind == "clarification":
+                self._append_message(kp_id, "user", "clarification", text.strip(), attempt_id,
+                                     note_id=note_id, source_message_id=source_message_id)
             self._event(kp_id, attempt_id, "NoteRecorded", {"note_id": note_id, "kind": kind})
             return note_id
 
@@ -485,6 +1120,8 @@ class Store:
             if not note:
                 raise ValueError("unknown clarification note")
             self.db.execute("UPDATE notes SET explanation=? WHERE id=?", (explanation.strip(), note_id))
+            self._append_message(note["kp_id"], "assistant", "clarification", explanation.strip(),
+                                 note["attempt_id"], note_id=note_id)
             self._event(note["kp_id"], note["attempt_id"], "ClarificationExplained", {"note_id": note_id})
 
     def revise(self, review_id: str, dimension: str, score: int, reason: str) -> dict[str, Any]:
@@ -503,14 +1140,29 @@ class Store:
             self.db.execute("UPDATE dimension_scores SET score=? WHERE review_id=? AND dimension=?", (score, review_id, dimension))
             self.db.execute("INSERT INTO review_revisions VALUES(?,?,?,?,?,?,?)",
                             (new_id(), review_id, dimension, grade["score"], score, reason.strip(), now))
-            rows = self.db.execute("""SELECT d.*,a.text answer FROM dimension_scores d
-                JOIN answers a ON a.id=d.answer_id WHERE d.review_id=?""", (review_id,)).fetchall()
-            grades = [DimensionGrade(r["dimension"], r["score"], r["question_id"], r["answer_id"],
-                                     r["evidence"], r["rationale"]) for r in rows]
-            answers = {r["answer_id"]: (r["question_id"], r["answer"]) for r in rows}
-            result = calculate(grades, answers)
+            rows = self.db.execute("SELECT * FROM dimension_scores WHERE review_id=?", (review_id,)).fetchall()
+            grades = []
+            for item in rows:
+                assessed = self.db.execute("""SELECT * FROM review_question_assessments
+                    WHERE review_id=? AND dimension=? ORDER BY rowid""",
+                    (review_id, item["dimension"])).fetchall()
+                assessments = tuple(QuestionAssessment(a["question_id"], a["answer_id"], a["judgment"],
+                    tuple(e["quote"] for e in self.db.execute("""SELECT quote FROM review_evidence
+                        WHERE review_id=? AND dimension=? AND question_id=? ORDER BY rowid""",
+                        (review_id, item["dimension"], a["question_id"])))) for a in assessed)
+                grades.append(DimensionGrade(item["dimension"], item["score"], "", "", "",
+                                             item["rationale"], assessments))
+            qa = self.qa_for(row["attempt_id"])
+            answers = {q["answer_id"]: (q["question_id"], q["scoring_text"] or q["answer"])
+                       for q in qa if q["answer_id"]}
+            questions = {q["question_id"]: (q["dimension"], q["answer_id"]) for q in qa}
+            result = calculate(grades, answers, None if any(item["rubric_version"] == "v1" for item in rows) else questions)
             rating = rating_for(result.total) if row["kind"] == "complete" else None
             self.db.execute("UPDATE reviews SET total=?,rating=?,revised_at=? WHERE id=?", (result.total, rating, now, review_id))
+            self.db.execute("UPDATE episodic_memories SET active=0 WHERE review_id=?", (review_id,))
+            self.db.execute("UPDATE generation_jobs SET status='stale',updated_at=? WHERE kind='episode' AND source_id=? AND status!='stale'",
+                            (now, review_id))
+            self._queue_episode_job(row["kp_id"], review_id)
             changed_due: dict[str, str] | None = None
             if row["kind"] == "complete":
                 cycle = self.db.execute("""SELECT c.* FROM fsrs_cycles c JOIN fsrs_logs l ON l.cycle_id=c.id
@@ -572,8 +1224,11 @@ class Store:
                     "difficulty_streak": streak, "state": new_state}
 
     def export_json(self) -> dict[str, Any]:
-        tables = ("knowledge_points", "materials", "attempts", "questions", "answers", "reviews",
-                  "dimension_scores", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
+        tables = ("knowledge_points", "materials", "material_checks", "clarification_chunks", "synthesis_batches", "attempts", "sessions", "messages", "message_materials", "summaries",
+                  "semantic_memories", "episodic_memories", "generation_jobs", "context_builds", "cross_day_queries",
+                  "questions", "answers", "scoring_submissions", "reviews",
+                  "dimension_scores", "review_question_assessments", "review_evidence", "review_batches",
+                  "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
                   "search_calls", "metrics")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
@@ -588,5 +1243,17 @@ class Store:
             self.db.execute("DELETE FROM receipts WHERE attempt_id IN (SELECT id FROM attempts WHERE kp_id=?)", (kp_id,))
             self.db.execute("DELETE FROM llm_calls WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM search_calls WHERE point=?", (point["title"],))
+            self.db.execute("DELETE FROM context_builds WHERE point=?", (point["title"],))
+            self.db.execute("DELETE FROM material_checks WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM knowledge_points WHERE id=?", (kp_id,))
             self.db.execute("INSERT INTO metrics(name,value) VALUES('forgotten_count',1) ON CONFLICT(name) DO UPDATE SET value=value+1")
+
+    def forget_preparation(self, point: str) -> bool:
+        if self.get_knowledge_point(point):
+            raise ValueError("knowledge point exists; use forget")
+        with self.transaction():
+            count = sum(self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE point=?", (point,)).fetchone()[0]
+                        for table in ("material_checks", "context_builds", "llm_calls", "search_calls"))
+            for table in ("material_checks", "context_builds", "llm_calls", "search_calls"):
+                self.db.execute(f"DELETE FROM {table} WHERE point=?", (point,))
+            return count > 0

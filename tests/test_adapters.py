@@ -1,4 +1,10 @@
-from zhiqiu.model import OpenAICompatibleModel
+import json
+
+import httpx
+import pytest
+
+from zhiqiu.model import ModelContextOverflowError, OpenAICompatibleModel
+from zhiqiu.context import ModelRequest
 from zhiqiu.search import ExaSearch
 
 
@@ -62,3 +68,53 @@ def test_model_tool_call_contract_and_audit(monkeypatch):
     assert method == "POST" and url.endswith("/chat/completions")
     assert kwargs["json"]["tools"][0]["function"]["name"] == "web_search"
     assert calls[0]["status"] == "ok" and calls[0]["tokens_in"] == 10
+
+
+def test_model_specific_output_reserve_caps_direct_tool_calls(monkeypatch):
+    monkeypatch.setenv("ZHIQIU_MODEL_BUDGETS", json.dumps({
+        "https://model.example/v1|test-model": {
+            "window": 8192, "output_reserve": 777, "margin": 256}}))
+    FakeClient.requests = []
+    monkeypatch.setattr("zhiqiu.model.httpx.Client", FakeClient)
+    model = OpenAICompatibleModel("https://model.example/v1", "test-model", "test-key")
+    model.search_query("二叉树遍历", "应用示例")
+    assert FakeClient.requests[0][2]["json"]["max_tokens"] == 777
+
+
+def test_model_request_uses_built_messages_and_links_audit(monkeypatch):
+    class JsonClient(FakeClient):
+        requests = []
+
+        def post(self, url, **kwargs):
+            self.requests.append((url, kwargs))
+            return FakeResponse({"choices": [{"message": {"content": '{"explanation":"可追溯","followup":""}'}}],
+                                 "usage": {"prompt_tokens": 22, "completion_tokens": 8}})
+
+    monkeypatch.setattr("zhiqiu.model.httpx.Client", JsonClient)
+    calls = []
+    model = OpenAICompatibleModel("https://model.example/v1", "test-model", "test-key", calls.append)
+    messages = ({"role": "system", "content": "fixed template"},
+                {"role": "user", "content": '{"question":"为什么"}'})
+    request = ModelRequest("clarify", "遍历", "kp", "attempt", "session", "build",
+                           "context-v1", messages, ("material",),
+                           {"window_verified": False, "output_reserve_tokens": 777})
+    assert model.request(request)["explanation"] == "可追溯"
+    assert JsonClient.requests[0][1]["json"]["messages"] == list(messages)
+    assert JsonClient.requests[0][1]["json"]["max_tokens"] == 777
+    assert calls[0]["context_build_id"] == "build"
+    assert calls[0]["session_id"] == "session" and calls[0]["stage"] == "clarify"
+
+
+def test_provider_context_overflow_is_classified_and_audited(monkeypatch):
+    class OverflowClient(FakeClient):
+        def post(self, url, **kwargs):
+            return httpx.Response(400, json={"error": {"code": "context_length_exceeded"}},
+                                  request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("zhiqiu.model.httpx.Client", OverflowClient)
+    calls = []
+    model = OpenAICompatibleModel("https://model.example/v1", "test-model", "test-key", calls.append)
+    with pytest.raises(ModelContextOverflowError):
+        model.request(ModelRequest("clarify", "遍历", None, None, None, "build", "context-v1",
+                                   ({"role": "user", "content": "问题"},), (), {}))
+    assert calls[0]["status"] == "context_overflow"

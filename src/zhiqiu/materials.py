@@ -37,7 +37,6 @@ def read_local(path: Path, allow_empty: bool = False) -> list[Material]:
         raise ValueError("只支持 .md 和 .txt 文件")
     if len(files) > 200:
         raise ValueError("目录中 md/txt 文件超过 200 个")
-    seen: set[str] = set()
     result: list[Material] = []
     for file in files:
         if file.stat().st_size > 1_000_000:
@@ -49,9 +48,7 @@ def read_local(path: Path, allow_empty: bool = False) -> list[Material]:
         if not content.strip():
             continue
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if digest not in seen:
-            result.append(Material("local", str(file), digest, content))
-            seen.add(digest)
+        result.append(Material("local", str(file), digest, content))
     if not result and not allow_empty:
         raise ValueError("指定范围没有可用的非空 md/txt 资料")
     if sum(len(item.content) for item in result) > 100_000:

@@ -22,7 +22,8 @@ class DemoModel:
         dimensions = ("concept", "mechanism", "application")
         if len(history) >= len(dimensions):
             return {"done": True}
-        return {"done": False, "dimension": dimensions[len(history)], "question": f"解释 {dimensions[len(history)]}"}
+        return {"done": False, "dimension": dimensions[len(history)], "question": f"解释 {dimensions[len(history)]}",
+                "difficulty": "basic", "difficulty_basis": "直接解释"}
 
     def grade(self, point, history, sources):
         scores = (4, 3, 1)

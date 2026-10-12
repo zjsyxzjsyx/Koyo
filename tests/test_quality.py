@@ -38,7 +38,7 @@ def test_human_labels_check_exact_scores_and_original_evidence(tmp_path, capsys)
     labels[0]["human_score"] = 0
     assert evaluate_labels(store, labels, minimum_samples=3)["passed"] is False
     labels[0]["human_score"] = 4
-    store.db.execute("UPDATE dimension_scores SET evidence='无来源' WHERE review_id=? AND dimension='concept'", (review_id,))
+    store.db.execute("UPDATE review_evidence SET quote='无来源' WHERE review_id=? AND dimension='concept'", (review_id,))
     assert evaluate_labels(store, labels, minimum_samples=3)["passed"] is False
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_labels(store, labels + [labels[0]], minimum_samples=3)

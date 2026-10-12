@@ -8,15 +8,27 @@ from .store import Store
 
 def label_template(store: Store) -> list[dict[str, Any]]:
     """Export score rows for human review without inventing human labels."""
-    return [dict(row) | {"human_score": None} for row in store.db.execute("""
-        SELECT d.review_id,d.dimension,d.score model_score,k.title knowledge_point,
-            q.text question,a.text answer,d.evidence,d.rationale
+    result = []
+    for row in store.db.execute("""
+        SELECT d.review_id,d.dimension,d.score model_score,d.rationale,d.supplement,k.title knowledge_point
         FROM dimension_scores d JOIN reviews r ON r.id=d.review_id
         JOIN attempts t ON t.id=r.attempt_id
         JOIN knowledge_points k ON k.id=t.kp_id
-        JOIN questions q ON q.id=d.question_id
-        JOIN answers a ON a.id=d.answer_id
-        ORDER BY r.created_at,d.review_id,d.dimension""")]
+        ORDER BY r.created_at,d.review_id,d.dimension"""):
+        assessments = [dict(item) for item in store.db.execute("""
+            SELECT qa.question_id,qa.answer_id,qa.judgment,q.text question,q.difficulty,
+                a.text answer,s.text submitted_answer
+            FROM review_question_assessments qa JOIN questions q ON q.id=qa.question_id
+            LEFT JOIN answers a ON a.id=qa.answer_id
+            LEFT JOIN scoring_submissions s ON s.id=qa.submission_id
+            WHERE qa.review_id=? AND qa.dimension=? ORDER BY q.seq""",
+            (row["review_id"], row["dimension"]))]
+        for item in assessments:
+            item["evidence"] = [dict(e) for e in store.db.execute("""SELECT quote,start_char,end_char
+                FROM review_evidence WHERE review_id=? AND dimension=? AND question_id=? ORDER BY rowid""",
+                (row["review_id"], row["dimension"], item["question_id"]))]
+        result.append(dict(row) | {"assessments": assessments, "human_score": None})
+    return result
 
 
 def evaluate_labels(store: Store, labels: list[dict[str, Any]], minimum_samples: int = 30) -> dict[str, Any]:
@@ -40,10 +52,7 @@ def evaluate_labels(store: Store, labels: list[dict[str, Any]], minimum_samples:
         if key in seen:
             raise ValueError("duplicate human label for one dimension score")
         seen.add(key)
-        row = store.db.execute("""SELECT d.score,d.evidence,d.question_id,d.answer_id,
-            a.text answer,a.question_id original_question_id
-            FROM dimension_scores d JOIN answers a ON a.id=d.answer_id
-            WHERE d.review_id=? AND d.dimension=?""", key).fetchone()
+        row = store.db.execute("SELECT score FROM dimension_scores WHERE review_id=? AND dimension=?", key).fetchone()
         if row is None:
             raise ValueError(f"saved dimension score not found: {review_id}/{dimension}")
         if row["score"] == human_score:
@@ -51,7 +60,26 @@ def evaluate_labels(store: Store, labels: list[dict[str, Any]], minimum_samples:
         else:
             disagreements.append({"review_id": review_id, "dimension": dimension,
                                   "model_score": row["score"], "human_score": human_score})
-        if row["question_id"] == row["original_question_id"] and row["evidence"] and row["evidence"] in row["answer"]:
+        assessed = store.db.execute("""SELECT qa.question_id,qa.answer_id,qa.submission_id,
+            a.question_id original_question_id,a.text original_answer,s.text submitted_answer
+            FROM review_question_assessments qa LEFT JOIN answers a ON a.id=qa.answer_id
+            LEFT JOIN scoring_submissions s ON s.id=qa.submission_id
+            WHERE qa.review_id=? AND qa.dimension=?""", key).fetchall()
+        valid = bool(assessed)
+        for item in assessed:
+            if item["answer_id"] is None:
+                if store.db.execute("""SELECT 1 FROM review_evidence WHERE review_id=? AND dimension=?
+                    AND question_id=?""", (*key, item["question_id"])).fetchone():
+                    valid = False
+                continue
+            answer_text = item["submitted_answer"] or item["original_answer"]
+            if item["question_id"] != item["original_question_id"] or answer_text is None:
+                valid = False
+            for evidence in store.db.execute("""SELECT quote,start_char,end_char FROM review_evidence
+                    WHERE review_id=? AND dimension=? AND question_id=?""", (*key, item["question_id"])):
+                if answer_text[evidence["start_char"]:evidence["end_char"]] != evidence["quote"]:
+                    valid = False
+        if valid:
             evidence_ok += 1
     sample_count = len(labels)
     agreement = exact / sample_count if sample_count else 0.0

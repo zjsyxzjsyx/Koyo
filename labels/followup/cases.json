@@ -1,0 +1,102 @@
+[
+  {
+    "id": "bst-concept",
+    "point": "二叉搜索树",
+    "kind": "vague",
+    "target": "concept",
+    "questions": {
+      "concept": {"difficulty": "basic", "question": "二叉搜索树的定义是什么？",
+                  "answer": "二叉搜索树是一种二叉树，左边的值小，右边的值大，可以用来快速查找。"},
+      "mechanism": {"difficulty": "advanced", "question": "为什么对二叉搜索树做中序遍历一定得到升序序列？",
+                    "answer": "中序遍历按左子树、根、右子树的顺序访问。对每个节点来说，先访问的整棵左子树都比它小，后访问的整棵右子树都比它大，递归到每一层都成立，所以整个序列是升序。"},
+      "application": {"difficulty": "transfer", "question": "要判断一棵二叉树是否是二叉搜索树，只检查每个节点是否大于左孩子、小于右孩子够吗？",
+                      "answer": "不够。例如根是 10，左孩子 5，5 的右孩子是 15，每对父子都满足，但 15 在 10 的左子树里。应该递归时传入上下界，或者检查中序遍历是否严格递增。"}
+    },
+    "variants": {
+      "understands": "理解后的真实想法：对每个节点，它左子树里的所有节点都比它小，右子树里的所有节点都比它大，不只是直接的孩子。",
+      "misunderstands": "真实想法：只要每个节点比它的左孩子大、比右孩子小就行，只看直接的孩子。"
+    }
+  },
+  {
+    "id": "binary-concept",
+    "point": "二分查找",
+    "kind": "vague",
+    "target": "concept",
+    "questions": {
+      "concept": {"difficulty": "basic", "question": "二分查找每一步是怎么缩小查找范围的？",
+                  "answer": "每次跟中间的数比一下，然后去掉一半，范围就越来越小了。"},
+      "mechanism": {"difficulty": "advanced", "question": "用闭区间 [lo, hi] 写二分查找时，循环条件为什么是 lo <= hi？",
+                    "answer": "闭区间里 lo == hi 时还剩一个元素没检查，所以要用 lo <= hi，直到区间为空才结束；用 lo < hi 会漏掉最后一个元素。"},
+      "application": {"difficulty": "advanced", "question": "一个长度为 100 万的有序数组，二分查找最多大约比较多少次？链表能用二分查找吗？",
+                      "answer": "大约 20 次，因为 2 的 20 次方约等于 100 万，每次排除一半。链表不行，它不能 O(1) 访问中间元素，取中点就要 O(n)，失去了二分的意义。"}
+    },
+    "variants": {
+      "understands": "理解后的真实想法：数组有序，中间值比目标小就说明目标只可能在右半边，保留右半边；比目标大就保留左半边；相等就找到了。",
+      "misunderstands": "真实想法：去掉哪一半无所谓，随便去掉一半就行，反正每次范围减半，最后总能找到。"
+    }
+  },
+  {
+    "id": "tcp-mechanism",
+    "point": "TCP 三次握手",
+    "kind": "vague",
+    "target": "mechanism",
+    "questions": {
+      "concept": {"difficulty": "advanced", "question": "简述 TCP 三次握手的过程，每一步分别携带什么关键信息？",
+                  "answer": "客户端发 SYN，带初始序列号 x；服务端回 SYN+ACK，带自己的序列号 y 并确认 x+1；客户端再发 ACK 确认 y+1。"},
+      "mechanism": {"difficulty": "advanced", "question": "为什么 TCP 需要三次握手，两次为什么不够？",
+                    "answer": "三次握手是为了让双方确认这个连接是可靠的，两次的话确认得不够。"},
+      "application": {"difficulty": "transfer", "question": "SYN 洪泛攻击利用了三次握手的什么特点？服务端可以如何缓解？",
+                      "answer": "服务端收到 SYN 后要保存半连接并等第三次握手，攻击者伪造大量源地址发 SYN，把半连接队列占满。可以用 SYN Cookie，把连接信息编码进序列号，不用保存半连接状态。"}
+    },
+    "variants": {
+      "understands": "理解后的真实想法：双方都要确认对方能收能发，并且同步各自的初始序列号；两次的话服务端不知道客户端有没有收到自己的序列号，网络里滞留的旧 SYN 到达时服务端还会误建连接。",
+      "misunderstands": "真实想法：握手次数越多越可靠，三次比两次多确认一次，所以更保险，没有别的原因。"
+    }
+  },
+  {
+    "id": "lru-mechanism",
+    "point": "LRU 缓存",
+    "kind": "vague",
+    "target": "mechanism",
+    "questions": {
+      "concept": {"difficulty": "basic", "question": "LRU 缓存在容量满时淘汰哪个条目？",
+                  "answer": "淘汰最久没有被访问过的条目。"},
+      "mechanism": {"difficulty": "advanced", "question": "LRU 缓存为什么通常用“哈希表 + 双向链表”实现，而不是单向链表？",
+                    "answer": "哈希表用来快速找到节点，链表维护访问顺序。用双向链表是因为操作起来比较方便。"},
+      "application": {"difficulty": "advanced", "question": "用 Python 实现一个 get/put 都是 O(1) 的 LRU 缓存，你会怎么做？",
+                      "answer": "用 collections.OrderedDict：get 命中时 move_to_end 把键移到末尾，put 时更新并移到末尾，超过容量就 popitem(last=False) 删掉最旧的。"}
+    },
+    "variants": {
+      "understands": "理解后的真实想法：命中时要把一个已知节点从链表中间摘下来移到表头，删除节点需要改它前驱的指针；双向链表能直接拿到前驱，所以是 O(1)，单向链表要从头找前驱，是 O(n)。",
+      "misunderstands": "真实想法：双向链表可以从两头开始遍历，查找某个键时更快，所以选它。"
+    }
+  },
+  {
+    "id": "knapsack-clear",
+    "point": "0-1 背包",
+    "kind": "control",
+    "target": null,
+    "questions": {
+      "concept": {"difficulty": "advanced", "question": "0-1 背包中 dp[i][c] 表示什么？为什么按单位重量价值贪心不一定最优？",
+                  "answer": "dp[i][c] 是只考虑前 i 件物品、容量为 c 时的最大价值。物品不能分割，贪心先拿单位价值高的可能留下用不上的剩余容量，比如容量 50，物品 (10kg,60)(20kg,100)(30kg,120)，贪心得 160，最优是后两件 220。"},
+      "mechanism": {"difficulty": "advanced", "question": "写出状态转移方程，并解释两项分别代表什么。",
+                    "answer": "当 c >= w[i] 时 dp[i][c] = max(dp[i-1][c], dp[i-1][c-w[i]] + v[i])，否则 dp[i][c] = dp[i-1][c]。第一项是不选第 i 件，第二项是选第 i 件：先留出它的重量，再加上它的价值。"},
+      "application": {"difficulty": "transfer", "question": "用一维数组 dp[c] 优化时，内层容量循环为什么必须从大到小？",
+                      "answer": "从大到小时，计算 dp[c] 用到的 dp[c-w[i]] 还是上一轮（前 i-1 件）的值，所以第 i 件最多用一次。从小到大的话 dp[c-w[i]] 可能已经包含了第 i 件，同一件会被重复选，就变成完全背包了。"}
+    }
+  },
+  {
+    "id": "bfs-clear-wrong",
+    "point": "广度优先搜索",
+    "kind": "control",
+    "target": null,
+    "questions": {
+      "concept": {"difficulty": "basic", "question": "BFS 使用什么数据结构，按什么顺序访问节点？",
+                  "answer": "BFS 用栈，先沿着一条路一直走到底，走不通再回退。"},
+      "mechanism": {"difficulty": "transfer", "question": "为什么在无权图中 BFS 第一次到达某个节点时的路径就是最短路径？边权不同时还成立吗？",
+                    "answer": "队列保证距离为 d 的节点都在距离为 d+1 的节点之前出队，所以第一次发现某节点时走的就是最少的边。边权不同时不成立，边数少不等于总权重小，要用 Dijkstra；权重只有 0 和 1 时可以用 0-1 BFS。"},
+      "application": {"difficulty": "advanced", "question": "在网格迷宫中求从起点到终点的最少步数，用 BFS 应怎么做？",
+                      "answer": "每个格子是节点，从起点 BFS，队列存坐标和步数，四个方向中不越界、不是墙、没访问过的格子入队并立即标记已访问，第一次取到终点时的步数就是答案；队列空了还没到终点就是不可达。"}
+    }
+  }
+]

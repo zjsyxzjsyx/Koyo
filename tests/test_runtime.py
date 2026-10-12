@@ -32,7 +32,8 @@ class FakeModel:
         dimensions = ("concept", "mechanism", "application")
         if len(context) == 3:
             return {"done": True}
-        return {"done": False, "dimension": dimensions[len(context)], "question": f"解释 {dimensions[len(context)]}"}
+        return {"done": False, "dimension": dimensions[len(context)], "question": f"解释 {dimensions[len(context)]}",
+                "difficulty": "basic", "difficulty_basis": "直接解释"}
 
     def grade(self, point, context, sources):
         scores = (4, 3, 1)
@@ -61,13 +62,19 @@ class FakeSearch:
 class NeverDoneModel(FakeModel):
     def next_question(self, point, context, sources, focus):
         return {"done": False, "dimension": ("concept", "mechanism", "application")[len(context) % 3],
-                "question": f"第 {len(context) + 1} 题"}
+                "question": f"第 {len(context) + 1} 题", "difficulty": "basic", "difficulty_basis": "直接解释"}
 
     def grade(self, point, context, sources):
-        first = context[0]
-        return {"grades": [{"dimension": "concept", "score": 2,
-                "question_id": first["question_id"], "answer_id": first["answer_id"],
-                "evidence": first["answer"], "rationale": "已有部分证据"}]}
+        return {"grades": [{"dimension": dimension, "score": 2, "rationale": "已有部分证据",
+                "assessments": [{"question_id": row["question_id"], "answer_id": row["answer_id"],
+                                 "judgment": "已有部分证据", "evidence": [row["answer"]]}
+                                for row in context if row["dimension"] == dimension]}
+                for dimension in ("concept", "mechanism", "application")]}
+
+
+class PrematureDoneModel(FakeModel):
+    def next_question(self, point, context, sources, focus):
+        return {"done": True}
 
 
 def prepare_service(tmp_path, model=None, search=None):
@@ -110,6 +117,18 @@ def test_eight_question_limit_forces_partial_next_day(tmp_path):
     result = service.finish(attempt, "limit")
     assert result["kind"] == "partial" and result["due_date"] == "2026-10-03"
     assert store.db.execute("SELECT COUNT(*) FROM fsrs_logs").fetchone()[0] == 0
+
+
+def test_premature_model_done_keeps_attempt_open_for_retry(tmp_path):
+    store, service, path = prepare_service(tmp_path, PrematureDoneModel())
+    kp, _, _ = service.prepare("二叉树遍历", path, lambda *_: True)
+    attempt = store.start_attempt(kp, "first")
+    with pytest.raises(ValueError, match="尚有未作答维度"):
+        service.next_question(attempt)
+    assert store.db.execute("SELECT state FROM attempts WHERE id=?", (attempt,)).fetchone()[0] == "in_progress"
+    assert store.qa_for(attempt) == []
+    service.model = FakeModel()
+    assert service.next_question(attempt)["dimension"] == "concept"
 
 
 def test_review_questions_receive_original_low_score_evidence(tmp_path):

@@ -6,3 +6,10 @@ __pycache__/
 *.sqlite
 *.sqlite-*
 .env
+
+# labels/ keeps only the sample inputs; reports, labels and run results stay local.
+labels/**
+!labels/**/
+!labels/samples.json
+!labels/*/samples.json
+!labels/*/cases.json
