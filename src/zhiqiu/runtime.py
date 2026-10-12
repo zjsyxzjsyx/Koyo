@@ -5,14 +5,14 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_VERSION
-from .materials import Material, combined_hash, read_local
+from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
-from .search import Search, web_search_spec
+from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
 from .toolloop import LoopResult, ToolLoop, query_leak_check
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope
@@ -41,13 +41,15 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
 
 
 class LearningRuntime:
-    def __init__(self, store: Store, model: Model, search: Search | None = None):
+    def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None):
         self.store = store
         self.model = model
         self.search = search
         self.tools = ToolRegistry()
         if search is not None:
             self.tools.register(web_search_spec(search))
+        if fetcher is not None:
+            self.tools.register(fetch_url_spec(fetcher))
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.max_tool_rounds = 5
         self.last_loop: LoopResult | None = None
@@ -209,11 +211,28 @@ class LearningRuntime:
             raise ValueError("模型未给出有效的资料综合判断")
         return result, summaries
 
-    def prepare(self, point: str, path: Path, approve: Callable[[list[Material], str], bool],
-                offline: bool = False, force_web: bool = False, force_local: bool = False) -> tuple[str, dict[str, Any], list[Material]]:
-        materials = read_local(path, allow_empty=not offline and not force_local and self.search is not None)
-        if not approve(materials, self.model.endpoint):
+    def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
+                offline: bool = False, force_web: bool = False, force_local: bool = False,
+                urls: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
+        if path is None and not urls:
+            raise ValueError("请用 --from 指定本地资料或用 --url 指定网页")
+        if urls and offline:
+            raise ValueError("离线模式不能获取网页资料")
+        if urls and not self.tools.get("fetch_url"):
+            raise ValueError("获取网页资料需要 ZHIQIU_EXA_API_KEY")
+        materials = (read_local(path, allow_empty=bool(urls) or (not offline and not force_local and self.search is not None))
+                     if path is not None else [])
+        # One confirmation covers everything this preparation may send out, before any request.
+        remote = [f"经 Exa 获取网页正文：{url}" for url in urls]
+        if self.search is not None and not offline and not force_local:
+            remote.append("本地资料不足时，经 Exa 联网搜索补充（只发送查询词）")
+        if not approve(materials, self.model.endpoint, remote):
             raise ValueError("未获发送资料授权；学习未开始")
+        fetch_scope = ToolScope(frozenset({"network"}), point=point)
+        for url in urls:
+            materials.extend(self.executor.run("fetch_url", {"url": url}, fetch_scope).value)
+        if sum(len(item.content) for item in materials) > 100_000:
+            raise ValueError("本地与网页资料总文本超过 100,000 字符；请指定更小的范围")
         assessment, teaching_sources = self._assess_materials(point, materials)
         if force_web or (not assessment["sufficient"] and not force_local):
             if offline:
@@ -241,7 +260,7 @@ class LearningRuntime:
             raise ValueError("模型未生成可靠的学习说明")
         kp_id = self.store.ensure_knowledge_point(point)
         self.store.add_materials(kp_id, self._sources(materials))
-        self.store.record_consent(kp_id, combined_hash([m for m in materials if m.kind == "local"]), self.model.endpoint)
+        self.store.record_consent(kp_id, consent_hash(materials), self.model.endpoint)
         self.store.record_message(kp_id, "assistant", "lesson", lesson["lesson"].strip())
         return kp_id, lesson, materials
 
@@ -265,7 +284,10 @@ class LearningRuntime:
             with self.store.transaction():
                 self.store.db.execute("UPDATE context_builds SET status=? WHERE id=?",
                                       (f"tool_loop_{self.last_loop.status}", request.build_id))
-            return list(self.last_loop.materials), f"（工具循环：{self.last_loop.reason}）"
+            # Whatever the loop found is a public supplement, not a user-chosen source.
+            found = [Material("web", item.source, item.content_hash, item.content, item.reason)
+                     for item in self.last_loop.materials]
+            return found, f"（工具循环：{self.last_loop.reason}）"
         # Scripted models without tool rounds propose one query; a rejected one falls back to the point.
         proposed = self.model.search_query(point, gap)
         try:
@@ -277,9 +299,8 @@ class LearningRuntime:
 
     def sources_for(self, kp_id: str) -> list[dict[str, str]]:
         sources = [dict(r) for r in self.store.materials_for(kp_id)]
-        local = [Material(row["kind"], row["source"], row["content_hash"], row["content"])
-                 for row in sources if row["kind"] == "local"]
-        if not self.store.has_consent(kp_id, combined_hash(local), self.model.endpoint):
+        stored = [Material(row["kind"], row["source"], row["content_hash"], row["content"]) for row in sources]
+        if not self.store.has_consent(kp_id, consent_hash(stored), self.model.endpoint):
             raise ValueError("当前资料或模型端点未获发送授权；请用 learn 重新确认")
         return sources
 

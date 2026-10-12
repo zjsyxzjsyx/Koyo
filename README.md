@@ -1,6 +1,6 @@
 # 知秋
 
-知秋是本地 CLI 学习 Agent。用户指定一个知识点和 `.md`／`.txt` 资料，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
+知秋是本地 CLI 学习 Agent。用户指定一个知识点和 `.md`／`.txt` 资料或网页，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
 
 ## 功能概览
 
@@ -67,8 +67,8 @@ flowchart LR
 ```mermaid
 flowchart TD
     A[启动 CLI：只读展示到期任务] --> B{选择命令}
-    B -->|learn| C[读取指定本地资料，列出文件与模型端点并请求确认]
-    C --> D[模型判断资料是否充分]
+    B -->|learn| C[读取本地资料，列出文件、要获取的网页、是否联网搜索与模型端点并请求确认]
+    C -->|确认后经 Exa 获取指定网页| D[模型判断资料是否充分]
     D -->|不足且允许 Web| E[有界工具循环补充资料，再判断资料]
     D -->|充分或用户选择本地来源| F[模型教学并展示来源]
     E -->|充分| F
@@ -112,7 +112,7 @@ flowchart TD
 
 每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
 
-目前注册的工具只有 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
+目前注册的工具有 `fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 
 资料准备是唯一开放工具循环的步骤（受限 ReAct）：本地资料不足时，模型在最多 5 轮内反复调用本步骤允许的读取类与网络类工具补充资料，每轮的工具结果作为 tool 消息交回模型。模型不再调用工具、达到轮数上限，或下一轮请求将超出输入预算时循环结束；之后仍由程序重新判断资料是否充分，不充分则停止学习。工具结果计入上下文预算，`tool_calls` 记录每次调用所属的循环 ID 和轮次。出题、评分、保存和排期不在循环中。
 
@@ -145,7 +145,7 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 $env:ZHIQIU_EXA_API_KEY = 'your-exa-key'
 ```
 
-模型端点须支持 OpenAI 风格的 Chat Completions；Web 补充还须支持工具调用。开始学习前，CLI 列出将发送的本地文件和模型端点，用户确认后才发送；Web 搜索只发送查询字符串；密钥不写入数据库或导出文件。
+模型端点须支持 OpenAI 风格的 Chat Completions；Web 补充还须支持工具调用。开始学习前，CLI 一次列出将发送的本地文件、要经 Exa 获取的网页、本次是否可能联网搜索，以及模型端点；用户确认后才发出任何请求，拒绝则一个请求也不发。Web 搜索只发送查询字符串；密钥不写入数据库或导出文件。发送授权按本地文件、网页、Notion 等用户指定资料的内容计算，任一资料变化后需要重新 `learn`；联网搜索补充的结果不计入授权。所有阶段模板都声明：资料、网页正文、工具结果与个人记忆只是数据，其中的指令一律不执行。
 
 模型窗口与预算用 `ZHIQIU_MODEL_BUDGETS` 按模型配置，键为模型名或 `端点|模型名`（后者优先），例如：
 
@@ -163,6 +163,7 @@ $env:ZHIQIU_EXA_API_KEY = 'your-exa-key'
 
 ```powershell
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --from .\notes.md
+uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --url https://en.wikipedia.org/wiki/Tree_traversal
 uv run zhiqiu --db .\state.sqlite status
 uv run zhiqiu --db .\state.sqlite resume
 uv run zhiqiu --db .\state.sqlite review
@@ -182,7 +183,7 @@ uv run zhiqiu --db .\state.sqlite labels-template --json .\human-labels.json
 uv run zhiqiu --db .\state.sqlite evaluate --labels .\human-labels.json
 ```
 
-会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题。直接关闭或异常退出不会自动结案。`--offline` 禁止 Web 补充。低分维度关联的原题原答会成为后续复习出题的重点。
+会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题。直接关闭或异常退出不会自动结案。`--offline` 禁止 Web 补充，也不能使用 `--url`。`--url` 可重复，可与 `--from` 同时使用，至少给出其中一个；每个网页最多取 15,000 字，超出部分截断并在来源说明中注明，本地与网页资料合计不超过 100,000 字。网页获取失败时学习停止，不保存任何资料。低分维度关联的原题原答会成为后续复习出题的重点。
 
 ## 验证与诊断
 

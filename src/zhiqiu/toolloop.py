@@ -44,15 +44,17 @@ def query_leak_check(private: Iterable[Material], point: str = "", run: int = LE
 
     def check(spec: ToolSpec, args: dict[str, Any]) -> None:
         query = args.get("query")
-        if not isinstance(query, str):
-            return
-        if len(query) > max_chars:
+        if isinstance(query, str) and len(query) > max_chars:
             raise ToolError("invalid_args", f"查询超过 {max_chars} 字符")
-        checked = query.replace(point, "\x00") if point else query
-        for start in range(len(checked) - run + 1):
-            fragment = checked[start:start + run]
-            if "\x00" not in fragment and any(fragment in text for text in texts):
-                raise ToolError("invalid_args", f"查询包含本地资料原文（连续 {run} 字以上），请只写知识点和缺口")
+        # Every outgoing string counts: a URL can carry copied text as well as a query can.
+        for value in args.values():
+            if not isinstance(value, str):
+                continue
+            checked = value.replace(point, "\x00") if point else value
+            for start in range(len(checked) - run + 1):
+                fragment = checked[start:start + run]
+                if "\x00" not in fragment and any(fragment in text for text in texts):
+                    raise ToolError("invalid_args", f"参数包含本地资料原文（连续 {run} 字以上），请只写知识点和缺口")
     return check
 
 

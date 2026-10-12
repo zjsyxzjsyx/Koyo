@@ -36,8 +36,8 @@ def context_store(ctx: typer.Context) -> Store:
 
 def runtime(store: Store) -> LearningRuntime:
     model = OpenAICompatibleModel(audit=store.record_llm_call)
-    search = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
-    return LearningRuntime(store, model, search)
+    exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
+    return LearningRuntime(store, model, exa, exa)
 
 
 def show_status(store: Store, full: bool = False) -> None:
@@ -153,11 +153,13 @@ def memory_delete(ctx: typer.Context, key: str,
     typer.echo("已删除。" if deleted else "没有该有效记忆。")
 
 
-def _approve(materials: list[Material], endpoint: str) -> bool:
-    typer.echo(f"将把以下本地资料发送到模型端点 {endpoint}：")
+def _approve(materials: list[Material], endpoint: str, remote: list[str] | None = None) -> bool:
+    typer.echo(f"将把以下资料发送到模型端点 {endpoint}：")
     for material in materials:
         if material.kind == "local":
             typer.echo(f"  {material.source}")
+    for item in remote or []:
+        typer.echo(f"  {item}")
     return typer.confirm("允许本次学习发送这些内容吗？", default=False)
 
 
@@ -261,11 +263,15 @@ def _show_outcome(store: Store, outcome: dict) -> None:
 
 @app.command()
 def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个具体知识点")],
-          source: Annotated[Path, typer.Option("--from", help="本地 md/txt 文件或目录")]) -> None:
-    """阅读本地资料，确认学完后开始首次自测。"""
+          source: Annotated[Path | None, typer.Option("--from", help="本地 md/txt 文件或目录")] = None,
+          urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复；经 Exa 获取正文")] = None) -> None:
+    """阅读本地或网页资料，确认学完后开始首次自测。"""
     store = context_store(ctx)
+    if source is None and not urls:
+        raise typer.BadParameter("请用 --from 或 --url 指定资料")
+    urls = urls or []
     service = runtime(store)
-    kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"])
+    kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls)
     typer.echo("实际采用来源：")
     for material in materials:
         typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
@@ -285,8 +291,8 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
             _session(store, service, attempt)
             return
         if command in ("/sources web", "/sources local"):
-            kp_id, lesson, materials = service.prepare(point, source, _approve,
-                offline=ctx.obj["offline"], force_web=command.endswith("web"), force_local=command.endswith("local"))
+            kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"],
+                force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls)
             typer.echo("实际采用来源：")
             for material in materials:
                 typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))

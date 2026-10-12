@@ -56,6 +56,14 @@ def read_local(path: Path, allow_empty: bool = False) -> list[Material]:
     return result
 
 
+# Sources the user chose; sending them to the model needs consent. "web" results are public supplements.
+USER_SOURCE_KINDS = ("local", "url", "notion")
+
+
+def consent_hash(materials: list[Material]) -> str:
+    return combined_hash([item for item in materials if item.kind in USER_SOURCE_KINDS])
+
+
 def combined_hash(materials: list[Material]) -> str:
     joined = "|".join(sorted(m.content_hash for m in materials))
     return hashlib.sha256(joined.encode("ascii")).hexdigest()
