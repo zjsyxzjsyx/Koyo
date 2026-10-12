@@ -7,6 +7,9 @@ from typing import Protocol
 from .materials import Material
 from .tools import ToolError, ToolSpec, post_json
 
+# Every result goes on to assessment and teaching, so keep each one short to save tokens.
+RESULT_CHARS = 1500
+CALL_CHARS = 6000
 WEB_SEARCH_DESCRIPTION = "Search the web for reliable material missing from local sources"
 WEB_SEARCH_PARAMS = {"type": "object", "additionalProperties": False, "required": ["query"],
                      "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 600}}}
@@ -39,7 +42,7 @@ class ExaSearch:
             content = "\n\n".join(snippets) if snippets else item.get("text", "")
             if not isinstance(url, str) or not url.startswith("https://") or not isinstance(content, str) or not content.strip():
                 continue
-            content = content[:4000]
+            content = content[:RESULT_CHARS]
             result.append(Material("web", url, hashlib.sha256(content.encode()).hexdigest(), content,
                                    f"Exa Search: {item.get('title', '')}"))
         return result
@@ -49,4 +52,4 @@ def web_search_spec(search: Search) -> ToolSpec:
     """web_search as a registered tool; the same declaration is what the model sees."""
     return ToolSpec("web_search", WEB_SEARCH_DESCRIPTION, WEB_SEARCH_PARAMS, "network",
                     lambda args: search.search(args["query"]), source="zhiqiu.search",
-                    timeout_s=getattr(search, "timeout_s", 30.0), max_retries=1, max_output_chars=20_000)
+                    timeout_s=getattr(search, "timeout_s", 30.0), max_retries=1, max_output_chars=CALL_CHARS)

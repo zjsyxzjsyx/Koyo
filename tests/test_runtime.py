@@ -153,7 +153,7 @@ def test_inadequate_material_and_web_failure_create_no_point(tmp_path):
     store, service, path = prepare_service(tmp_path, FakeModel(enough=False), search)
     with pytest.raises(ValueError, match="Web 未找到"):
         service.prepare("二叉树遍历", path, lambda *_: True)
-    assert search.queries == ["二叉树遍历"]
+    assert search.queries == ["知识点 解释"]
     assert store.db.execute("SELECT COUNT(*) FROM knowledge_points").fetchone()[0] == 0
     assert store.db.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0] == 0
 
@@ -188,10 +188,15 @@ def test_empty_local_directory_can_use_web_but_offline_stops(tmp_path):
 
 def test_local_material_text_never_becomes_web_query(tmp_path):
     search = FakeSearch([])
-    store, service, path = prepare_service(tmp_path, FakeModel(enough=False, query="二叉树遍历的概念、机制和应用"), search)
+    leaking = "中序遍历先访问左子树再访问根节点 例子"
+    store, service, path = prepare_service(tmp_path, FakeModel(enough=False, query=leaking), search)
+    path.write_text("中序遍历先访问左子树再访问根节点，最后访问右子树。", encoding="utf-8")
     with pytest.raises(ValueError, match="Web 未找到"):
         service.prepare("二叉树遍历", path, lambda *_: True)
+    # A query copying 15+ characters of local text is rejected; the point is used instead.
     assert search.queries == ["二叉树遍历"]
+    assert [tuple(r) for r in store.db.execute("SELECT status,error_kind FROM tool_calls ORDER BY rowid")] == [
+        ("invalid_args", "invalid_args"), ("ok", None)]
 
 
 def test_clarification_is_separate_from_wrong_score_and_requires_matching_consent(tmp_path):

@@ -226,7 +226,7 @@ def test_prepare_audits_web_search_and_trace_links_it(tmp_path):
     row = store.db.execute("SELECT * FROM tool_calls").fetchone()
     assert (row["tool"], row["permission"], row["status"], row["result_count"], row["point"]) == (
         "web_search", "network", "ok", 1, "二叉树遍历")
-    assert json.loads(row["args_summary_json"]) == {"query": "二叉树遍历"}
+    assert json.loads(row["args_summary_json"]) == {"query": "知识点 解释"}
     assert store.db.execute("SELECT COUNT(*) FROM search_calls").fetchone()[0] == 0
     attempt = store.start_attempt(kp, "first")
     assert [call["id"] for call in store.trace(attempt)["tool_calls"]] == [row["id"]]
@@ -246,7 +246,7 @@ def test_search_network_failure_retries_once_then_stops_learning(tmp_path):
     service.executor.sleep = lambda seconds: None
     with pytest.raises(ToolError, match="网络错误"):
         service.prepare("二叉树遍历", path, lambda *_: True)
-    assert search.queries == ["二叉树遍历", "二叉树遍历"]
+    assert search.queries == ["知识点 解释", "知识点 解释"]
     row = store.db.execute("SELECT status,error_kind,attempts FROM tool_calls").fetchone()
     assert tuple(row) == ("error", "network", 2)
     assert store.db.execute("SELECT COUNT(*) FROM knowledge_points").fetchone()[0] == 0
@@ -265,3 +265,14 @@ def test_v12_database_gains_tool_calls_with_backup(tmp_path):
     assert reopened.get_knowledge_point(kp)["title"] == "二叉树遍历"
     assert path.with_suffix(".sqlite.pre-v13.bak").exists()
     reopened.close()
+
+
+def test_web_results_are_capped_to_save_tokens(monkeypatch):
+    from zhiqiu.search import CALL_CHARS, RESULT_CHARS, ExaSearch
+    long = {"results": [{"url": f"https://example.org/{i}", "highlights": ["很长" * 2000]} for i in range(5)]}
+    monkeypatch.setattr("zhiqiu.search.post_json", lambda *args, **kwargs: long)
+    registry = ToolRegistry()
+    registry.register(web_search_spec(ExaSearch(api_key="test-key")))
+    result = ToolExecutor(registry).run("web_search", {"query": "遍历"}, NETWORK)
+    assert all(len(item.content) <= RESULT_CHARS for item in result.value)
+    assert result.output_chars == CALL_CHARS and result.truncated

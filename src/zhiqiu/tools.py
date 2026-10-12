@@ -59,6 +59,10 @@ class ToolScope:
 
     allowed: frozenset[str]
     confirm: Callable[[ToolSpec, dict[str, Any]], bool] | None = None
+    # Step-specific argument rule run after schema validation, e.g. the query leak check.
+    check: Callable[[ToolSpec, dict[str, Any]], None] | None = None
+    # When set, only these tool names may run in the step.
+    names: frozenset[str] | None = None
     kp_id: str | None = None
     attempt_id: str | None = None
     session_id: str | None = None
@@ -206,6 +210,8 @@ class ToolExecutor:
         self.backoff_s = backoff_s
 
     def _gate(self, spec: ToolSpec, args: dict[str, Any], scope: ToolScope) -> bool | None:
+        if scope.names is not None and spec.name not in scope.names:
+            raise ToolError("denied", f"本步骤不能使用工具 {spec.name}")
         if spec.permission not in scope.allowed:
             raise ToolError("denied", f"本步骤未允许 {spec.permission} 类工具：{spec.name}")
         if not spec.requires_confirmation:
@@ -237,6 +243,13 @@ class ToolExecutor:
             if not spec:
                 raise ToolError("not_found", f"未注册的工具：{name}")
             validate_args(spec.params, args)
+            if scope.check:
+                try:
+                    scope.check(spec, args)
+                except ToolError:
+                    raise
+                except Exception as exc:
+                    raise ToolError("denied", f"{spec.name} 的参数检查失败：{type(exc).__name__}") from exc
             confirmed = self._gate(spec, args, scope)
             while True:
                 attempts += 1

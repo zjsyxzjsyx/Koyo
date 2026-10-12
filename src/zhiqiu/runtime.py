@@ -14,7 +14,8 @@ from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
 from .search import Search, web_search_spec
 from .store import Store, new_id
-from .tools import ToolExecutor, ToolRegistry, ToolScope
+from .toolloop import LoopResult, ToolLoop, query_leak_check
+from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope
 
 
 def _supplement(grade: dict[str, Any]) -> str:
@@ -48,6 +49,8 @@ class LearningRuntime:
         if search is not None:
             self.tools.register(web_search_spec(search))
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
+        self.max_tool_rounds = 5
+        self.last_loop: LoopResult | None = None
         self.context = ContextManager(store, model)
         # Grading one over-budget original answer in segments stays off until its
         # human-labelled long-answer samples pass; a user must also ask for it.
@@ -217,14 +220,9 @@ class LearningRuntime:
                 raise ValueError(f"本地资料不足且处于离线模式：{assessment.get('reason', '')}")
             if not self.search:
                 raise ValueError("需要 Web 补充，但搜索服务未配置")
-            # Ask the model for a search call, then restrict any query based on private
-            # local files to the knowledge point entered by the user.
-            proposed_query = self.model.search_query(point, str(assessment.get("gap", "")))
-            query = point if materials else proposed_query or point
-            web = self.executor.run("web_search", {"query": query},
-                                    ToolScope(frozenset({"network"}), point=point)).value
+            web, stopped = self._gather(point, str(assessment.get("gap", "")), materials)
             if not web:
-                raise ValueError("Web 未找到可靠资料；学习未开始")
+                raise ValueError(f"Web 未找到可靠资料{stopped}；学习未开始")
             gap = str(assessment.get("gap", "")).strip()
             reason = f"补充缺口：{gap}" if gap else "用户要求补充 Web"
             materials.extend(Material(item.kind, item.source, item.content_hash, item.content,
@@ -246,6 +244,36 @@ class LearningRuntime:
         self.store.record_consent(kp_id, combined_hash([m for m in materials if m.kind == "local"]), self.model.endpoint)
         self.store.record_message(kp_id, "assistant", "lesson", lesson["lesson"].strip())
         return kp_id, lesson, materials
+
+    def _gather(self, point: str, gap: str, materials: list[Material]) -> tuple[list[Material], str]:
+        """Fill a material gap with tools; the program still judges sufficiency afterwards."""
+        # Queries may not copy private material text; web results are public already.
+        scope = ToolScope(frozenset({"read", "network"}), point=point,
+                          check=query_leak_check((item for item in materials if item.kind != "web"), point))
+        if callable(getattr(self.model, "tool_round", None)):
+            request = self.context.build(ContextTask("gather", point, current_input=gap))
+            names = [name for name in self.tools.names()
+                     if self.tools.get(name).permission in ("read", "network")]
+            loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds)
+            try:
+                self.last_loop = loop.run(request, names, scope)
+            except Exception:
+                with self.store.transaction():
+                    self.store.db.execute("UPDATE context_builds SET status='model_error' WHERE id=?",
+                                          (request.build_id,))
+                raise
+            with self.store.transaction():
+                self.store.db.execute("UPDATE context_builds SET status=? WHERE id=?",
+                                      (f"tool_loop_{self.last_loop.status}", request.build_id))
+            return list(self.last_loop.materials), f"（工具循环：{self.last_loop.reason}）"
+        # Scripted models without tool rounds propose one query; a rejected one falls back to the point.
+        proposed = self.model.search_query(point, gap)
+        try:
+            return self.executor.run("web_search", {"query": proposed or point}, scope).value, ""
+        except ToolError as exc:
+            if exc.kind != "invalid_args" or not proposed:
+                raise
+        return self.executor.run("web_search", {"query": point}, scope).value, ""
 
     def sources_for(self, kp_id: str) -> list[dict[str, str]]:
         sources = [dict(r) for r in self.store.materials_for(kp_id)]
