@@ -184,3 +184,21 @@ def test_notion_tool_runs_through_the_executor(monkeypatch):
     result = ToolExecutor(registry, audits.append).run("notion_page", {"page": URL}, ToolScope(frozenset({"network"})))
     assert result.value[0].kind == "notion" and audits[-1]["status"] == "ok"
     assert "secret-token" not in json.dumps(audits)
+
+
+def test_cli_reports_preparation_failures_in_one_line(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from zhiqiu.cli import app
+    store, _, _ = prepare_service(tmp_path)
+    store.close()
+
+    class NoAccess(FakeNotion):
+        def fetch(self, reference):
+            raise ToolError("not_found", "Notion 页面不存在，或尚未在页面的“连接”中添加该集成", 404)
+
+    monkeypatch.setattr("zhiqiu.cli.load_local_env", lambda: None)
+    monkeypatch.setattr("zhiqiu.cli.runtime", lambda s, mcp=False: LearningRuntime(s, FakeModel(), notion=NoAccess()))
+    result = CliRunner().invoke(app, ["--db", str(tmp_path / "state.sqlite"), "learn", "遍历", "--notion", PAGE],
+                                input="y\n")
+    assert result.exit_code == 1 and "Traceback" not in result.output
+    assert "学习未开始：Notion 页面不存在" in result.output

@@ -314,8 +314,13 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
     urls = urls or []
     notion_pages = notion_pages or []
     service = runtime(store, mcp=not ctx.obj["offline"])
-    kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls,
-                                               notion_pages=notion_pages)
+    try:
+        kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls,
+                                                   notion_pages=notion_pages)
+    except ValueError as exc:
+        # Preparation failures (consent, fetch, Notion access, insufficient material) are user-facing.
+        typer.echo(f"学习未开始：{exc}", err=True)
+        raise typer.Exit(1) from None
     typer.echo("实际采用来源：")
     for material in materials:
         typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
@@ -335,9 +340,13 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
             _session(store, service, attempt)
             return
         if command in ("/sources web", "/sources local"):
-            kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"],
-                force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls,
-                notion_pages=notion_pages)
+            try:
+                kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"],
+                    force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls,
+                    notion_pages=notion_pages)
+            except ValueError as exc:
+                typer.echo(f"未能重新准备资料，保留原讲解：{exc}")
+                continue
             typer.echo("实际采用来源：")
             for material in materials:
                 typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
