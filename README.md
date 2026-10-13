@@ -1,6 +1,6 @@
 # 知秋
 
-知秋是本地 CLI 学习 Agent。用户指定一个知识点和 `.md`／`.txt` 资料、网页或 Notion 页面，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
+知秋是本地 CLI 学习 Agent。运行 `zhiqiu` 先显示学习状态，再进入自由对话；需要时由知秋建议、用户确认后进入学习、自测或复习。用户指定一个知识点和 `.md`／`.txt` 资料、网页或 Notion 页面，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
 
 ## 功能概览
 
@@ -9,13 +9,18 @@
 - **会话与记忆**：会话跨进程恢复；语义记忆只接受用户显式设置；评阅成功后异步生成有来源的情景摘要；跨天追问旧讲解时先用摘要，来源被更正后摘要失效并按需重建。
 - **评分**：同一维度可有多道题，题目难度在作答前固定；模型对每个维度给一个 0–4 分并引用原答逐字证据，程序核对题目覆盖与引文后按 50/30/20 计算总分。证据放不进一次调用时按维度、按题分批；仍无法可靠评阅时进入待评阅，不产生分数或排期。
 - **评分质量检查**：人工标注模板与一致率核对工具，用于验证模型评分与人工判断的一致性。
+- **对话与运行时**（V4）：默认自由对话（有界 ReAct 循环，可用全部工具）；模型只能“提议”进入流程或记住偏好，由用户确认、程序执行。业务状态和对话模式都有显式的状态转换表，每次迁移写事件，中断后读状态字段恢复。
 
 ## 项目结构与职责
 
 ```text
 .
 ├─ src/zhiqiu/
-│  ├─ cli.py          CLI 命令、用户确认和交互会话
+│  ├─ cli.py          CLI 命令、终端输入输出与用户确认
+│  ├─ agent.py        `zhiqiu chat` 对话外壳：有界 ReAct 循环、提议与确认、斜杠命令
+│  ├─ conversations.py 对话与对话消息的保存、按天划分、模式切换与删除
+│  ├─ flows.py        讲解、自测与复习的输入循环（终端与对话模式共用）
+│  ├─ flow.py         状态转换表与统一的状态转换入口
 │  ├─ runtime.py      学习／复习流程编排与模型输出校验
 │  ├─ context.py      分阶段上下文组装、预算检查与审计
 │  ├─ model.py        OpenAI 兼容 Chat Completions 适配器
@@ -63,7 +68,7 @@ flowchart LR
     ST --> DB[(SQLite：业务表、会话、记忆、审计)]
 ```
 
-所有模型调用都经过 `LearningRuntime._invoke`：先由 `ContextManager.build` 按阶段组装请求并检查预算，再交给适配器发送，返回的必须是 JSON 对象。必需内容超预算时改用已检查过的资料摘要；服务端报告窗口溢出时去掉可选内容重试一次。调用次数与顺序由业务流程决定，没有让模型自主循环调用工具。
+所有模型调用都经过 `LearningRuntime._invoke`：先由 `ContextManager.build` 按阶段组装请求并检查预算，再交给适配器发送，返回的必须是 JSON 对象。必需内容超预算时改用已检查过的资料摘要；服务端报告窗口溢出时去掉可选内容重试一次。业务流程中的调用次数与顺序由程序决定；只有对话模式和两个学习步骤开放有界工具循环（见“工具层”“对话模式”）。
 
 ## 学习与复习流程
 
@@ -99,7 +104,54 @@ flowchart TD
     R -->|连续困难达到阈值| T[标记需补学；完整自测开启新 FSRS 周期]
 ```
 
+### 状态机
+
+业务状态只能经 `flow.py` 的 `transition`／`enter` 改变：先按声明的转换表检查，合法才更新字段，并在同一事务内写一条 `StateChanged` 事件（实体、ID、原状态、新状态、原因）；表外的转换抛出 `IllegalTransition`（`ValueError` 的子类），字段和事件都不变。声明为“到自身”的转换（如进行中的尝试再次 `resume`）不改字段、不写事件。原有的业务事件（`AttemptPaused`、`ReviewSaved` 等）照常写入。
+
+| 实体（字段） | 转换 |
+|---|---|
+| 尝试（`attempts.state`） | 新建→`in_progress`；`in_progress`→`paused`／`awaiting_review`／`completed`／`needs_self_test`；`paused`、`needs_self_test`→`in_progress`；`awaiting_review`→`completed`；`completed` 为终点 |
+| 复习任务（`review_tasks.state`） | 新建→`pending`；`pending`→`started`／`relearn_handled`；`started`→`done`／`pending`（零回答推迟）／`relearn_handled`；`relearn_handled`→`pending`（修订撤销补学）；`done` 为终点 |
+| 知识点（`knowledge_points.state`） | 新建→`active`；`active`↔`needs_relearn` |
+| 讲解（`sessions.lesson_state`） | 新建→`teaching`；`teaching`→`tested`（同日开始自测）／`closed`（`/end` 或跨天续讲时关闭旧会话）；`tested`、`closed` 为终点 |
+| 对话（`conversations.mode`） | 新建→`chat`；`chat`→`lesson`／`self_test`／`review`；`lesson`→`self_test`／`chat`；`self_test`、`review`→`chat` |
+
+待继续的讲解直接读 `lesson_state='teaching'`，不再从消息推算。讲解关闭后，当天再开始的讲解进入新会话，可以正常继续。v14 迁移按已有消息回填 `lesson_state`（已关联尝试为 `tested`，有关闭记录为 `closed`，其余有讲解的会话为 `teaching`）。
+
 运行边界：一次问答最多 8 题或 25 分钟。完整评阅按概念准确、机制解释、应用辨析分别给 0–4 分，权重 50/30/20，得分映射为 FSRS 的 Again、Hard、Good、Easy；阶段性评阅统一次日提醒，零回答不新建任务。`revise` 按修订后的分数重算受影响的 FSRS 状态和未开始任务的到期日。使用 Py-FSRS 6.3.2、90% 目标回忆率、365 天上限，关闭分钟级步骤和随机扰动。
+
+## 对话模式
+
+`zhiqiu chat`（或在交互终端中直接运行 `zhiqiu`）先显示完整状态，再进入对话；脚本和管道中直接运行 `zhiqiu` 仍只显示状态。每一轮：
+
+1. 用户的话先写入 `conversation_messages`。
+2. 用 `chat` 模板组装请求：固定规则、本段对话开始时冻结的偏好与人设记忆、学习状态快照、可读与可写目录是必需内容；较早对话的摘要和摘要之后的原文是可选内容，超出预算时先丢摘要之后最旧的原文，最后才丢摘要。
+   - 学习状态快照只在对话启动和每次流程结束后刷新，两次刷新之间系统提示保持不变，请求前缀可以复用；对话中需要最新状态时由模型调用 `zhiqiu_status`。
+   - 工具循环每次模型调用后记下服务端报告的 `prompt_tokens`（与业务流程的 `observe_usage` 同一机制），之后保留该前缀的请求按“已测量前缀 + 新增部分”估算预算。
+   - 滚动摘要：未被摘要的历史估算超过输入上限的 70%（未配置预算时为超过 40 条）时，保留最近 10 条原文，把更早的消息连同已有摘要交给 `chat_summary` 阶段生成新摘要，写入 `chat_summaries`（记录覆盖到的消息序号与来源哈希），原文不删除；输入过长时只取较早的一半再试；生成失败时记入 `last_error`，本轮退回为丢弃最旧消息，照常回答。
+3. 进入有界工具循环（沿用 V3：最多 5 轮、总时限 180 秒；用完时再要一次不调用工具的文字回答，最多等 30 秒）。回答写入对话记录，结束状态与轮数记在消息的 `payload_json` 中；拿不到回答时记入 `conversations.last_error`，对话继续。
+
+对话中的工具规则：
+
+| 工具 | 规则 |
+|---|---|
+| `read_file` | 只读 `ZHIQIU_READ_ROOTS` 白名单目录中的 `.md`/`.txt`，白名单外、`..`、符号链接一律拒绝；配置白名单即表示同意把其中的文件发送到模型端点，读取时不再逐次确认 |
+| `write_file` | 同 V3：只写 `ZHIQIU_WRITE_ROOTS`，每次确认，覆盖前备份 |
+| `web_search`、`fetch_url`、外部 MCP 工具 | 每次调用前确认，显示查询、网址或参数；参数不得包含本次运行中读到的笔记原文（连续 15 字）；`--offline` 时不提供 |
+| `zhiqiu_*` | 只读业务查询，直接执行 |
+| `propose_learn`、`propose_review`、`propose_resume`、`propose_memory` | 权限类别 `propose`：只提出建议，调用后工具循环立即结束，同一轮中排在它之后的调用不执行 |
+
+提议由程序先按业务规则检查（资料须在可读目录内、复习须已到期且当日不超过 3 次、要继续的尝试或讲解须存在），不可执行时直接说明原因；可执行时展示并请用户确认，确认后才切换对话模式、进入 `flows.py` 中的流程，`learn` 仍会再确认一次发送哪些资料。同一提议用 `receipts` 中的 `proposal:<消息ID>` 防止重复执行。流程结束、暂停或中断后回到对话，并写一条 `flow_result` 摘要。
+
+斜杠命令由程序直接执行，不经过模型：`/status`、`/learn 知识点 [--from 路径] [--url 网址] [--notion 页面]`、`/review [知识点]`、`/resume [ID]`、`/memory`、`/new`、`/help`、`/exit`。用户自己输入的命令不需要再确认是否进入流程。
+
+中断与恢复：模型调用或工具执行中按 Ctrl+C 只取消当前一轮（写一条“已取消”）；在输入提示处按 Ctrl+C 或 EOF 退出对话，对话仍保持打开；确认提示中按 Ctrl+C 视为拒绝。启动时若对话模式停在流程中（例如上次崩溃），以业务表为准改回 `chat`（事件原因 `reconcile`），并提示可以 `/resume` 的自测或讲解，不会自动进入。
+
+对话记录：
+
+- 按天划分：当天再次进入接着当天的对话，第二天自动开新对话；`/new` 随时开新对话，`zhiqiu chat --resume ID` 回到旧对话。
+- 永久保留，不自动清理。`zhiqiu chat list` 列出、`zhiqiu chat log ID` 查看（消息、摘要、模式切换事件、工具调用），`zhiqiu chat forget ID|--all` 删除；删除时一并删除该对话的摘要；工具审计保留，但不再关联到对话。`export` 包含对话与摘要表。
+- 偏好与人设：模型可用 `propose_memory` 提议记住用户明确表达的长期偏好（key 以 `pref.` 或 `soul.` 开头，单条不超过 300 字，这两类合计不超过 2000 字）；用户确认后才写入语义记忆，来源记为 `chat:<消息ID>`。每段对话开始时冻结一份全局记忆快照，本段对话中新记住的内容从下一段对话开始生效；讲解、澄清照常使用全局记忆，评分不使用。
 
 ## 评分
 
@@ -119,7 +171,7 @@ flowchart TD
 
 目前注册的工具有 `notion_page`（只供程序调用，见“Notion 页面资料”）、业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 
-开放工具循环（受限 ReAct）的步骤只有两个：资料准备和学习阶段的澄清（`learn` 或讲解恢复时的 `/question`）。资料准备时，本地资料不足时，模型在最多 5 轮内反复调用本步骤允许的读取类与网络类工具补充资料，每轮的工具结果作为 tool 消息交回模型。模型不再调用工具、达到轮数上限、下一轮请求将超出输入预算，或超过整个循环的总时限（默认 180 秒）时循环结束；之后仍由程序重新判断资料是否充分，不充分则停止学习。工具结果计入上下文预算，`tool_calls` 记录每次调用所属的循环 ID 和轮次。出题、评分、保存和排期不在循环中；自测和复习中的澄清不开放工具。
+业务流程中开放工具循环（受限 ReAct）的步骤只有两个：资料准备和学习阶段的澄清（`learn` 或讲解恢复时的提问）；对话模式另有自己的工具规则（见“对话模式”）。资料准备时，本地资料不足时，模型在最多 5 轮内反复调用本步骤允许的读取类与网络类工具补充资料，每轮的工具结果作为 tool 消息交回模型。模型不再调用工具、达到轮数上限、下一轮请求将超出输入预算，或超过整个循环的总时限（默认 180 秒）时循环结束；之后仍由程序重新判断资料是否充分，不充分则停止学习。工具结果计入上下文预算，`tool_calls` 记录每次调用所属的循环 ID 和轮次。出题、评分、保存和排期不在循环中；自测和复习中的澄清不开放工具。
 
 学习阶段澄清可用 `read_file` 和 `write_file`。轮数用完或超过总时限时，程序再请求一次不允许调用工具的最终回答（这次请求最多等 30 秒）；仍拿不到有效回答时，改用不带工具的普通澄清。
 
@@ -154,7 +206,7 @@ flowchart TD
 - 启动时不打印到期提醒，标准输出只留给 MCP 协议。
 - 需要可选依赖 `mcp`（官方 Python SDK，MIT 许可，锁定在 `>=1.10,<2`，当前锁定 1.30.0）：`uv sync --extra mcp`。
 
-接入方式（`--db` 可省略，默认用户数据目录下的 `zhiqiu/state.sqlite`；数据库须先被 3.0.0 版 CLI 打开过一次，完成 v13 迁移）：
+接入方式（`--db` 可省略，默认用户数据目录下的 `zhiqiu/state.sqlite`；数据库须先被 4.0.0 版 CLI 打开过一次，完成 v15 迁移）：
 
 - Claude Code（项目级配置，适合没有 `claude` 命令行的环境，例如桌面版）：在要使用知秋的项目目录放一个 `.mcp.json`。`D:\code\知秋\.mcp.json` 已按此写好：
 
@@ -171,11 +223,11 @@ flowchart TD
   ```
 - Hermes（本版搁置，未做真实接入，仅供参考）：在 `config.yaml` 的 `mcp_servers` 段增加一项，`command` 为 `uv`，`args` 为 `["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "--db", "D:\\path\\to\\state.sqlite", "mcp"]`。本机的 Hermes 学习源码不含 MCP 配置解析部分，字段名请以 Hermes 文档为准。
 
-[server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==3.0.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
+[server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==4.0.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
 
 ## 外部 MCP 工具（客户端）
 
-配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后，`learn` 会启动其中列出的本地 stdio MCP 服务，把白名单内的工具接入工具层，供资料准备的工具循环使用（学习阶段澄清、自测和复习不开放外部工具）。示例见 [examples/mcp.example.json](examples/mcp.example.json)（官方 `mcp-server-fetch`）：
+配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后，`learn` 会启动其中列出的本地 stdio MCP 服务，把白名单内的工具接入工具层，供资料准备的工具循环和对话模式使用（对话中每次调用前确认；学习阶段澄清、自测和复习不开放外部工具）。示例见 [examples/mcp.example.json](examples/mcp.example.json)（官方 `mcp-server-fetch`）：
 
 ```json
 {"servers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"],
@@ -189,7 +241,7 @@ flowchart TD
 
 ## 记忆与跨天追问
 
-- `memory set/list/delete` 管理语义记忆，需给出作用范围与来源；知识点专属的同名设置覆盖全局设置。普通对话不会被自动存为记忆。
+- `memory set/list/delete` 管理语义记忆，需给出作用范围与来源；知识点专属的同名设置覆盖全局设置。对话中只有经用户确认的 `propose_memory` 会写入记忆，不会自动保存。
 - 跨天追问旧讲解时开启新会话，通过来源 ID 关联旧讲解；摘要按需生成并缓存，`correct-lesson` 追加更正后旧摘要失效。
 - `ask` 未指定 `--source` 且有多次旧讲解时，按追问内容对旧讲解排序：汉字二元组按候选集合做 IDF 加权重合，英文与数字按整词匹配，“为什么、怎么、而不是”等疑问与虚词短语不参与匹配，再加上最长共同片段和较弱的时间衰减。最高分达到阈值且明显领先时自动选用并说明，否则列出前 3 个候选，提示用 `--source` 指定或用 `--all` 逐次处理。每次排序的分数、信号和取舍理由记为 `LessonRetrieval` 事件。排序参数用 `labels/retrieval/cases.json` 校准（`examples/calibrate_retrieval.py`）。
 
@@ -220,7 +272,8 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 |---|---|---|
 | `ZHIQIU_EXA_API_KEY` | Exa 联网搜索补充资料、`learn --url` 获取网页正文 | 不能联网补充，不能用 `--url` |
 | `ZHIQIU_NOTION_TOKEN` | `learn --notion` 读取 Notion 页面（Notion 内部集成令牌，设置见“Notion 页面资料”） | 不能用 `--notion` |
-| `ZHIQIU_WRITE_ROOTS` | 学习中澄清时允许写笔记的目录，多个用 `;` 分隔，例如 `D:\notes\zhiqiu` | 不注册 `write_file` |
+| `ZHIQIU_WRITE_ROOTS` | 学习中澄清和对话时允许写笔记的目录，多个用 `;` 分隔，例如 `D:\notes\zhiqiu` | 不注册 `write_file` |
+| `ZHIQIU_READ_ROOTS` | 对话中允许直接读取的笔记目录（白名单），多个用 `;` 分隔；也是对话中 `propose_learn` 可指定资料的范围 | 对话中不能读文件 |
 | `ZHIQIU_MCP_CONFIG` | 外部 MCP 工具配置文件，例如 `D:\code\知秋\知秋V1.0\examples\mcp.example.json` | 不启动外部 MCP 服务 |
 | `ZHIQIU_MODEL_BUDGETS` | 按模型配置窗口、输出预留与余量（见下文） | 沿用下面三个变量 |
 | `ZHIQIU_LLM_WINDOW`、`ZHIQIU_LLM_OUTPUT_RESERVE`、`ZHIQIU_LLM_MARGIN` | 未在 `ZHIQIU_MODEL_BUDGETS` 中匹配的模型的预算 | 不做超限判断 |
@@ -249,6 +302,11 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --from .\notes.md
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --url https://en.wikipedia.org/wiki/Tree_traversal
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --notion https://www.notion.so/你的页面-<32位页面ID>
+uv run zhiqiu --db .\state.sqlite chat
+uv run zhiqiu --db .\state.sqlite chat --resume CONVERSATION_ID
+uv run zhiqiu --db .\state.sqlite chat list
+uv run zhiqiu --db .\state.sqlite chat log CONVERSATION_ID
+uv run zhiqiu --db .\state.sqlite chat forget CONVERSATION_ID
 uv run zhiqiu --db .\state.sqlite status
 uv run zhiqiu --db .\state.sqlite resume
 uv run zhiqiu --db .\state.sqlite review
@@ -268,7 +326,7 @@ uv run zhiqiu --db .\state.sqlite labels-template --json .\human-labels.json
 uv run zhiqiu --db .\state.sqlite evaluate --labels .\human-labels.json
 ```
 
-会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题。直接关闭或异常退出不会自动结案。`--offline` 禁止 Web 补充，也不能使用 `--url`、`--notion`。`--url`、`--notion` 可重复，可与 `--from` 同时使用，三者至少给出一个；每个网页最多取 15,000 字，超出部分截断并在来源说明中注明，本地、网页与 Notion 资料合计不超过 100,000 字。网页或 Notion 页面获取失败时学习停止，不保存任何资料。低分维度关联的原题原答会成为后续复习出题的重点。
+会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题；讲解阶段直接输入不以 `/` 开头的文字也按澄清问题处理（以 `/` 开头但不认识的输入仍提示“未知命令”）。直接关闭或异常退出不会自动结案。讲解、自测与复习的输入循环在 `flows.py` 中，CLI 命令与对话模式共用。自测和复习中，`/answer 文本` 直接作为回答保存，`/question 文本` 直接作为提问；不带前缀的输入先由模型判断是回答还是提问（`classify_turn`，拿不准时判为提问）：判为回答直接保存；判为提问时请用户确认（回车确认，输入 `a` 改为回答），确认的提问按澄清处理、记为不计入评分的笔记（事件标记 `via=classified`），评分请求看不到它；判断失败时请用户选择 `a` 或 `q`。不支持判断的脚本化模型按回答保存。`--offline` 禁止 Web 补充，也不能使用 `--url`、`--notion`。`--url`、`--notion` 可重复，可与 `--from` 同时使用，三者至少给出一个；每个网页最多取 15,000 字，超出部分截断并在来源说明中注明，本地、网页与 Notion 资料合计不超过 100,000 字。网页或 Notion 页面获取失败时学习停止，不保存任何资料。低分维度关联的原题原答会成为后续复习出题的重点。
 
 ## 验证与诊断
 
@@ -295,12 +353,13 @@ uv run zhiqiu check-model --capacity
 Remove-Item Env:ZHIQIU_MODEL_BUDGETS
 ```
 
-真实服务检查只使用公开合成内容，不读取个人学习资料。`live_smoke.py` 让模型发出一次 `web_search` 工具调用，再经工具层调用 Exa，不打开数据库；`live_v2_smoke.py` 在临时数据库中跑完整学习流程：
+真实服务检查只使用公开合成内容，不读取个人学习资料。`live_smoke.py` 让模型发出一次 `web_search` 工具调用，再经工具层调用 Exa，不打开数据库；`live_v2_smoke.py` 在临时数据库中跑完整学习流程；`live_v4_smoke.py` 在临时数据库中跑对话模式（状态查询、提议进入学习、自测中提问、记住偏好、较早对话的滚动摘要），只用公开合成笔记、不联网：
 
 ```powershell
 uv run --python 3.12 python examples/live_smoke.py
 uv run --python 3.12 python examples/live_v2_smoke.py
 uv run --python 3.12 python examples/live_v2_smoke.py --all-model-questions
+uv run --python 3.12 python examples/live_v4_smoke.py
 ```
 
 评分质量用人工标注检查：`labels-template` 导出原题、原答、模型分数和证据，人工在 `human_score` 填入 0–4 后运行 `evaluate`，核对精确一致率（至少 30 项、≥80%）并逐项检查引文仍在原答中。`labels/` 中的公开合成样本可用以下脚本评分与核对：

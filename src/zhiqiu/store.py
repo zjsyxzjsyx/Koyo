@@ -12,13 +12,13 @@ from typing import Any, Iterator
 
 from fsrs import Card, Rating, Scheduler
 
-from . import queries
+from . import flow, queries
 from .clock import Clock
 from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assessments_for, calculate,
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
 
 def new_id() -> str:
@@ -74,9 +74,11 @@ class Store:
             "llm_calls": """SELECT id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,
                 tokens_in,tokens_out,status,created_at FROM llm_calls""",
             "search_calls": "SELECT id,point,query,result_count,status,created_at FROM search_calls",
-            "tool_calls": "SELECT * FROM tool_calls",
+            "tool_calls": """SELECT id,tool,source,permission,kp_id,attempt_id,session_id,point,loop_id,round,
+                args_summary_json,confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,
+                truncated,created_at FROM tool_calls""",
             "metrics": "SELECT * FROM metrics",
-            "sessions": "SELECT * FROM sessions",
+            "sessions": "SELECT id,kp_id,attempt_id,session_date,created_at FROM sessions",
             "messages": "SELECT * FROM messages",
             "message_materials": "SELECT * FROM message_materials",
             "scoring_submissions": "SELECT * FROM scoring_submissions",
@@ -442,6 +444,44 @@ class Store:
                     latency_ms INTEGER NOT NULL, result_count INTEGER, output_chars INTEGER NOT NULL,
                     truncated INTEGER NOT NULL, created_at TEXT NOT NULL)""")
                 self.db.execute("PRAGMA user_version=13")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 14:
+            with self.transaction():
+                # Explicit lesson state replaces inferring it from lesson_closed messages.
+                for table, column in (("sessions", "lesson_state"), ("tool_calls", "conversation_id")):
+                    if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+                self.db.execute("""UPDATE sessions SET lesson_state=CASE
+                    WHEN attempt_id IS NOT NULL THEN 'tested'
+                    WHEN EXISTS(SELECT 1 FROM messages m WHERE m.session_id=sessions.id
+                        AND m.kind='lesson_closed') THEN 'closed'
+                    ELSE 'teaching' END
+                    WHERE EXISTS(SELECT 1 FROM messages m WHERE m.session_id=sessions.id
+                        AND m.kind IN ('lesson','lesson_resume'))""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY, chat_date TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('open','closed')), end_reason TEXT,
+                    mode TEXT NOT NULL, active_kind TEXT, active_id TEXT,
+                    goal TEXT NOT NULL DEFAULT '', step TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '', memory_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+                    kind TEXT NOT NULL, content TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, UNIQUE(conversation_id, seq))""")
+                self.db.execute("PRAGMA user_version=14")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 15:
+            with self.transaction():
+                # The chat keeps its learning-status snapshot and rolling summaries of older turns.
+                if "status_snapshot_json" not in {row["name"] for row in self.db.execute("PRAGMA table_info(conversations)")}:
+                    self.db.execute("ALTER TABLE conversations ADD COLUMN status_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS chat_summaries (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    upto_seq INTEGER NOT NULL, source_hash TEXT NOT NULL, content TEXT NOT NULL,
+                    created_at TEXT NOT NULL, UNIQUE(conversation_id, upto_seq, source_hash))""")
+                self.db.execute("PRAGMA user_version=15")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -467,18 +507,24 @@ class Store:
                 AND attempt_id=? ORDER BY rowid DESC LIMIT 1""", (kp_id, today, attempt_id)).fetchone()
             if row:
                 return row["id"]
-            row = self.db.execute("""SELECT id FROM sessions WHERE kp_id=? AND session_date=?
-                AND attempt_id IS NULL ORDER BY rowid DESC LIMIT 1""", (kp_id, today)).fetchone()
+            row = self.db.execute("""SELECT id,lesson_state FROM sessions WHERE kp_id=? AND session_date=?
+                AND attempt_id IS NULL AND lesson_state IS NOT 'closed' ORDER BY rowid DESC LIMIT 1""",
+                (kp_id, today)).fetchone()
             if row:
                 self.db.execute("UPDATE sessions SET attempt_id=? WHERE id=?", (attempt_id, row["id"]))
+                if row["lesson_state"] == "teaching":
+                    flow.transition(self, "lesson", row["id"], "tested", "attempt_started",
+                                    kp_id=kp_id, attempt_id=attempt_id)
                 return row["id"]
         else:
+            # A closed lesson stays closed; later messages of the day open a new session.
             row = self.db.execute("""SELECT id FROM sessions WHERE kp_id=? AND session_date=?
-                AND attempt_id IS NULL ORDER BY rowid DESC LIMIT 1""", (kp_id, today)).fetchone()
+                AND attempt_id IS NULL AND lesson_state IS NOT 'closed' ORDER BY rowid DESC LIMIT 1""",
+                (kp_id, today)).fetchone()
             if row:
                 return row["id"]
         session_id = new_id()
-        self.db.execute("INSERT INTO sessions VALUES(?,?,?,?,?)",
+        self.db.execute("INSERT INTO sessions(id,kp_id,attempt_id,session_date,created_at) VALUES(?,?,?,?,?)",
                         (session_id, kp_id, attempt_id, today, self._ts()))
         return session_id
 
@@ -500,6 +546,8 @@ class Store:
         if role == "assistant" and kind in ("lesson", "lesson_resume", "clarification"):
             self.db.execute("""INSERT INTO message_materials(message_id,material_id)
                 SELECT ?,id FROM materials WHERE kp_id=? AND active=1""", (message_id, kp_id))
+        if kind in ("lesson", "lesson_resume") and attempt_id is None:
+            flow.transition(self, "lesson", session_id, "teaching", kind, kp_id=kp_id)
         return message_id
 
     def record_message(self, kp_id: str, role: str, kind: str, content: str,
@@ -552,8 +600,7 @@ class Store:
             FROM sessions s JOIN knowledge_points k ON k.id=s.kp_id
             JOIN messages m ON m.id=(SELECT id FROM messages WHERE session_id=s.id
                 AND kind IN ('lesson','lesson_resume') ORDER BY rowid DESC LIMIT 1)
-            WHERE s.attempt_id IS NULL AND NOT EXISTS(
-                SELECT 1 FROM messages closed WHERE closed.session_id=s.id AND closed.kind='lesson_closed')
+            WHERE s.attempt_id IS NULL AND s.lesson_state='teaching'
             ORDER BY s.rowid DESC""").fetchall()
 
     def lesson_candidates(self, kp_id: str) -> list[sqlite3.Row]:
@@ -652,17 +699,20 @@ class Store:
             self.db.execute("""INSERT INTO messages
                 (id,session_id,role,kind,content,created_at) VALUES(?,?,?,?,?,?)""",
                 (new_id(), session_id, "tool", "lesson_closed", "continued in a new session", self._ts()))
+            flow.transition(self, "lesson", session_id, "closed", "continued", kp_id=row["kp_id"])
             self._append_message(row["kp_id"], "assistant", "lesson_resume", row["lesson"],
                                  source_message_id=row["lesson_message_id"])
             return dict(self.pending_lessons()[0])
 
     def close_lesson(self, session_id: str) -> None:
         with self.transaction():
-            if not any(item["session_id"] == session_id for item in self.pending_lessons()):
+            row = next((item for item in self.pending_lessons() if item["session_id"] == session_id), None)
+            if not row:
                 raise ValueError("lesson is not pending")
             self.db.execute("""INSERT INTO messages
                 (id,session_id,role,kind,content,created_at) VALUES(?,?,?,?,?,?)""",
                 (new_id(), session_id, "tool", "lesson_closed", "ended without self-test", self._ts()))
+            flow.transition(self, "lesson", session_id, "closed", "ended", kp_id=row["kp_id"])
 
     def _event(self, kp_id: str | None, attempt_id: str | None, kind: str, payload: dict[str, Any]) -> None:
         self.db.execute("INSERT INTO events(kp_id,attempt_id,type,payload_json,created_at) VALUES(?,?,?,?,?)",
@@ -697,8 +747,9 @@ class Store:
         with self.transaction():
             self.db.execute("""INSERT INTO tool_calls
                 (id,tool,source,permission,kp_id,attempt_id,session_id,point,loop_id,round,args_summary_json,
-                 confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,truncated,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,truncated,created_at,
+                 conversation_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (details["id"], details["tool"], details.get("source"), details.get("permission"),
                  details.get("kp_id"), details.get("attempt_id"), details.get("session_id"),
                  details.get("point") or "", details.get("loop_id"), details.get("round"),
@@ -706,7 +757,7 @@ class Store:
                  None if confirmed is None else int(bool(confirmed)), details["status"],
                  details.get("error_kind"), details["attempts"], details["latency_ms"],
                  details.get("result_count"), details["output_chars"], int(bool(details.get("truncated"))),
-                 self._ts()))
+                 self._ts(), details.get("conversation_id")))
 
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
@@ -722,6 +773,7 @@ class Store:
             kp_id = new_id()
             self.db.execute("INSERT INTO knowledge_points(id,title,parent_id,created_at) VALUES(?,?,?,?)", (kp_id, title, parent_id, self._ts()))
             self._event(kp_id, None, "KnowledgePointCreated", {"title": title, "parent_id": parent_id})
+            flow.enter(self, "knowledge_point", kp_id, "active", "created", kp_id=kp_id)
             return kp_id
 
     def add_materials(self, kp_id: str, materials: list[dict[str, str]]) -> None:
@@ -787,11 +839,14 @@ class Store:
             attempt_id = new_id()
             self.db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?)",
                             (attempt_id, kp_id, kind, "in_progress", self.clock.today().isoformat(), self._ts(), None, None))
+            flow.enter(self, "attempt", attempt_id, "in_progress", f"start_{kind}", kp_id=kp_id, attempt_id=attempt_id)
             self._ensure_session(kp_id, attempt_id)
             for task_id in task_ids:
                 self.db.execute("INSERT INTO attempt_tasks VALUES(?,?)", (attempt_id, task_id))
-                self.db.execute("UPDATE review_tasks SET state='started',started_at=COALESCE(started_at,?) WHERE id=?",
+                self.db.execute("UPDATE review_tasks SET started_at=COALESCE(started_at,?) WHERE id=?",
                                 (self._ts(), task_id))
+                flow.transition(self, "review_task", task_id, "started", "review_started",
+                                kp_id=kp_id, attempt_id=attempt_id)
             self._event(kp_id, attempt_id, "AttemptStarted", {"kind": kind, "tasks": task_ids})
             return attempt_id
 
@@ -804,7 +859,9 @@ class Store:
                 # A zero-answer first self-test is not a final review. Clear receipts
                 # from older versions so the same attempt can later be assessed.
                 self.db.execute("DELETE FROM receipts WHERE operation_key=?", (f"finalize:{attempt_id}",))
-            self.db.execute("UPDATE attempts SET state='in_progress',ended_at=NULL,finish_reason=NULL WHERE id=?", (attempt_id,))
+            flow.transition(self, "attempt", attempt_id, "in_progress", "resume",
+                            kp_id=row["kp_id"], attempt_id=attempt_id)
+            self.db.execute("UPDATE attempts SET ended_at=NULL,finish_reason=NULL WHERE id=?", (attempt_id,))
             self._ensure_session(row["kp_id"], attempt_id)
             self._event(row["kp_id"], attempt_id, "AttemptResumed", {})
 
@@ -813,7 +870,7 @@ class Store:
             row = self.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
             if not row or row["state"] != "in_progress":
                 raise ValueError("attempt is not in progress")
-            self.db.execute("UPDATE attempts SET state='paused' WHERE id=?", (attempt_id,))
+            flow.transition(self, "attempt", attempt_id, "paused", "pause", kp_id=row["kp_id"], attempt_id=attempt_id)
             self._event(row["kp_id"], attempt_id, "AttemptPaused", {})
 
     def add_question(self, attempt_id: str, dimension: str, question: str,
@@ -880,7 +937,8 @@ class Store:
             if not self.db.execute("""SELECT 1 FROM answers a JOIN questions q ON q.id=a.question_id
                 WHERE q.attempt_id=?""", (attempt_id,)).fetchone():
                 raise ValueError("no answer to review")
-            self.db.execute("UPDATE attempts SET state='awaiting_review' WHERE id=?", (attempt_id,))
+            flow.transition(self, "attempt", attempt_id, "awaiting_review", "review_deferred",
+                            kp_id=attempt["kp_id"], attempt_id=attempt_id)
             self._event(attempt["kp_id"], attempt_id, "ReviewDeferred", {"detail": detail})
             return {"attempt_id": attempt_id, "kind": "awaiting_review", "detail": detail,
                     "task_id": None, "due_date": None}
@@ -1017,21 +1075,28 @@ class Store:
                 self.db.execute("INSERT INTO review_tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                 (task_id, attempt["kp_id"], review_id, due.isoformat(), due.isoformat(),
                                  due.isoformat(), "pending", 0, rule, now, None, None))
+                flow.enter(self, "review_task", task_id, "pending", "scheduled",
+                           kp_id=attempt["kp_id"], attempt_id=attempt_id)
             if attempt["kind"] == "review":
-                self.db.execute("""UPDATE review_tasks SET state='done',completed_at=? WHERE id IN
-                    (SELECT task_id FROM attempt_tasks WHERE attempt_id=?)""", (now, attempt_id))
+                for (done_id,) in self.db.execute("SELECT task_id FROM attempt_tasks WHERE attempt_id=?",
+                                                  (attempt_id,)).fetchall():
+                    self._task_to(done_id, "done", "reviewed", attempt["kp_id"], attempt_id, now)
             if new_cycle and result.complete:
-                self.db.execute("""UPDATE review_tasks SET state='relearn_handled',completed_at=?
-                    WHERE kp_id=? AND state IN ('pending','started') AND id<>?""", (now, attempt["kp_id"], task_id))
-                self.db.execute("UPDATE knowledge_points SET state='active',difficulty_streak=0 WHERE id=?", (attempt["kp_id"],))
+                for (old_id,) in self.db.execute("""SELECT id FROM review_tasks WHERE kp_id=?
+                        AND state IN ('pending','started') AND id<>?""", (attempt["kp_id"], task_id)).fetchall():
+                    self._task_to(old_id, "relearn_handled", "relearned", attempt["kp_id"], attempt_id, now)
+                flow.transition(self, "knowledge_point", attempt["kp_id"], "active", "relearned",
+                                kp_id=attempt["kp_id"], attempt_id=attempt_id)
+                self.db.execute("UPDATE knowledge_points SET difficulty_streak=0 WHERE id=?", (attempt["kp_id"],))
                 streak = 0
             if attempt["kind"] == "review" and result.complete:
                 if streak >= 3:
-                    self.db.execute("UPDATE knowledge_points SET state='needs_relearn',difficulty_streak=? WHERE id=?",
-                                    (streak, attempt["kp_id"]))
-                else:
-                    self.db.execute("UPDATE knowledge_points SET difficulty_streak=? WHERE id=?", (streak, attempt["kp_id"]))
-            self.db.execute("UPDATE attempts SET state='completed',ended_at=?,finish_reason=? WHERE id=?", (now, reason, attempt_id))
+                    flow.transition(self, "knowledge_point", attempt["kp_id"], "needs_relearn", "difficulty_streak",
+                                    kp_id=attempt["kp_id"], attempt_id=attempt_id)
+                self.db.execute("UPDATE knowledge_points SET difficulty_streak=? WHERE id=?", (streak, attempt["kp_id"]))
+            flow.transition(self, "attempt", attempt_id, "completed", f"finalize_{reason}",
+                            kp_id=attempt["kp_id"], attempt_id=attempt_id)
+            self.db.execute("UPDATE attempts SET ended_at=?,finish_reason=? WHERE id=?", (now, reason, attempt_id))
             self._queue_episode_job(attempt["kp_id"], review_id)
             self._event(attempt["kp_id"], attempt_id, "ReviewSaved", {"review_id": review_id, "kind": kind, "total": result.total})
             if task_id:
@@ -1051,24 +1116,35 @@ class Store:
         attempt_id = attempt["id"]
         now = self._ts()
         if attempt["kind"] == "first":
-            self.db.execute("UPDATE attempts SET state='needs_self_test',ended_at=?,finish_reason='zero' WHERE id=?", (now, attempt_id))
+            flow.transition(self, "attempt", attempt_id, "needs_self_test", "zero_answer",
+                            kp_id=attempt["kp_id"], attempt_id=attempt_id)
+            self.db.execute("UPDATE attempts SET ended_at=?,finish_reason='zero' WHERE id=?", (now, attempt_id))
             output = {"attempt_id": attempt_id, "kind": "zero", "task_id": None, "due_date": None}
         else:
             task_ids = [r[0] for r in self.db.execute("SELECT task_id FROM attempt_tasks WHERE attempt_id=?", (attempt_id,))]
             next_date = (self.clock.today() + timedelta(days=1)).isoformat()
             for task_id in task_ids:
-                self.db.execute("""UPDATE review_tasks SET state='pending',next_remind_date=?,
+                flow.transition(self, "review_task", task_id, "pending", "zero_answer_deferred",
+                                kp_id=attempt["kp_id"], attempt_id=attempt_id)
+                self.db.execute("""UPDATE review_tasks SET next_remind_date=?,
                     deferrals=deferrals+1 WHERE id=?""", (next_date, task_id))
             streak = self.db.execute("SELECT difficulty_streak FROM knowledge_points WHERE id=?", (attempt["kp_id"],)).fetchone()[0] + 1
-            self.db.execute("UPDATE knowledge_points SET difficulty_streak=?,state=? WHERE id=?",
-                            (streak, "needs_relearn" if streak >= 3 else "active", attempt["kp_id"]))
-            self.db.execute("UPDATE attempts SET state='completed',ended_at=?,finish_reason='zero' WHERE id=?", (now, attempt_id))
+            flow.transition(self, "knowledge_point", attempt["kp_id"], "needs_relearn" if streak >= 3 else "active",
+                            "zero_answer", kp_id=attempt["kp_id"], attempt_id=attempt_id)
+            self.db.execute("UPDATE knowledge_points SET difficulty_streak=? WHERE id=?", (streak, attempt["kp_id"]))
+            flow.transition(self, "attempt", attempt_id, "completed", "zero_answer",
+                            kp_id=attempt["kp_id"], attempt_id=attempt_id)
+            self.db.execute("UPDATE attempts SET ended_at=?,finish_reason='zero' WHERE id=?", (now, attempt_id))
             output = {"attempt_id": attempt_id, "kind": "zero", "task_id": None,
                       "due_date": next_date if streak < 3 else None, "needs_relearn": streak >= 3}
         self._event(attempt["kp_id"], attempt_id, "ZeroAnswer", output)
         if attempt["kind"] == "review":
             self.db.execute("INSERT INTO receipts VALUES(?,?,?,?)", (f"finalize:{attempt_id}", attempt_id, json.dumps(output), now))
         return output
+
+    def _task_to(self, task_id: str, state: str, cause: str, kp_id: str, attempt_id: str | None, now: str) -> None:
+        flow.transition(self, "review_task", task_id, state, cause, kp_id=kp_id, attempt_id=attempt_id)
+        self.db.execute("UPDATE review_tasks SET completed_at=? WHERE id=?", (now, task_id))
 
     def due_tasks(self) -> list[sqlite3.Row]:
         return queries.due_tasks(self.db, self.clock.today().isoformat())
@@ -1080,7 +1156,8 @@ class Store:
         return queries.trace(self.db, attempt_id)
 
     def add_note(self, kp_id: str, kind: str, text: str, explanation: str = "",
-                 attempt_id: str | None = None, source_message_id: str | None = None) -> str:
+                 attempt_id: str | None = None, source_message_id: str | None = None,
+                 via: str | None = None) -> str:
         if kind not in ("wrong_point", "clarification", "interest") or not text.strip():
             raise ValueError("invalid note")
         with self.transaction():
@@ -1090,7 +1167,8 @@ class Store:
             if kind == "clarification":
                 self._append_message(kp_id, "user", "clarification", text.strip(), attempt_id,
                                      note_id=note_id, source_message_id=source_message_id)
-            self._event(kp_id, attempt_id, "NoteRecorded", {"note_id": note_id, "kind": kind})
+            self._event(kp_id, attempt_id, "NoteRecorded",
+                        {"note_id": note_id, "kind": kind, **({"via": via} if via else {})})
             return note_id
 
     def explain_note(self, note_id: str, explanation: str) -> None:
@@ -1171,13 +1249,14 @@ class Store:
                                             (due, due, pending["id"]))
                             changed_due = {"task_id": pending["id"], "old_due": pending["due_date"], "new_due": due}
             streak = self._difficulty_from_history(row["kp_id"])
-            old_state = self.db.execute("SELECT state FROM knowledge_points WHERE id=?", (row["kp_id"],)).fetchone()[0]
             new_state = "needs_relearn" if streak >= 3 else "active"
-            self.db.execute("UPDATE knowledge_points SET difficulty_streak=?,state=? WHERE id=?",
-                            (streak, new_state, row["kp_id"]))
+            old_state = flow.transition(self, "knowledge_point", row["kp_id"], new_state, "revision",
+                                        kp_id=row["kp_id"], attempt_id=row["attempt_id"])
+            self.db.execute("UPDATE knowledge_points SET difficulty_streak=? WHERE id=?", (streak, row["kp_id"]))
             if new_state == "needs_relearn":
-                self.db.execute("""UPDATE review_tasks SET state='relearn_handled',completed_at=?
-                    WHERE kp_id=? AND state='pending' AND started_at IS NULL""", (now, row["kp_id"]))
+                for (task_id,) in self.db.execute("""SELECT id FROM review_tasks
+                        WHERE kp_id=? AND state='pending' AND started_at IS NULL""", (row["kp_id"],)).fetchall():
+                    self._task_to(task_id, "relearn_handled", "revision", row["kp_id"], row["attempt_id"], now)
             elif old_state == "needs_relearn" and not self.db.execute(
                     "SELECT 1 FROM review_tasks WHERE kp_id=? AND state IN ('pending','started')", (row["kp_id"],)).fetchone():
                 latest = self.db.execute("""SELECT r.id,l.card_json FROM reviews r
@@ -1188,13 +1267,17 @@ class Store:
                     due = Card.from_json(latest["card_json"]).due.date().isoformat()
                     task = self.db.execute("SELECT * FROM review_tasks WHERE review_id=?", (latest["id"],)).fetchone()
                     if task and task["state"] == "relearn_handled" and task["started_at"] is None:
-                        self.db.execute("""UPDATE review_tasks SET state='pending',due_date=?,next_remind_date=?,
+                        flow.transition(self, "review_task", task["id"], "pending", "revision",
+                                        kp_id=row["kp_id"], attempt_id=row["attempt_id"])
+                        self.db.execute("""UPDATE review_tasks SET due_date=?,next_remind_date=?,
                             completed_at=NULL WHERE id=?""", (due, due, task["id"]))
                     elif not task:
                         task_id = new_id()
                         self.db.execute("INSERT INTO review_tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                         (task_id, row["kp_id"], latest["id"], due, due, due,
                                          "pending", 0, "fsrs-6.3.2", now, None, None))
+                        flow.enter(self, "review_task", task_id, "pending", "revision",
+                                   kp_id=row["kp_id"], attempt_id=row["attempt_id"])
                         self._event(row["kp_id"], row["attempt_id"], "TaskScheduledAfterRevision",
                                     {"task_id": task_id, "due_date": due})
             self._event(row["kp_id"], row["attempt_id"], "ReviewRevised",
@@ -1211,7 +1294,7 @@ class Store:
                   "dimension_scores", "review_question_assessments", "review_evidence", "review_batches",
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
-                  "search_calls", "tool_calls", "metrics")
+                  "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:

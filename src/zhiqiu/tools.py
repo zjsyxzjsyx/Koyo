@@ -16,7 +16,8 @@ import httpx
 
 from .materials import Material
 
-PERMISSIONS = ("read", "network", "write_file", "external_mcp")
+# propose: the handler only records a suggestion (enter a flow, remember a preference); the program decides.
+PERMISSIONS = ("read", "network", "write_file", "external_mcp", "propose")
 ERROR_KINDS = ("invalid_args", "denied", "timeout", "network", "rate_limited", "upstream", "not_found", "internal")
 RETRYABLE = frozenset({"network", "timeout", "rate_limited"})
 _SECRET_MARKERS = ("key", "token", "secret", "password", "authorization", "cookie")
@@ -77,6 +78,7 @@ class ToolScope:
     point: str = ""
     loop_id: str | None = None
     round: int | None = None
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,7 @@ class ToolExecutor:
                                   "kp_id": scope.kp_id, "attempt_id": scope.attempt_id,
                                   "session_id": scope.session_id, "point": scope.point,
                                   "loop_id": scope.loop_id, "round": scope.round,
+                                  "conversation_id": scope.conversation_id,
                                   "args_summary": summarize_args(args) if isinstance(args, dict) else None}
         try:
             if not spec:

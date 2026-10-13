@@ -347,16 +347,36 @@ class LearningRuntime:
             raise ValueError("当前资料或模型端点未获发送授权；请用 learn 重新确认")
         return sources
 
+    def classify_turn(self, attempt_id: str, question: str, text: str) -> str | None:
+        """Is a quiz input an answer or a question? None: the model cannot classify; "failed": it tried and failed."""
+        sender = getattr(self.model, "request", None)
+        legacy = getattr(self.model, "classify_turn", None)
+        if not callable(sender) and not callable(legacy):
+            return None
+        attempt = self.store.db.execute("""SELECT a.kp_id,k.title FROM attempts a
+            JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=?""", (attempt_id,)).fetchone()
+        if hasattr(self.model, "set_trace_context"):
+            self.model.set_trace_context(attempt["kp_id"], attempt_id)
+        task = ContextTask("classify_turn", attempt["title"], attempt["kp_id"], attempt_id,
+                           current_input=json.dumps({"question": question, "input": text}, ensure_ascii=False))
+        try:
+            result = self._invoke(task, lambda: legacy(question, text))
+        except Exception:
+            return "failed"
+        kind = result.get("kind")
+        return kind if kind in ("answer", "question") else "failed"
+
     def clarify(self, kp_id: str, question: str, attempt_id: str | None = None,
                 source_message_id: str | None = None,
-                confirm: Callable[[Any, dict[str, Any]], bool] | None = None) -> dict[str, str]:
+                confirm: Callable[[Any, dict[str, Any]], bool] | None = None,
+                via: str | None = None) -> dict[str, str]:
         if not question.strip():
             raise ValueError("澄清问题不能为空")
         point = self.store.get_knowledge_point(kp_id)
         if not point:
             raise ValueError("unknown knowledge point")
         note_id = self.store.add_note(kp_id, "clarification", question, attempt_id=attempt_id,
-                                      source_message_id=source_message_id)
+                                      source_message_id=source_message_id, via=via)
         if hasattr(self.model, "set_trace_context"):
             self.model.set_trace_context(kp_id, attempt_id)
         sources = self.sources_for(kp_id)

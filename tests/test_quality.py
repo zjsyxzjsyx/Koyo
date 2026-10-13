@@ -3,7 +3,8 @@ from datetime import date
 import pytest
 
 from zhiqiu.clock import FixedClock
-from zhiqiu.cli import _show_outcome
+from zhiqiu.cli import TerminalIO
+from zhiqiu.flows import show_outcome
 from zhiqiu.quality import evaluate_labels, label_template
 from zhiqiu.scoring import DimensionGrade
 from zhiqiu.store import Store
@@ -20,7 +21,7 @@ def test_human_labels_check_exact_scores_and_original_evidence(tmp_path, capsys)
         grades.append(DimensionGrade(dimension, score, question, answer, "原始回答", "人工可核对"))
     outcome = store.finalize(attempt, grades)
     review_id = outcome["review_id"]
-    _show_outcome(store, outcome)
+    show_outcome(TerminalIO(), store, outcome)
     visible = capsys.readouterr().out
     assert "概念准确：4/4" in visible and "原题：concept" in visible
     assert "原答：关于 concept 的原始回答" in visible

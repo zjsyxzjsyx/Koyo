@@ -3,17 +3,19 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import time
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
+import click
 import httpx
 import typer
 
-from .materials import Material
+from .conversations import Conversations
+from .flows import FlowInterrupted, resume_lesson, run_lesson, run_quiz, show_outcome
 from .notion import NotionReader
 from .diagnostics import check_capacity, check_model
-from .files import write_roots_from_env
+from .files import read_roots_from_env, write_roots_from_env
 from .local_env import load_local_env
 from .memory import MemoryService
 from .model import OpenAICompatibleModel
@@ -27,6 +29,8 @@ from .tools import ToolSpec
 app = typer.Typer(help="知秋：本地资料学习与复习", no_args_is_help=False)
 memory_app = typer.Typer(help="显式管理跨会话学习偏好")
 app.add_typer(memory_app, name="memory")
+chat_app = typer.Typer(help="与知秋自由对话；需要时再进入学习、自测或复习")
+app.add_typer(chat_app, name="chat")
 
 
 def default_db() -> Path:
@@ -96,7 +100,10 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
     ctx.obj = {"store": store, "offline": offline}
     if ctx.invoked_subcommand is None:
         show_status(store, True)
-    elif ctx.invoked_subcommand != "status":
+        # Scripts and pipes keep the old behaviour: status only, no conversation.
+        if sys.stdin.isatty():
+            start_chat(store, offline)
+    elif ctx.invoked_subcommand not in ("status", "chat"):
         show_status(store)
 
 
@@ -189,117 +196,29 @@ def memory_delete(ctx: typer.Context, key: str,
     typer.echo("已删除。" if deleted else "没有该有效记忆。")
 
 
-def _approve(materials: list[Material], endpoint: str, remote: list[str] | None = None) -> bool:
-    typer.echo(f"将把以下资料发送到模型端点 {endpoint}：")
-    for material in materials:
-        if material.kind == "local":
-            typer.echo(f"  {material.source}")
-    for item in remote or []:
-        typer.echo(f"  {item}")
-    return typer.confirm("允许本次学习发送这些内容吗？", default=False)
+class TerminalIO:
+    """FlowIO for the terminal: line input, typer output and yes/no prompts."""
 
-
-def _confirm_tool(spec: ToolSpec, args: dict[str, Any]) -> bool:
-    typer.echo(spec.describe(args) if spec.describe else f"工具 {spec.name}：{args}")
-    return typer.confirm("允许执行吗？", default=False)
-
-
-def _session(store: Store, service: LearningRuntime, attempt_id: str) -> None:
-    attempt = store.db.execute("SELECT state FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-    if attempt and attempt["state"] in ("paused", "needs_self_test"):
-        store.resume(attempt_id)
-    started = time.monotonic()
-    while True:
-        if time.monotonic() - started >= 25 * 60:
-            outcome = service.finish(attempt_id, "limit")
-            _show_outcome(store, outcome)
-            return
-        proposed = service.next_question(attempt_id)
-        if proposed["done"]:
-            outcome = service.finish(attempt_id, proposed["reason"])
-            _show_outcome(store, outcome)
-            return
-        prefix = "追问 · " if proposed.get("followup") else ""
-        typer.echo(f"[{proposed['seq']}/8 · {prefix}{proposed['dimension']}] {proposed['question']}")
+    def ask(self, prompt: str) -> str:
         try:
-            answer = input("回答（/pause 暂停，/end 结束）：").strip()
+            return input(prompt)
         except (EOFError, KeyboardInterrupt):
-            typer.echo("问答已中断；已保存的进度可用 resume 继续。")
-            return
-        if answer in ("/pause", "先停下"):
-            store.pause(attempt_id)
-            typer.echo(f"已暂停：{attempt_id}")
-            return
-        if answer in ("/end", "结束本轮学习", "结束这次复习"):
-            outcome = service.finish(attempt_id, "explicit")
-            _show_outcome(store, outcome)
-            return
-        if answer.startswith("/question ") or answer.startswith("/interest "):
-            attempt = store.db.execute("SELECT kp_id FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-            kind = "clarification" if answer.startswith("/question ") else "interest"
-            note_text = answer.split(" ", 1)[1]
-            if kind == "clarification":
-                try:
-                    # LearningRuntime.sources_for checks consent for the active local files and endpoint.
-                    clarified = service.clarify(attempt["kp_id"], note_text, attempt_id)
-                    typer.echo(clarified["explanation"])
-                    if clarified["followup"]:
-                        typer.echo(f"可继续思考：{clarified['followup']}")
-                except ValueError as exc:
-                    typer.echo(f"问题已记录，但解释暂不可用：{exc}")
-            else:
-                store.add_note(attempt["kp_id"], kind, note_text, attempt_id=attempt_id)
-                typer.echo("延伸兴趣已记录。")
-            continue
-        if answer:
-            store.add_answer(proposed["question_id"], answer)
-        else:
-            typer.echo("空输入不计为回答；可以输入“我不会”或 /end。")
+            raise FlowInterrupted from None
 
+    def say(self, text: str) -> None:
+        typer.echo(text)
 
-def _show_outcome(store: Store, outcome: dict) -> None:
-    if outcome["kind"] == "awaiting_review":
-        typer.echo(f"原题原答已保存，当前待评阅；未生成分数或复习任务。{outcome['detail']}")
-        typer.echo(f"可调整模型窗口或用 submit-final 提交精简最终答案，再 resume {outcome['attempt_id']}。")
-        return
-    if outcome["kind"] == "zero":
-        if outcome.get("needs_relearn"):
-            typer.echo("连续困难达到 3 次；请先补学。")
-        elif outcome.get("due_date"):
-            typer.echo(f"本次零回答；原任务未完成，下次提醒 {outcome['due_date']}。")
-        else:
-            typer.echo("证据不足；首次自测待补，没有分数或复习任务。")
-        return
-    label = "完整" if outcome["kind"] == "complete" else "阶段性"
-    if outcome.get("task_id"):
-        typer.echo(f"{label}评阅已保存：{outcome['total']} 分；下次复习 {outcome['due_date']}；任务 {outcome['task_id']}")
-    else:
-        typer.echo(f"{label}评阅已保存：{outcome['total']} 分；请先补学，当前不安排新任务。")
-    names = {"concept": "概念准确", "mechanism": "机制解释", "application": "应用辨析"}
-    trace = store.trace(outcome["attempt_id"])
-    grades = {row["dimension"]: row for row in trace["dimension_scores"]}
-    answers = {row["answer_id"]: row for row in trace["questions"] if row["answer_id"]}
-    questions = {row["question_id"]: row for row in trace["questions"]}
-    for dimension, name in names.items():
-        grade = grades.get(dimension)
-        if grade:
-            evidence = [e for e in trace["review_evidence"] if e["dimension"] == dimension]
-            quote = evidence[0]["quote"] if evidence else "无逐字引文"
-            typer.echo(f"  {name}：{grade['score']}/4；依据“{quote}”；{grade['rationale']}")
-            if grade.get("supplement"):
-                typer.echo(f"    补充：{grade['supplement']}")
-            for assessed in (a for a in trace["question_assessments"] if a["dimension"] == dimension):
-                original = questions[assessed["question_id"]]
-                typer.echo(f"    原题：{original['question']}（{original['difficulty']}）")
-                if assessed["answer_id"]:
-                    original_answer = answers[assessed["answer_id"]]
-                    typer.echo(f"    原答：{original_answer['answer']}")
-                    if original_answer["scoring_text"]:
-                        typer.echo(f"    评分采用的最终答案：{original_answer['scoring_text']}")
-                else:
-                    typer.echo("    原答：未回答")
-        else:
-            typer.echo(f"  {name}：未评")
+    def confirm(self, text: str) -> bool:
+        # Ctrl+C or EOF at a yes/no prompt is a "no", not a crash of the whole session.
+        try:
+            return typer.confirm(text, default=False)
+        except click.exceptions.Abort:
+            typer.echo("")
+            return False
+
+    def confirm_tool(self, spec: ToolSpec, args: dict[str, Any]) -> bool:
+        typer.echo(spec.describe(args) if spec.describe else f"工具 {spec.name}：{args}")
+        return self.confirm("允许执行吗？")
 
 
 @app.command()
@@ -311,110 +230,14 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
     store = context_store(ctx)
     if source is None and not urls and not notion_pages:
         raise typer.BadParameter("请用 --from、--url 或 --notion 指定资料")
-    urls = urls or []
-    notion_pages = notion_pages or []
     service = runtime(store, mcp=not ctx.obj["offline"])
     try:
-        kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls,
-                                                   notion_pages=notion_pages)
+        run_lesson(TerminalIO(), store, service, point, source=source, urls=urls or [],
+                   notion_pages=notion_pages or [], offline=ctx.obj["offline"])
     except ValueError as exc:
         # Preparation failures (consent, fetch, Notion access, insufficient material) are user-facing.
         typer.echo(f"学习未开始：{exc}", err=True)
         raise typer.Exit(1) from None
-    typer.echo("实际采用来源：")
-    for material in materials:
-        typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
-    typer.echo(lesson["lesson"])
-    suggestions = lesson.get("suggestions", [])
-    if isinstance(suggestions, list):
-        for number, suggestion in enumerate(suggestions, 1):
-            typer.echo(f"建议 {number}: {suggestion}")
-    while True:
-        try:
-            command = input("学习命令（/done、/sources web、/sources local、/accept N、/question 文本）：").strip()
-        except (EOFError, KeyboardInterrupt):
-            typer.echo("讲解已保存；可用 resume 继续，尚未创建自测或复习任务。")
-            return
-        if command == "/done":
-            attempt = store.start_attempt(kp_id, "first")
-            _session(store, service, attempt)
-            return
-        if command in ("/sources web", "/sources local"):
-            try:
-                kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"],
-                    force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls,
-                    notion_pages=notion_pages)
-            except ValueError as exc:
-                typer.echo(f"未能重新准备资料，保留原讲解：{exc}")
-                continue
-            typer.echo("实际采用来源：")
-            for material in materials:
-                typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
-            typer.echo(lesson["lesson"])
-            continue
-        if command.startswith("/accept "):
-            try:
-                number = int(command.split()[1])
-                suggestion = suggestions[number - 1]
-            except (ValueError, IndexError, TypeError):
-                typer.echo("无效建议序号。")
-                continue
-            child = store.ensure_knowledge_point(str(suggestion), parent_id=kp_id)
-            typer.echo(f"已接受独立知识点：{suggestion}（{child}）。之后用 learn 指定它的资料并开始独立自测。")
-            continue
-        if command.startswith("/question "):
-            try:
-                clarified = service.clarify(kp_id, command.split(" ", 1)[1], confirm=_confirm_tool)
-                typer.echo(clarified["explanation"])
-                if clarified["followup"]:
-                    typer.echo(f"可继续思考：{clarified['followup']}")
-            except ValueError as exc:
-                typer.echo(f"问题已记录，但解释暂不可用：{exc}")
-            continue
-        if command in ("/pause", "/end", ""):
-            if command == "/end":
-                pending = next((row for row in store.pending_lessons() if row["kp_id"] == kp_id), None)
-                if pending:
-                    store.close_lesson(pending["session_id"])
-            typer.echo("学习尚未确认完成；未创建自测或复习任务。")
-            return
-        typer.echo("未知命令。")
-
-
-def _resume_lesson(store: Store, session_id: str) -> None:
-    lesson = store.resume_lesson(session_id)
-    service: LearningRuntime | None = None
-    typer.echo(f"继续讲解：{lesson['title']}（会话 {lesson['session_id']}）")
-    typer.echo(lesson["lesson"])
-    while True:
-        try:
-            command = input("学习命令（/done、/question 文本、/pause、/end）：").strip()
-        except (EOFError, KeyboardInterrupt):
-            typer.echo("讲解仍可用 resume 继续。")
-            return
-        if command == "/done":
-            service = service or runtime(store)
-            attempt = store.start_attempt(lesson["kp_id"], "first")
-            _session(store, service, attempt)
-            return
-        if command.startswith("/question "):
-            try:
-                service = service or runtime(store)
-                clarified = service.clarify(lesson["kp_id"], command.split(" ", 1)[1], confirm=_confirm_tool)
-                typer.echo(clarified["explanation"])
-                if clarified["followup"]:
-                    typer.echo(f"可继续思考：{clarified['followup']}")
-            except ValueError as exc:
-                typer.echo(f"问题已记录，但解释暂不可用：{exc}")
-            continue
-        if command == "/pause":
-            typer.echo(f"讲解已暂停；会话 {lesson['session_id']} 可用 resume 继续。")
-            return
-        if command == "/end":
-            store.close_lesson(lesson["session_id"])
-            typer.echo("本次讲解已结束，未创建自测或复习任务。")
-            return
-        typer.echo("未知命令。")
 
 
 @app.command()
@@ -430,12 +253,12 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
                 outcome = runtime(store).finish(attempt["id"], "explicit", grade_original=grade_original)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
-            _show_outcome(store, outcome)
+            show_outcome(TerminalIO(), store, outcome)
             return
         if grade_original:
             raise typer.BadParameter("--grade-original 只用于待评阅的尝试")
         store.resume(attempt["id"])
-        _session(store, runtime(store), attempt["id"])
+        run_quiz(TerminalIO(), store, runtime(store), attempt["id"])
         return
     pending = [row for row in store.pending_lessons() if attempt_id is None or row["session_id"] == attempt_id]
     if not pending:
@@ -446,7 +269,7 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
             typer.echo(f"  {row['title']}  {row['session_date']}  会话 {row['session_id']}")
         return
     try:
-        _resume_lesson(store, pending[0]["session_id"])
+        resume_lesson(TerminalIO(), store, pending[0]["session_id"], lambda: runtime(store))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -576,7 +399,67 @@ def review(ctx: typer.Context, point: Annotated[str | None, typer.Argument()] = 
     kp_id = due[0]["kp_id"]
     task_ids = [task["id"] for task in due if task["kp_id"] == kp_id]
     attempt = store.start_attempt(kp_id, "review", task_ids)
-    _session(store, runtime(store), attempt)
+    run_quiz(TerminalIO(), store, runtime(store), attempt)
+
+
+def start_chat(store: Store, offline: bool, resume: str | None = None) -> None:
+    from .agent import ChatAgent
+    try:
+        service = runtime(store, mcp=not offline)
+    except ValueError as exc:
+        typer.echo(f"不能开始对话：{exc}", err=True)
+        raise typer.Exit(1) from None
+    agent = ChatAgent(store, service, TerminalIO(), read_roots=read_roots_from_env(),
+                      write_roots=write_roots_from_env(), offline=offline)
+    try:
+        agent.start(resume)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    agent.run()
+
+
+@chat_app.callback(invoke_without_command=True)
+def chat(ctx: typer.Context,
+         resume: Annotated[str | None, typer.Option("--resume", help="回到指定的旧对话")] = None) -> None:
+    """与知秋自由对话：先显示状态，需要时由知秋建议、你确认后进入学习、自测或复习。"""
+    if ctx.invoked_subcommand is not None:
+        return
+    store = context_store(ctx)
+    show_status(store, True)
+    start_chat(store, ctx.obj["offline"], resume)
+
+
+@chat_app.command("log")
+def chat_log(ctx: typer.Context, conversation_id: str) -> None:
+    """查看一段对话的消息、模式切换与工具调用。"""
+    try:
+        log = Conversations(context_store(ctx)).log(conversation_id)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(json.dumps(log, ensure_ascii=False, indent=2))
+
+
+@chat_app.command("list")
+def chat_list(ctx: typer.Context) -> None:
+    """列出最近的对话。"""
+    for row in Conversations(context_store(ctx)).recent(20):
+        typer.echo(f"{row['chat_date']}  {row['status']}  {row['messages']} 条消息  对话 {row['id']}")
+
+
+@chat_app.command("forget")
+def chat_forget(ctx: typer.Context, conversation_id: Annotated[str | None, typer.Argument()] = None,
+                all_conversations: Annotated[bool, typer.Option("--all", help="删除全部对话记录")] = False) -> None:
+    """永久删除对话记录；工具调用审计保留，但不再关联到对话。"""
+    if bool(conversation_id) == all_conversations:
+        raise typer.BadParameter("请指定一个对话 ID，或使用 --all")
+    target = "全部对话记录" if all_conversations else f"对话 {conversation_id}"
+    if not typer.confirm(f"永久删除{target}？", default=False):
+        return
+    try:
+        count = Conversations(context_store(ctx)).forget(conversation_id)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"已删除 {count} 段对话。")
 
 
 @app.command()
