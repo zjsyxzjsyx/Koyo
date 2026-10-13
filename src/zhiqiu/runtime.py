@@ -13,6 +13,7 @@ from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
 from .files import read_file_spec, write_file_spec
+from .notion import NotionReader, notion_page_spec
 from .queries import query_tool_specs
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
@@ -44,7 +45,8 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
 
 class LearningRuntime:
     def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None,
-                 write_roots: Sequence[Path] = (), extra_tools: Sequence[ToolSpec] = ()):
+                 write_roots: Sequence[Path] = (), extra_tools: Sequence[ToolSpec] = (),
+                 notion: NotionReader | None = None):
         self.store = store
         self.model = model
         self.search = search
@@ -53,6 +55,8 @@ class LearningRuntime:
             self.tools.register(web_search_spec(search))
         if fetcher is not None:
             self.tools.register(fetch_url_spec(fetcher))
+        if notion is not None:
+            self.tools.register(notion_page_spec(notion))
         # read_file only reaches files already approved for the current step.
         self._readable: list[str] = []
         self.tools.register(read_file_spec(lambda: self._readable))
@@ -226,18 +230,21 @@ class LearningRuntime:
 
     def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
                 offline: bool = False, force_web: bool = False, force_local: bool = False,
-                urls: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
-        if path is None and not urls:
-            raise ValueError("请用 --from 指定本地资料或用 --url 指定网页")
-        if urls and offline:
-            raise ValueError("离线模式不能获取网页资料")
+                urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
+        if path is None and not urls and not notion_pages:
+            raise ValueError("请用 --from 指定本地资料，或用 --url、--notion 指定网页或 Notion 页面")
+        if (urls or notion_pages) and offline:
+            raise ValueError("离线模式不能获取网页或 Notion 资料")
         if urls and not self.tools.get("fetch_url"):
             raise ValueError("获取网页资料需要 ZHIQIU_EXA_API_KEY")
+        if notion_pages and not self.tools.get("notion_page"):
+            raise ValueError("读取 Notion 页面需要 ZHIQIU_NOTION_TOKEN")
         can_gather = not offline and not force_local and bool(self._gather_tools())
-        materials = (read_local(path, allow_empty=bool(urls) or can_gather)
+        materials = (read_local(path, allow_empty=bool(urls or notion_pages) or can_gather)
                      if path is not None else [])
         # One confirmation covers everything this preparation may send out, before any request.
         remote = [f"经 Exa 获取网页正文：{url}" for url in urls]
+        remote += [f"经 Notion API 读取页面：{page}" for page in notion_pages]
         if can_gather and self.search is not None:
             remote.append("本地资料不足时，经 Exa 联网搜索补充（只发送查询词）")
         if can_gather:
@@ -254,8 +261,10 @@ class LearningRuntime:
         fetch_scope = ToolScope(frozenset({"network"}), point=point)
         for url in urls:
             materials.extend(self.executor.run("fetch_url", {"url": url}, fetch_scope).value)
+        for page in notion_pages:
+            materials.extend(self.executor.run("notion_page", {"page": page}, fetch_scope).value)
         if sum(len(item.content) for item in materials) > 100_000:
-            raise ValueError("本地与网页资料总文本超过 100,000 字符；请指定更小的范围")
+            raise ValueError("本地、网页与 Notion 资料总文本超过 100,000 字符；请指定更小的范围")
         assessment, teaching_sources = self._assess_materials(point, materials)
         if force_web or (not assessment["sufficient"] and not force_local):
             if offline:
@@ -296,8 +305,8 @@ class LearningRuntime:
             files = "；".join(self._readable)
             request = self.context.build(ContextTask(
                 "gather", point, current_input=gap + (f"\n可用 read_file 读取的本地资料：{files}" if files else "")))
-            names = [name for name in self.tools.names()
-                     if self.tools.get(name).permission in ("read", "network", "external_mcp")]
+            names = [name for name in self.tools.names() if self.tools.get(name).in_loops
+                     and self.tools.get(name).permission in ("read", "network", "external_mcp")]
             loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds)
             try:
                 self.last_loop = loop.run(request, names, scope)
@@ -326,8 +335,8 @@ class LearningRuntime:
         """Tools that can bring in new material: network search/fetch and external MCP tools."""
         if not callable(getattr(self.model, "tool_round", None)):
             return ["web_search"] if self.tools.get("web_search") else []
-        return [name for name in self.tools.names()
-                if self.tools.get(name).permission in ("network", "external_mcp")]
+        return [name for name in self.tools.names() if self.tools.get(name).in_loops
+                and self.tools.get(name).permission in ("network", "external_mcp")]
 
     def sources_for(self, kp_id: str) -> list[dict[str, str]]:
         sources = [dict(r) for r in self.store.materials_for(kp_id)]
@@ -371,7 +380,8 @@ class LearningRuntime:
     def _clarify_with_tools(self, task: ContextTask, kp_id: str, sources: list[dict[str, Any]],
                             confirm: Callable[[Any, dict[str, Any]], bool] | None) -> dict[str, Any] | None:
         """Clarify while learning with read tools and confirmed note writes; None falls back to a plain call."""
-        names = [name for name in self.tools.names() if self.tools.get(name).permission in ("read", "write_file")]
+        names = [name for name in self.tools.names() if self.tools.get(name).in_loops
+                 and self.tools.get(name).permission in ("read", "write_file")]
         self._readable = [str(item["source"]) for item in sources if item.get("kind") == "local"]
         request = self.context.build(task)
         scope = ToolScope(frozenset({"read", "write_file"}), confirm=confirm, kp_id=kp_id, point=task.point)

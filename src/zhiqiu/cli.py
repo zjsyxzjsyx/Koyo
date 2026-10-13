@@ -11,6 +11,7 @@ import httpx
 import typer
 
 from .materials import Material
+from .notion import NotionReader
 from .diagnostics import check_capacity, check_model
 from .files import write_roots_from_env
 from .local_env import load_local_env
@@ -56,7 +57,8 @@ def _mcp_tools(store: Store) -> list[Any]:
 def runtime(store: Store, mcp: bool = False) -> LearningRuntime:
     model = OpenAICompatibleModel(audit=store.record_llm_call)
     exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
-    return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [])
+    notion = NotionReader() if os.getenv("ZHIQIU_NOTION_TOKEN") else None
+    return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [], notion)
 
 
 def show_status(store: Store, full: bool = False) -> None:
@@ -303,14 +305,17 @@ def _show_outcome(store: Store, outcome: dict) -> None:
 @app.command()
 def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个具体知识点")],
           source: Annotated[Path | None, typer.Option("--from", help="本地 md/txt 文件或目录")] = None,
-          urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复；经 Exa 获取正文")] = None) -> None:
-    """阅读本地或网页资料，确认学完后开始首次自测。"""
+          urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复；经 Exa 获取正文")] = None,
+          notion_pages: Annotated[list[str] | None, typer.Option("--notion", help="Notion 页面链接或 ID，可重复")] = None) -> None:
+    """阅读本地、网页或 Notion 资料，确认学完后开始首次自测。"""
     store = context_store(ctx)
-    if source is None and not urls:
-        raise typer.BadParameter("请用 --from 或 --url 指定资料")
+    if source is None and not urls and not notion_pages:
+        raise typer.BadParameter("请用 --from、--url 或 --notion 指定资料")
     urls = urls or []
+    notion_pages = notion_pages or []
     service = runtime(store, mcp=not ctx.obj["offline"])
-    kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls)
+    kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls,
+                                               notion_pages=notion_pages)
     typer.echo("实际采用来源：")
     for material in materials:
         typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
@@ -331,7 +336,8 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
             return
         if command in ("/sources web", "/sources local"):
             kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"],
-                force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls)
+                force_web=command.endswith("web"), force_local=command.endswith("local"), urls=urls,
+                notion_pages=notion_pages)
             typer.echo("实际采用来源：")
             for material in materials:
                 typer.echo(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))

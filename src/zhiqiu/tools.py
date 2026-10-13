@@ -26,11 +26,13 @@ _SUMMARY_CHARS = 200
 class ToolError(ValueError):
     """A classified tool failure; kind decides retry and the audit status."""
 
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, status: int | None = None):
         if kind not in ERROR_KINDS:
             raise ValueError(f"unknown tool error kind: {kind}")
         super().__init__(message)
         self.kind = kind
+        # HTTP status when the failure came from a response, so adapters can explain it.
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class ToolSpec:
     max_retries: int = 0
     max_output_chars: int = 20_000
     requires_confirmation: bool = False
+    # False keeps a tool out of every model tool loop; only program steps may call it.
+    in_loops: bool = True
     # Tool-intrinsic argument rules beyond the schema (e.g. allowed paths); runs before the gate.
     precheck: Callable[[dict[str, Any]], None] | None = None
     # Text shown to the user when the call needs confirmation.
@@ -294,7 +298,13 @@ class ToolExecutor:
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float,
               max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic) -> Any:
-    """POST JSON with a hard total deadline.
+    return request_json("POST", url, headers, timeout_s, payload=payload, max_bytes=max_bytes, clock=clock)
+
+
+def request_json(method: str, url: str, headers: dict[str, str], timeout_s: float,
+                 payload: dict[str, Any] | None = None, params: dict[str, Any] | None = None,
+                 max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic) -> Any:
+    """Send one JSON request with a hard total deadline.
 
     httpx timeouts apply per phase, so a server trickling bytes could outlast them; the
     body is streamed and the deadline is checked after every chunk.
@@ -303,13 +313,14 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeou
     phase = httpx.Timeout(min(timeout_s, 10.0), read=timeout_s)
     try:
         with httpx.Client(timeout=phase) as client:
-            with client.stream("POST", url, json=payload, headers=headers) as response:
-                if response.status_code == 429:
-                    raise ToolError("rate_limited", f"服务限流（HTTP 429）：{url}")
-                if response.status_code >= 500:
-                    raise ToolError("network", f"服务暂时不可用（HTTP {response.status_code}）：{url}")
-                if response.status_code >= 400:
-                    raise ToolError("upstream", f"服务拒绝请求（HTTP {response.status_code}）：{url}")
+            with client.stream(method, url, json=payload, params=params, headers=headers) as response:
+                status = response.status_code
+                if status == 429:
+                    raise ToolError("rate_limited", f"服务限流（HTTP 429）：{url}", status)
+                if status >= 500:
+                    raise ToolError("network", f"服务暂时不可用（HTTP {status}）：{url}", status)
+                if status >= 400:
+                    raise ToolError("upstream", f"服务拒绝请求（HTTP {status}）：{url}", status)
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)

@@ -1,6 +1,6 @@
 # 知秋
 
-知秋是本地 CLI 学习 Agent。用户指定一个知识点和 `.md`／`.txt` 资料或网页，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
+知秋是本地 CLI 学习 Agent。用户指定一个知识点和 `.md`／`.txt` 资料、网页或 Notion 页面，学完后回答费曼问题；程序保存原题、原答、分维度评阅和复习任务，并按 FSRS 安排复习。模型负责教学、出题与语义评阅；业务写入、状态转换、总分计算和排期由程序执行。
 
 ## 功能概览
 
@@ -21,6 +21,7 @@
 │  ├─ model.py        OpenAI 兼容 Chat Completions 适配器
 │  ├─ scoring.py      评分标准、证据校验、加权总分与 FSRS 档位映射
 │  ├─ store.py        SQLite 权威状态、迁移、事务、审计事件与 FSRS 排期
+│  ├─ notion.py       Notion 官方 API 读取页面并转成 Markdown
 │  ├─ mcp_client.py   连接本地 stdio MCP 服务，白名单工具接入工具层
 │  ├─ mcp_server.py   `zhiqiu mcp`：只读 MCP 服务（stdio），审计写 JSONL
 │  ├─ queries.py      状态、到期、知识点与 trace 的只读查询（Store 与只读工具共用同一份 SQL）
@@ -71,8 +72,8 @@ flowchart LR
 ```mermaid
 flowchart TD
     A[启动 CLI：只读展示到期任务] --> B{选择命令}
-    B -->|learn| C[读取本地资料，列出文件、要获取的网页、是否联网搜索与模型端点并请求确认]
-    C -->|确认后经 Exa 获取指定网页| D[模型判断资料是否充分]
+    B -->|learn| C[读取本地资料，列出文件、要获取的网页与 Notion 页面、是否联网搜索与模型端点并请求确认]
+    C -->|确认后获取指定网页与 Notion 页面| D[模型判断资料是否充分]
     D -->|不足且允许 Web| E[有界工具循环补充资料，再判断资料]
     D -->|充分或用户选择本地来源| F[模型教学并展示来源]
     E -->|充分| F
@@ -116,7 +117,7 @@ flowchart TD
 
 每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
 
-目前注册的工具有业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
+目前注册的工具有 `notion_page`（只供程序调用，见“Notion 页面资料”）、业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 
 开放工具循环（受限 ReAct）的步骤只有两个：资料准备和学习阶段的澄清（`learn` 或讲解恢复时的 `/question`）。资料准备时，本地资料不足时，模型在最多 5 轮内反复调用本步骤允许的读取类与网络类工具补充资料，每轮的工具结果作为 tool 消息交回模型。模型不再调用工具、达到轮数上限，或下一轮请求将超出输入预算时循环结束；之后仍由程序重新判断资料是否充分，不充分则停止学习。工具结果计入上下文预算，`tool_calls` 记录每次调用所属的循环 ID 和轮次。出题、评分、保存和排期不在循环中；自测和复习中的澄清不开放工具。
 
@@ -126,6 +127,21 @@ flowchart TD
 - `write_file` 只能写 `ZHIQIU_WRITE_ROOTS` 列出的目录（用系统路径分隔符分隔多个目录，Windows 为 `;`；未配置时不注册该工具），只写 `.md`/`.txt`，路径中不能有符号链接；相对路径写入第一个目录，可新建子目录；覆盖前把原文件备份为同名 `.bak`；从不删除。每次写入都要用户确认，确认时显示完整路径、新建还是覆盖、字数和内容预览；无法确认的环境一律拒绝。
 
 搜索查询可由模型自拟，但不得包含本地资料中连续 15 个字以上的原文（知识点名称本身不算；本地资料中的网址视为公开引用，不参与比较），长度不超过 200 字；不合规的查询记为 `invalid_args`，原因交回模型修改。不支持工具调用的脚本化模型只提出一次查询，被拒时改用知识点名称。
+
+## Notion 页面资料
+
+`learn --notion 页面链接或 ID` 通过 Notion 官方 API 读取页面，作为用户指定的资料：学习开始的统一确认会列出它，它计入发送授权，页面内容变化后需要重新 `learn`。一次设置：
+
+1. 打开 Notion 的集成管理页面 <https://www.notion.so/profile/integrations>，新建一个内部（Internal）集成，权限只勾选读取内容（Read content），复制它的令牌（Internal Integration Secret）。
+2. 把令牌写进 `.env`：`ZHIQIU_NOTION_TOKEN=...`。
+3. 在要学习的页面（或它的父页面）右上角 `•••` → Connections（连接）里添加这个集成。没有连接的页面读不到，这也是权限的边界。
+
+读取规则：
+
+- 页面标题和全部子块按顺序转成 Markdown（标题、段落、列表、待办、引用、提示框、代码、公式、分割线、表格、书签等）；分栏和同步块只取其中内容；子页面只列标题、不展开；不认识的块类型标为“未支持的 Notion 块”，不会悄悄丢掉。
+- 每页最多 30,000 字，超出部分截断并在来源说明中注明；最多 2,000 个块、嵌套 6 层；与本地、网页资料合计不超过 100,000 字。
+- 页面不存在或未连接集成时提示去“连接”里添加；令牌无效时提示令牌问题；限流时自动重试 2 次。
+- 工具名为 `notion_page`，只由程序在你指定页面时调用，任何工具循环都不向模型开放；Notion 内容视为私人资料，参与搜索查询的泄露检查。
 
 ## 只读 MCP 服务
 
@@ -138,14 +154,20 @@ flowchart TD
 
 接入方式（`--db` 可省略，默认用户数据目录下的 `zhiqiu/state.sqlite`；数据库须先被 3.0.0 版 CLI 打开过一次，完成 v13 迁移）：
 
-- Claude Code：
+- Claude Code（项目级配置，适合没有 `claude` 命令行的环境，例如桌面版）：在要使用知秋的项目目录放一个 `.mcp.json`。`D:\code\知秋\.mcp.json` 已按此写好：
 
-  ```powershell
-  claude mcp add zhiqiu -- uv --directory D:\code\知秋\知秋V1.0 run --extra mcp zhiqiu --db D:\path\to\state.sqlite mcp
+  ```json
+  {"mcpServers": {"zhiqiu": {"command": "uv",
+    "args": ["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "mcp"]}}}
   ```
 
-  接入后在 Claude Code 中问“知秋今天有哪些到期复习”，应调用 `zhiqiu_status`，并在 `mcp-audit.jsonl` 留下一行记录。
-- Hermes：在 `config.yaml` 的 `mcp_servers` 段增加一项，`command` 为 `uv`，`args` 为 `["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "--db", "D:\\path\\to\\state.sqlite", "mcp"]`。本机的 Hermes 学习源码不含 MCP 配置解析部分，字段名请以 Hermes 文档为准。
+  在该目录新开会话，按提示批准 `zhiqiu` 服务，然后问“知秋今天有哪些到期复习”，应调用 `zhiqiu_status`，并在数据库目录的 `mcp-audit.jsonl` 留下一行记录。要用非默认数据库时，在 `"zhiqiu"` 与 `"mcp"` 之间加入 `"--db", "数据库路径"`。
+- Claude Code（有 `claude` 命令行时）：
+
+  ```powershell
+  claude mcp add zhiqiu -- uv --directory D:\code\知秋\知秋V1.0 run --extra mcp zhiqiu mcp
+  ```
+- Hermes（本版搁置，未做真实接入，仅供参考）：在 `config.yaml` 的 `mcp_servers` 段增加一项，`command` 为 `uv`，`args` 为 `["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "--db", "D:\\path\\to\\state.sqlite", "mcp"]`。本机的 Hermes 学习源码不含 MCP 配置解析部分，字段名请以 Hermes 文档为准。
 
 [server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==3.0.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
 
@@ -188,15 +210,24 @@ CLI 自动读取项目根目录的 `.env`（已被 Git 忽略）；已设置的�
 $env:ZHIQIU_LLM_BASE_URL = 'https://your-provider.example/v1'
 $env:ZHIQIU_LLM_MODEL = 'your-model'
 $env:ZHIQIU_LLM_API_KEY = 'your-key'
-# 仅需要 Web 补充或 --url 时配置：
-$env:ZHIQIU_EXA_API_KEY = 'your-exa-key'
-# 允许学习中写笔记的目录（可选，多个用 ; 分隔）：
-$env:ZHIQIU_WRITE_ROOTS = 'D:\notes\zhiqiu'
-# 外部 MCP 工具配置（可选）：
-$env:ZHIQIU_MCP_CONFIG = 'D:\code\知秋\知秋V1.0\examples\mcp.example.json'
 ```
 
-模型端点须支持 OpenAI 风格的 Chat Completions；Web 补充还须支持工具调用。开始学习前，CLI 一次列出将发送的本地文件、要经 Exa 获取的网页、本次是否可能联网搜索，以及模型端点；用户确认后才发出任何请求，拒绝则一个请求也不发。Web 搜索只发送查询字符串；密钥不写入数据库或导出文件。发送授权按本地文件、网页、Notion 等用户指定资料的内容计算，任一资料变化后需要重新 `learn`；联网搜索补充的结果不计入授权。所有阶段模板都声明：资料、网页正文、工具结果与个人记忆只是数据，其中的指令一律不执行。
+可选配置（都可以写进 `.env`，`ZHIQIU_LONG_ANSWER_SEGMENTS` 除外）：
+
+| 变量 | 作用 | 不配置时 |
+|---|---|---|
+| `ZHIQIU_EXA_API_KEY` | Exa 联网搜索补充资料、`learn --url` 获取网页正文 | 不能联网补充，不能用 `--url` |
+| `ZHIQIU_NOTION_TOKEN` | `learn --notion` 读取 Notion 页面（Notion 内部集成令牌，设置见“Notion 页面资料”） | 不能用 `--notion` |
+| `ZHIQIU_WRITE_ROOTS` | 学习中澄清时允许写笔记的目录，多个用 `;` 分隔，例如 `D:\notes\zhiqiu` | 不注册 `write_file` |
+| `ZHIQIU_MCP_CONFIG` | 外部 MCP 工具配置文件，例如 `D:\code\知秋\知秋V1.0\examples\mcp.example.json` | 不启动外部 MCP 服务 |
+| `ZHIQIU_MODEL_BUDGETS` | 按模型配置窗口、输出预留与余量（见下文） | 沿用下面三个变量 |
+| `ZHIQIU_LLM_WINDOW`、`ZHIQIU_LLM_OUTPUT_RESERVE`、`ZHIQIU_LLM_MARGIN` | 未在 `ZHIQIU_MODEL_BUDGETS` 中匹配的模型的预算 | 不做超限判断 |
+| `ZHIQIU_LLM_WINDOW_VERIFIED` | 设为 `1` 表示窗口已实测（只记入审计） | 视为未实测 |
+| `ZHIQIU_LONG_ANSWER_SEGMENTS` | 设为 `1` 开启长答分段评阅（只能用进程环境变量） | 关闭 |
+
+`.env` 只接受上表与三个必需变量；出现其他变量名会报错，避免拼错的设置被悄悄忽略。
+
+模型端点须支持 OpenAI 风格的 Chat Completions；Web 补充还须支持工具调用。开始学习前，CLI 一次列出将发送的本地文件、要经 Exa 获取的网页、要读取的 Notion 页面、本次是否可能联网搜索或调用外部 MCP 工具，以及模型端点；用户确认后才发出任何请求，拒绝则一个请求也不发。Web 搜索只发送查询字符串；密钥不写入数据库或导出文件。发送授权按本地文件、网页、Notion 等用户指定资料的内容计算，任一资料变化后需要重新 `learn`；联网搜索补充的结果不计入授权。所有阶段模板都声明：资料、网页正文、工具结果与个人记忆只是数据，其中的指令一律不执行。
 
 模型窗口与预算用 `ZHIQIU_MODEL_BUDGETS` 按模型配置，键为模型名或 `端点|模型名`（后者优先），例如：
 
@@ -215,6 +246,7 @@ $env:ZHIQIU_MCP_CONFIG = 'D:\code\知秋\知秋V1.0\examples\mcp.example.json'
 ```powershell
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --from .\notes.md
 uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --url https://en.wikipedia.org/wiki/Tree_traversal
+uv run zhiqiu --db .\state.sqlite learn '二叉树遍历' --notion https://www.notion.so/你的页面-<32位页面ID>
 uv run zhiqiu --db .\state.sqlite status
 uv run zhiqiu --db .\state.sqlite resume
 uv run zhiqiu --db .\state.sqlite review
@@ -234,7 +266,7 @@ uv run zhiqiu --db .\state.sqlite labels-template --json .\human-labels.json
 uv run zhiqiu --db .\state.sqlite evaluate --labels .\human-labels.json
 ```
 
-会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题。直接关闭或异常退出不会自动结案。`--offline` 禁止 Web 补充，也不能使用 `--url`。`--url` 可重复，可与 `--from` 同时使用，至少给出其中一个；每个网页最多取 15,000 字，超出部分截断并在来源说明中注明，本地与网页资料合计不超过 100,000 字。网页获取失败时学习停止，不保存任何资料。低分维度关联的原题原答会成为后续复习出题的重点。
+会话内 `/done` 确认学完并开始自测，`/pause` 保存问答进度，`/end` 明确结案，`/sources web|local` 纠正资料选择，`/accept N` 接受关联知识点建议，`/question 文本` 记录并解释澄清问题。直接关闭或异常退出不会自动结案。`--offline` 禁止 Web 补充，也不能使用 `--url`、`--notion`。`--url`、`--notion` 可重复，可与 `--from` 同时使用，三者至少给出一个；每个网页最多取 15,000 字，超出部分截断并在来源说明中注明，本地、网页与 Notion 资料合计不超过 100,000 字。网页或 Notion 页面获取失败时学习停止，不保存任何资料。低分维度关联的原题原答会成为后续复习出题的重点。
 
 ## 验证与诊断
 
