@@ -21,6 +21,7 @@
 │  ├─ model.py        OpenAI 兼容 Chat Completions 适配器
 │  ├─ scoring.py      评分标准、证据校验、加权总分与 FSRS 档位映射
 │  ├─ store.py        SQLite 权威状态、迁移、事务、审计事件与 FSRS 排期
+│  ├─ mcp_client.py   连接本地 stdio MCP 服务，白名单工具接入工具层
 │  ├─ mcp_server.py   `zhiqiu mcp`：只读 MCP 服务（stdio），审计写 JSONL
 │  ├─ queries.py      状态、到期、知识点与 trace 的只读查询（Store 与只读工具共用同一份 SQL）
 │  ├─ memory.py       显式语义记忆、情景摘要与旧讲解摘要
@@ -135,6 +136,20 @@ flowchart TD
 - 启动时不打印到期提醒，标准输出只留给 MCP 协议。
 - 需要可选依赖 `mcp`（官方 Python SDK，MIT 许可，锁定在 `>=1.10,<2`，当前锁定 1.30.0）：`uv sync --extra mcp`。
 
+## 外部 MCP 工具（客户端）
+
+配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后，`learn` 会启动其中列出的本地 stdio MCP 服务，把白名单内的工具接入工具层，供资料准备的工具循环使用（学习阶段澄清、自测和复习不开放外部工具）。示例见 [examples/mcp.example.json](examples/mcp.example.json)（官方 `mcp-server-fetch`）：
+
+```json
+{"servers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"],
+  "tools": {"fetch": {"permission": "external_mcp", "timeout_s": 60, "max_output_chars": 6000}}}}}
+```
+
+- 只注册 `tools` 白名单里且服务端确实提供的工具，名字为 `<服务名>__<工具名>`；与已有工具重名时报错并写明两边来源。权限只能是 `read`、`network` 或 `external_mcp`（默认）。
+- 学习开始的统一确认会按服务列出可能调用的外部工具。外部工具的参数同样经过泄露检查，返回内容作为补充资料（`web`），不计入发送授权，由程序重新判断资料是否充分。
+- 返回 `isError` 时记为 `upstream`；超过 `timeout_s` 时取消这次请求并记为 `timeout`；某个服务启动失败时跳过它，并在 `tool_calls` 记一条 `<服务名>__*` 的失败记录，其余服务照常使用。服务的标准错误输出写到数据库目录下的 `mcp-servers.log`。
+- 需要可选依赖 `mcp`；离线模式（`--offline`）不启动外部服务。
+
 ## 记忆与跨天追问
 
 - `memory set/list/delete` 管理语义记忆，需给出作用范围与来源；知识点专属的同名设置覆盖全局设置。普通对话不会被自动存为记忆。
@@ -164,6 +179,8 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 $env:ZHIQIU_EXA_API_KEY = 'your-exa-key'
 # 允许学习中写笔记的目录（可选，多个用 ; 分隔）：
 $env:ZHIQIU_WRITE_ROOTS = 'D:\notes\zhiqiu'
+# 外部 MCP 工具配置（可选）：
+$env:ZHIQIU_MCP_CONFIG = 'D:\code\知秋\知秋V1.0\examples\mcp.example.json'
 ```
 
 模型端点须支持 OpenAI 风格的 Chat Completions；Web 补充还须支持工具调用。开始学习前，CLI 一次列出将发送的本地文件、要经 Exa 获取的网页、本次是否可能联网搜索，以及模型端点；用户确认后才发出任何请求，拒绝则一个请求也不发。Web 搜索只发送查询字符串；密钥不写入数据库或导出文件。发送授权按本地文件、网页、Notion 等用户指定资料的内容计算，任一资料变化后需要重新 `learn`；联网搜索补充的结果不计入授权。所有阶段模板都声明：资料、网页正文、工具结果与个人记忆只是数据，其中的指令一律不执行。
