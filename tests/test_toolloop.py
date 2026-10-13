@@ -32,9 +32,10 @@ class ToolModel(FakeModel):
         self.rounds = list(rounds)
         self.seen = []
 
-    def tool_round(self, request, messages, tools, tool_choice="auto"):
+    def tool_round(self, request, messages, tools, tool_choice="auto", timeout_s=60):
         self.seen.append((request.stage, [dict(m) for m in messages], tools))
         self.choices = getattr(self, "choices", []) + [tool_choice]
+        self.timeouts = getattr(self, "timeouts", []) + [timeout_s]
         if tool_choice == "none":
             return getattr(self, "forced_final", done())
         step = self.rounds.pop(0) if self.rounds else done()
@@ -194,3 +195,60 @@ def test_links_in_notes_do_not_block_other_pages_of_the_same_site():
     check(spec, {"url": "https://en.wikipedia.org/wiki/Red%E2%80%93black_tree"})
     with pytest.raises(ToolError, match="本地资料原文"):
         check(spec, {"query": "插入后先变色再旋转直到根节点为黑色"})
+
+
+def ticking(*values):
+    """A fake monotonic clock that returns the given readings in order."""
+    readings = iter(values)
+    return lambda: next(readings)
+
+
+def loop_parts(tmp_path, model, results):
+    store, service, _ = prepare_service(tmp_path, model, QuerySearch(results))
+    request = service.context.build(ContextTask("gather", "二叉树遍历", current_input="解释"))
+    return store, service, request
+
+
+def test_deadline_stops_the_loop_before_the_next_round(tmp_path):
+    model = ToolModel([{"calls": [call("二叉树遍历 定义")]}, {"calls": [call("二叉树遍历 机制")]}])
+    store, service, request = loop_parts(tmp_path, model, [])
+    # readings: start, round 1 check, tool check, round 2 check
+    loop = ToolLoop(model, service.context, service.tools, service.executor, deadline_s=10,
+                    clock=ticking(0, 0, 1, 11))
+    result = loop.run(request, ["web_search"], ToolScope(frozenset({"network"}), point="二叉树遍历"))
+    assert result.status == "deadline" and result.reason == "超过循环总时限" and result.rounds == 1
+    assert service.search.queries == ["二叉树遍历 定义"]
+    assert model.timeouts == [10]  # a model call never waits longer than the time left
+
+
+def test_calls_after_the_deadline_are_answered_but_not_run(tmp_path):
+    model = ToolModel([{"calls": [call("二叉树遍历 定义", call_id="a"), call("二叉树遍历 机制", call_id="b")]}])
+    store, service, request = loop_parts(tmp_path, model, [])
+    loop = ToolLoop(model, service.context, service.tools, service.executor, deadline_s=10,
+                    clock=ticking(0, 0, 5, 12))
+    result = loop.run(request, ["web_search"], ToolScope(frozenset({"network"}), point="二叉树遍历"))
+    assert result.status == "deadline" and service.search.queries == ["二叉树遍历 定义"]
+    assert store.db.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 1
+
+
+def test_deadline_still_gets_a_closing_answer_when_one_is_required(tmp_path):
+    from zhiqiu.toolloop import GRACE_SECONDS
+    model = ToolModel([{"calls": [call("二叉树遍历 定义")]}])
+    model.forced_final = {"role": "assistant", "content": json.dumps({"explanation": "收尾回答"}, ensure_ascii=False)}
+    store, service, request = loop_parts(tmp_path, model, [])
+    loop = ToolLoop(model, service.context, service.tools, service.executor, deadline_s=10,
+                    clock=ticking(0, 0, 1, 11))
+    result = loop.run(request, ["web_search"], ToolScope(frozenset({"network"}), point="二叉树遍历"),
+                      require_final=True)
+    assert result.status == "deadline" and result.final == {"explanation": "收尾回答"}
+    assert model.choices[-1] == "none" and model.timeouts[-1] == GRACE_SECONDS
+    assert "超过总时限" in model.seen[-1][1][-1]["content"]
+
+
+def test_gather_reports_the_deadline_when_nothing_was_found(tmp_path):
+    model = ToolModel([{"calls": [call("二叉树遍历 定义")]}])
+    store, service, path = prepare_service(tmp_path, model, QuerySearch([]))
+    service.tool_loop_seconds = 0
+    with pytest.raises(ValueError, match="超过循环总时限"):
+        service.prepare("二叉树遍历", path, lambda *_: True)
+    assert store.db.execute("SELECT status FROM context_builds WHERE stage='gather'").fetchone()[0] == "tool_loop_deadline"

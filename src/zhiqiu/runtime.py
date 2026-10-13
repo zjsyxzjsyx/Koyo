@@ -17,7 +17,7 @@ from .notion import NotionReader, notion_page_spec
 from .queries import query_tool_specs
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
-from .toolloop import LoopResult, ToolLoop, query_leak_check
+from .toolloop import LOOP_SECONDS, LoopResult, ToolLoop, query_leak_check
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 
 
@@ -69,6 +69,7 @@ class LearningRuntime:
             self.tools.register(spec)
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.max_tool_rounds = 5
+        self.tool_loop_seconds = LOOP_SECONDS
         self.last_loop: LoopResult | None = None
         self.context = ContextManager(store, model)
         # Grading one over-budget original answer in segments stays off until its
@@ -307,7 +308,8 @@ class LearningRuntime:
                 "gather", point, current_input=gap + (f"\n可用 read_file 读取的本地资料：{files}" if files else "")))
             names = [name for name in self.tools.names() if self.tools.get(name).in_loops
                      and self.tools.get(name).permission in ("read", "network", "external_mcp")]
-            loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds)
+            loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds,
+                            self.tool_loop_seconds)
             try:
                 self.last_loop = loop.run(request, names, scope)
             except Exception:
@@ -386,8 +388,8 @@ class LearningRuntime:
         request = self.context.build(task)
         scope = ToolScope(frozenset({"read", "write_file"}), confirm=confirm, kp_id=kp_id, point=task.point)
         try:
-            self.last_loop = ToolLoop(self.model, self.context, self.tools, self.executor,
-                                      self.max_tool_rounds).run(request, names, scope, require_final=True)
+            self.last_loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds,
+                                      self.tool_loop_seconds).run(request, names, scope, require_final=True)
         except Exception:
             with self.store.transaction():
                 self.store.db.execute("UPDATE context_builds SET status='model_error' WHERE id=?", (request.build_id,))

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
@@ -17,10 +18,17 @@ from .materials import Material
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 
 MAX_ROUNDS = 5
+# Wall-clock budget for one whole loop. Rounds alone do not bound time: each model call
+# may take up to its own timeout, plus every tool call in that round.
+LOOP_SECONDS = 180.0
+MODEL_CALL_SECONDS = 60.0
+# The closing answer after the loop stops gets a short timeout of its own.
+GRACE_SECONDS = 30.0
 LEAK_RUN_CHARS = 15
 QUERY_MAX_CHARS = 200
 _URL = re.compile(r"https?://\S+")
-STOP_REASONS = {"done": "模型结束", "max_rounds": "达到轮数上限", "budget": "上下文预算即将用完"}
+STOP_REASONS = {"done": "模型结束", "max_rounds": "达到轮数上限", "budget": "上下文预算即将用完",
+                "deadline": "超过循环总时限"}
 
 
 @dataclass(frozen=True)
@@ -85,16 +93,24 @@ def _parse_final(message: dict[str, Any]) -> dict[str, Any]:
 
 class ToolLoop:
     def __init__(self, model: Any, context: ContextManager, registry: ToolRegistry, executor: ToolExecutor,
-                 max_rounds: int = MAX_ROUNDS):
+                 max_rounds: int = MAX_ROUNDS, deadline_s: float = LOOP_SECONDS,
+                 clock: Callable[[], float] = time.monotonic):
         self.model = model
         self.context = context
         self.registry = registry
         self.executor = executor
         self.max_rounds = max_rounds
+        self.deadline_s = deadline_s
+        self.clock = clock
 
     def run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope,
             require_final: bool = False) -> LoopResult:
-        """require_final: after the round limit, ask once more for the answer with tools switched off."""
+        """require_final: when the rounds or the time run out, ask once more for the answer with tools off.
+
+        The deadline is checked before every round and every tool call, and no model call may
+        wait longer than the time left, so one loop overruns its deadline by at most one tool call.
+        """
+        deadline = self.clock() + self.deadline_s
         loop_id = str(uuid.uuid4())
         tools = self.registry.openai_schema(tool_names)
         messages: list[dict[str, Any]] = [dict(message) for message in request.messages]
@@ -105,8 +121,12 @@ class ToolLoop:
             if limit is not None and estimate > limit:
                 status = "budget"
                 break
+            left = deadline - self.clock()
+            if left <= 0:
+                status = "deadline"
+                break
             rounds = round_number
-            message = self.model.tool_round(request, messages, tools)
+            message = self.model.tool_round(request, messages, tools, timeout_s=min(MODEL_CALL_SECONDS, left))
             calls = message.get("tool_calls") or []
             if not calls:
                 status, final = "done", _parse_final(message)
@@ -122,6 +142,10 @@ class ToolLoop:
                 except (TypeError, json.JSONDecodeError):
                     args = function.get("arguments")
                 try:
+                    if self.clock() >= deadline:
+                        # Every call still needs a tool message, but none may start after the deadline.
+                        status = "deadline"
+                        raise ToolError("timeout", "已超过工具循环总时限，本次调用未执行")
                     value = self.executor.run(str(name), args, round_scope).value
                 except ToolError as exc:
                     value = exc
@@ -130,9 +154,13 @@ class ToolLoop:
                         if isinstance(item, Material):
                             materials.setdefault((item.source, item.content_hash), item)
                 messages.append(_tool_message(call_id, value))
-        if require_final and status == "max_rounds":
-            messages.append({"role": "user", "content": "工具轮数已用完。不要再调用工具，直接按本阶段要求返回最终 JSON。"})
+            if status == "deadline":
+                break
+        if require_final and status in ("max_rounds", "deadline"):
+            used_up = "工具轮数已用完" if status == "max_rounds" else "工具循环已超过总时限"
+            messages.append({"role": "user", "content": f"{used_up}。不要再调用工具，直接按本阶段要求返回最终 JSON。"})
             estimate, limit = self.context.estimate(messages)
             if limit is None or estimate <= limit:
-                final = _parse_final(self.model.tool_round(request, messages, tools, tool_choice="none"))
+                final = _parse_final(self.model.tool_round(request, messages, tools, tool_choice="none",
+                                                           timeout_s=GRACE_SECONDS))
         return LoopResult(status, rounds, loop_id, tuple(materials.values()), final)
