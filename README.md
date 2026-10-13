@@ -21,6 +21,7 @@
 │  ├─ model.py        OpenAI 兼容 Chat Completions 适配器
 │  ├─ scoring.py      评分标准、证据校验、加权总分与 FSRS 档位映射
 │  ├─ store.py        SQLite 权威状态、迁移、事务、审计事件与 FSRS 排期
+│  ├─ mcp_server.py   `zhiqiu mcp`：只读 MCP 服务（stdio），审计写 JSONL
 │  ├─ queries.py      状态、到期、知识点与 trace 的只读查询（Store 与只读工具共用同一份 SQL）
 │  ├─ memory.py       显式语义记忆、情景摘要与旧讲解摘要
 │  ├─ retrieval.py    旧讲解追问的可解释排序
@@ -125,6 +126,15 @@ flowchart TD
 
 搜索查询可由模型自拟，但不得包含本地资料中连续 15 个字以上的原文（知识点名称本身不算），长度不超过 200 字；不合规的查询记为 `invalid_args`，原因交回模型修改。不支持工具调用的脚本化模型只提出一次查询，被拒时改用知识点名称。
 
+## 只读 MCP 服务
+
+`zhiqiu mcp` 以 stdio 方式把知秋的业务只读查询提供给其他 Agent（Claude Code、Hermes 等）：`zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`、`zhiqiu_trace`。服务端只开放权限为 `read` 的工具，注册表中出现任何其他权限的工具就拒绝启动；不开放写入，也不开放联网或文件工具。
+
+- 数据库以 SQLite 只读模式打开，每次调用单独打开、用完关闭；不建文件、不迁移。数据库不存在或版本不符时启动即失败，提示先用 CLI 打开一次。
+- 每次调用写一行审计到数据库所在目录的 `mcp-audit.jsonl`（字段与 `tool_calls` 相同），不写数据库。
+- 启动时不打印到期提醒，标准输出只留给 MCP 协议。
+- 需要可选依赖 `mcp`（官方 Python SDK，MIT 许可，锁定在 `>=1.10,<2`，当前锁定 1.30.0）：`uv sync --extra mcp`。
+
 ## 记忆与跨天追问
 
 - `memory set/list/delete` 管理语义记忆，需给出作用范围与来源；知识点专属的同名设置覆盖全局设置。普通对话不会被自动存为记忆。
@@ -137,6 +147,8 @@ flowchart TD
 
 ```powershell
 uv sync --python 3.12 --extra test
+# 需要 MCP 服务或 MCP 客户端工具时：
+uv sync --python 3.12 --extra test --extra mcp
 uv run --python 3.12 python examples/demo.py
 ```
 

@@ -69,6 +69,10 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
     if ctx.invoked_subcommand == "check-model":
         ctx.obj = {"offline": offline}
         return
+    if ctx.invoked_subcommand == "mcp":
+        # The MCP server opens the database read-only and must keep stdout for the protocol.
+        ctx.obj = {"db": db or default_db()}
+        return
     store = Store(db or default_db())
     ctx.obj = {"store": store, "offline": offline}
     if ctx.invoked_subcommand is None:
@@ -81,6 +85,17 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
 def status(ctx: typer.Context) -> None:
     """查看到期任务和未结案问答。"""
     show_status(context_store(ctx), True)
+
+
+@app.command("mcp")
+def mcp_command(ctx: typer.Context) -> None:
+    """以 stdio 提供只读 MCP 服务（到期任务、知识点状态、评阅记录）。"""
+    from .mcp_server import serve
+    try:
+        serve(ctx.obj["db"])
+    except (RuntimeError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command("check-model")
