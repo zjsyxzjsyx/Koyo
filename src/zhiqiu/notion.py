@@ -117,9 +117,12 @@ class NotionReader:
             raise ToolError("upstream", "Notion 返回了无效数据")
         return data
 
-    def _children(self, block_id: str, depth: int, lines: list[str], counter: list[int]) -> None:
+    def _children(self, block_id: str, depth: int, lines: list[str], counter: list[int],
+                  header_width: int = 0) -> None:
+        """header_width > 0: these are table rows whose first row is a header, so a separator follows it."""
         cursor = None
         number = 0
+        rows = 0
         while True:
             params = {"page_size": 100, **({"start_cursor": cursor} if cursor else {})}
             data = self._get(f"/blocks/{block_id}/children", params)
@@ -131,10 +134,16 @@ class NotionReader:
                 line = block_markdown(block, depth, number)
                 if line is not None:
                     lines.append(line)
+                if block.get("type") == "table_row":
+                    rows += 1
+                    if rows == 1 and header_width:
+                        lines.append("| " + " | ".join(["---"] * header_width) + " |")
                 if block.get("has_children") and depth < MAX_DEPTH and block.get("type") not in (
                         "child_page", "child_database"):
                     nested = depth + (0 if block.get("type") in _SKIPPED or block.get("type") == "table" else 1)
-                    self._children(block["id"], nested, lines, counter)
+                    table = block.get("table") or {}
+                    width = int(table.get("table_width") or 0) if table.get("has_column_header") else 0
+                    self._children(block["id"], nested, lines, counter, width)
             if not data.get("has_more"):
                 return
             cursor = data.get("next_cursor")

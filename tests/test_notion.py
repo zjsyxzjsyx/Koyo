@@ -42,7 +42,7 @@ PAGES = {
         block("to_do", "画出例子", checked=True),
         block("code", "def visit(): ...", language="python"),
         block("column_list", children=True, block_id="cols"),
-        block("table", children=True, block_id="t1"),
+        block("table", children=True, block_id="t1", table_width=2, has_column_header=True),
         block("child_page", title="附录", block_id="child"),
         block("ai_block"),
     ], "has_more": False},
@@ -50,7 +50,9 @@ PAGES = {
     ("/blocks/cols/children", None): {"results": [block("paragraph", "分栏里的说明")], "has_more": False},
     ("/blocks/t1/children", None): {"results": [
         {"id": "r1", "type": "table_row", "has_children": False,
-         "table_row": {"cells": [[text("顺序")], [text("口诀")]]}}], "has_more": False},
+         "table_row": {"cells": [[text("顺序")], [text("口诀")]]}},
+        {"id": "r2", "type": "table_row", "has_children": False,
+         "table_row": {"cells": [[text("中序")], [text("左根右")]]}}], "has_more": False},
 }
 
 
@@ -83,7 +85,8 @@ def test_page_becomes_markdown_with_pagination_and_nesting(monkeypatch):
     assert material.content == "\n".join([
         "# 二叉树遍历笔记", "## 定义", "遍历是**访问每个节点**一次。[参考](https://example.org/tree)",
         "- 前序：根左右", "  - 例：A B C", "1. 先根", "2. 后子树", "- [x] 画出例子",
-        "```python\ndef visit(): ...\n```", "分栏里的说明", "", "| 顺序 | 口诀 |", "[子页面：附录]",
+        "```python\ndef visit(): ...\n```", "分栏里的说明", "", "| 顺序 | 口诀 |", "| --- | --- |",
+        "| 中序 | 左根右 |", "[子页面：附录]",
         "[未支持的 Notion 块：ai_block]"]).strip()
     assert material.content_hash == hashlib.sha256(material.content.encode()).hexdigest()
     method, url, headers, params = calls[1]
