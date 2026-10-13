@@ -119,7 +119,13 @@ class ToolRegistry:
         return result
 
 
-def _type_ok(value: Any, expected: str) -> bool:
+def _type_ok(value: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return any(_type_ok(value, item) for item in expected)
+    if expected == "null":
+        return value is None
+    if expected == "number":
+        return type(value) in (int, float)
     if expected == "string":
         return isinstance(value, str)
     if expected == "integer":

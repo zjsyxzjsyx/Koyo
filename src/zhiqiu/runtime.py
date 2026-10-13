@@ -17,7 +17,7 @@ from .queries import query_tool_specs
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
 from .store import Store, new_id
 from .toolloop import LoopResult, ToolLoop, query_leak_check
-from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope
+from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 
 
 def _supplement(grade: dict[str, Any]) -> str:
@@ -44,7 +44,7 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
 
 class LearningRuntime:
     def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None,
-                 write_roots: Sequence[Path] = ()):
+                 write_roots: Sequence[Path] = (), extra_tools: Sequence[ToolSpec] = ()):
         self.store = store
         self.model = model
         self.search = search
@@ -59,6 +59,9 @@ class LearningRuntime:
         if write_roots:
             self.tools.register(write_file_spec(list(write_roots)))
         for spec in query_tool_specs(lambda query: query(store.db), lambda: store.clock.today().isoformat()):
+            self.tools.register(spec)
+        # e.g. whitelisted MCP client tools; a clashing name is refused with both sources.
+        for spec in extra_tools:
             self.tools.register(spec)
         self.executor = ToolExecutor(self.tools, audit=store.record_tool_call)
         self.max_tool_rounds = 5
@@ -230,12 +233,21 @@ class LearningRuntime:
             raise ValueError("离线模式不能获取网页资料")
         if urls and not self.tools.get("fetch_url"):
             raise ValueError("获取网页资料需要 ZHIQIU_EXA_API_KEY")
-        materials = (read_local(path, allow_empty=bool(urls) or (not offline and not force_local and self.search is not None))
+        can_gather = not offline and not force_local and bool(self._gather_tools())
+        materials = (read_local(path, allow_empty=bool(urls) or can_gather)
                      if path is not None else [])
         # One confirmation covers everything this preparation may send out, before any request.
         remote = [f"经 Exa 获取网页正文：{url}" for url in urls]
-        if self.search is not None and not offline and not force_local:
+        if can_gather and self.search is not None:
             remote.append("本地资料不足时，经 Exa 联网搜索补充（只发送查询词）")
+        if can_gather:
+            servers: dict[str, list[str]] = {}
+            for name in self._gather_tools():
+                spec = self.tools.get(name)
+                if spec.source.startswith("mcp:"):
+                    servers.setdefault(spec.source[4:], []).append(name.split("__", 1)[-1])
+            remote.extend(f"本地资料不足时，可调用外部 MCP 服务 {server} 的工具：{'、'.join(tools)}"
+                          for server, tools in servers.items())
         if not approve(materials, self.model.endpoint, remote):
             raise ValueError("未获发送资料授权；学习未开始")
         self._readable = [item.source for item in materials if item.kind == "local"]
@@ -248,8 +260,8 @@ class LearningRuntime:
         if force_web or (not assessment["sufficient"] and not force_local):
             if offline:
                 raise ValueError(f"本地资料不足且处于离线模式：{assessment.get('reason', '')}")
-            if not self.search:
-                raise ValueError("需要 Web 补充，但搜索服务未配置")
+            if not self._gather_tools():
+                raise ValueError("需要 Web 补充，但搜索服务或外部工具均未配置")
             web, stopped = self._gather(point, str(assessment.get("gap", "")), materials)
             if not web:
                 raise ValueError(f"Web 未找到可靠资料{stopped}；学习未开始")
@@ -278,14 +290,14 @@ class LearningRuntime:
     def _gather(self, point: str, gap: str, materials: list[Material]) -> tuple[list[Material], str]:
         """Fill a material gap with tools; the program still judges sufficiency afterwards."""
         # Queries may not copy private material text; web results are public already.
-        scope = ToolScope(frozenset({"read", "network"}), point=point,
+        scope = ToolScope(frozenset({"read", "network", "external_mcp"}), point=point,
                           check=query_leak_check((item for item in materials if item.kind != "web"), point))
         if callable(getattr(self.model, "tool_round", None)):
             files = "；".join(self._readable)
             request = self.context.build(ContextTask(
                 "gather", point, current_input=gap + (f"\n可用 read_file 读取的本地资料：{files}" if files else "")))
             names = [name for name in self.tools.names()
-                     if self.tools.get(name).permission in ("read", "network")]
+                     if self.tools.get(name).permission in ("read", "network", "external_mcp")]
             loop = ToolLoop(self.model, self.context, self.tools, self.executor, self.max_tool_rounds)
             try:
                 self.last_loop = loop.run(request, names, scope)
@@ -309,6 +321,13 @@ class LearningRuntime:
             if exc.kind != "invalid_args" or not proposed:
                 raise
         return self.executor.run("web_search", {"query": point}, scope).value, ""
+
+    def _gather_tools(self) -> list[str]:
+        """Tools that can bring in new material: network search/fetch and external MCP tools."""
+        if not callable(getattr(self.model, "tool_round", None)):
+            return ["web_search"] if self.tools.get("web_search") else []
+        return [name for name in self.tools.names()
+                if self.tools.get(name).permission in ("network", "external_mcp")]
 
     def sources_for(self, kp_id: str) -> list[dict[str, str]]:
         sources = [dict(r) for r in self.store.materials_for(kp_id)]

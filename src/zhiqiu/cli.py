@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import time
@@ -36,10 +37,26 @@ def context_store(ctx: typer.Context) -> Store:
     return ctx.obj["store"]
 
 
-def runtime(store: Store) -> LearningRuntime:
+def _mcp_tools(store: Store) -> list[Any]:
+    """Start the configured stdio MCP servers; only material preparation uses them."""
+    config = os.getenv("ZHIQIU_MCP_CONFIG")
+    if not config:
+        return []
+    try:
+        from .mcp_client import McpClientPool, load_config
+    except ImportError:
+        typer.echo("已配置 ZHIQIU_MCP_CONFIG，但未安装 MCP 依赖（uv sync --extra mcp）；本次不使用外部工具。", err=True)
+        return []
+    pool = McpClientPool(load_config(Path(config)), store.record_tool_call,
+                         errlog_path=store.path.parent / "mcp-servers.log")
+    atexit.register(pool.close)
+    return pool.start()
+
+
+def runtime(store: Store, mcp: bool = False) -> LearningRuntime:
     model = OpenAICompatibleModel(audit=store.record_llm_call)
     exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
-    return LearningRuntime(store, model, exa, exa, write_roots_from_env())
+    return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [])
 
 
 def show_status(store: Store, full: bool = False) -> None:
@@ -292,7 +309,7 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
     if source is None and not urls:
         raise typer.BadParameter("请用 --from 或 --url 指定资料")
     urls = urls or []
-    service = runtime(store)
+    service = runtime(store, mcp=not ctx.obj["offline"])
     kp_id, lesson, materials = service.prepare(point, source, _approve, offline=ctx.obj["offline"], urls=urls)
     typer.echo("实际采用来源：")
     for material in materials:

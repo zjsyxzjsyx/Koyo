@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "tools": {
+        "fetch": {"permission": "external_mcp", "timeout_s": 60, "max_output_chars": 6000}
+      }
+    }
+  }
+}
