@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.zjsyxzjsyx/zhiqiu",
+  "title": "知秋",
+  "description": "Read-only access to a local zhiqiu learning agent: due reviews, knowledge points, traces.",
+  "version": "3.0.0",
+  "repository": {
+    "url": "https://github.com/zjsyxzjsyx/Koyo",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "zhiqiu",
+      "version": "3.0.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--from",
+          "value": "zhiqiu[mcp]==3.0.0",
+          "description": "The MCP server needs the optional mcp extra"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--db",
+          "description": "Path to the zhiqiu SQLite state file; defaults to %LOCALAPPDATA%/zhiqiu/state.sqlite",
+          "format": "filepath",
+          "isRequired": false
+        },
+        {
+          "type": "positional",
+          "value": "mcp",
+          "valueHint": "command"
+        }
+      ]
+    }
+  ]
+}

@@ -183,3 +183,14 @@ def test_openai_adapter_sends_tool_round_messages(monkeypatch):
     assert message["content"] == "{}"
     assert sent[0]["messages"] == messages and sent[0]["tools"] == tools
     assert sent[0]["tool_choice"] == "auto" and sent[0]["max_tokens"] == 321
+
+
+def test_links_in_notes_do_not_block_other_pages_of_the_same_site():
+    notes = Material("local", "a.md", "h", "红黑树笔记，参考 https://en.wikipedia.org/wiki/Red%E2%80%93black_tree 。"
+                                          "插入后先变色再旋转直到根节点为黑色。")
+    check = query_leak_check([notes], point="红黑树")
+    spec = web_search_spec(FakeSearch([]))
+    check(spec, {"url": "https://zh.wikipedia.org/wiki/%E7%BA%A2%E9%BB%91%E6%A0%91"})
+    check(spec, {"url": "https://en.wikipedia.org/wiki/Red%E2%80%93black_tree"})
+    with pytest.raises(ToolError, match="本地资料原文"):
+        check(spec, {"query": "插入后先变色再旋转直到根节点为黑色"})

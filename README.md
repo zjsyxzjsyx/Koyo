@@ -125,7 +125,7 @@ flowchart TD
 - `read_file` 只能读取本次已授权的本地资料文件，不读符号链接，沿用本地资料的格式与大小限制。
 - `write_file` 只能写 `ZHIQIU_WRITE_ROOTS` 列出的目录（用系统路径分隔符分隔多个目录，Windows 为 `;`；未配置时不注册该工具），只写 `.md`/`.txt`，路径中不能有符号链接；相对路径写入第一个目录，可新建子目录；覆盖前把原文件备份为同名 `.bak`；从不删除。每次写入都要用户确认，确认时显示完整路径、新建还是覆盖、字数和内容预览；无法确认的环境一律拒绝。
 
-搜索查询可由模型自拟，但不得包含本地资料中连续 15 个字以上的原文（知识点名称本身不算），长度不超过 200 字；不合规的查询记为 `invalid_args`，原因交回模型修改。不支持工具调用的脚本化模型只提出一次查询，被拒时改用知识点名称。
+搜索查询可由模型自拟，但不得包含本地资料中连续 15 个字以上的原文（知识点名称本身不算；本地资料中的网址视为公开引用，不参与比较），长度不超过 200 字；不合规的查询记为 `invalid_args`，原因交回模型修改。不支持工具调用的脚本化模型只提出一次查询，被拒时改用知识点名称。
 
 ## 只读 MCP 服务
 
@@ -135,6 +135,19 @@ flowchart TD
 - 每次调用写一行审计到数据库所在目录的 `mcp-audit.jsonl`（字段与 `tool_calls` 相同），不写数据库。
 - 启动时不打印到期提醒，标准输出只留给 MCP 协议。
 - 需要可选依赖 `mcp`（官方 Python SDK，MIT 许可，锁定在 `>=1.10,<2`，当前锁定 1.30.0）：`uv sync --extra mcp`。
+
+接入方式（`--db` 可省略，默认用户数据目录下的 `zhiqiu/state.sqlite`；数据库须先被 3.0.0 版 CLI 打开过一次，完成 v13 迁移）：
+
+- Claude Code：
+
+  ```powershell
+  claude mcp add zhiqiu -- uv --directory D:\code\知秋\知秋V1.0 run --extra mcp zhiqiu --db D:\path\to\state.sqlite mcp
+  ```
+
+  接入后在 Claude Code 中问“知秋今天有哪些到期复习”，应调用 `zhiqiu_status`，并在 `mcp-audit.jsonl` 留下一行记录。
+- Hermes：在 `config.yaml` 的 `mcp_servers` 段增加一项，`command` 为 `uv`，`args` 为 `["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "--db", "D:\\path\\to\\state.sqlite", "mcp"]`。本机的 Hermes 学习源码不含 MCP 配置解析部分，字段名请以 Hermes 文档为准。
+
+[server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==3.0.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
 
 ## 外部 MCP 工具（客户端）
 

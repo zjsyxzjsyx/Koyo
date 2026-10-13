@@ -7,6 +7,7 @@ scheduling never happen here.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
@@ -18,6 +19,7 @@ from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 MAX_ROUNDS = 5
 LEAK_RUN_CHARS = 15
 QUERY_MAX_CHARS = 200
+_URL = re.compile(r"https?://\S+")
 STOP_REASONS = {"done": "模型结束", "max_rounds": "达到轮数上限", "budget": "上下文预算即将用完"}
 
 
@@ -40,7 +42,9 @@ def query_leak_check(private: Iterable[Material], point: str = "", run: int = LE
 
     The knowledge point is the user's own input, so its text never counts as a leak.
     """
-    texts = [item.content for item in private]
+    # Links in notes are public references, and different pages of one site share long URL
+    # fragments; only the surrounding prose counts as private text.
+    texts = [_URL.sub("\x00", item.content) for item in private]
 
     def check(spec: ToolSpec, args: dict[str, Any]) -> None:
         query = args.get("query")
