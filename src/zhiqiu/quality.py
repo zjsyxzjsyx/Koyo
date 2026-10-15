@@ -1,9 +1,95 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from .scoring import DIMENSIONS
+from . import pricing
+from .scoring import DIMENSIONS, RUBRIC_VERSION, WEIGHTS
 from .store import Store
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EVAL_RUNS = REPO_ROOT / "labels" / "eval-runs.jsonl"
+# The stages whose prompts decide questions and scores; editing any of them needs a new graded run.
+GRADED_STAGES = ("next_question", "classify_turn", "grade", "grade_extract", "grade_segment", "grade_combine")
+
+
+def prompt_fingerprint() -> dict[str, Any]:
+    """sha256 over everything that shapes grading: the stage prompts, the shared data rule, rubric and weights.
+
+    TEMPLATE_VERSION is left out on purpose: it also changes for unrelated stages such as chat.
+    """
+    from .context import DATA_RULE, TEMPLATES
+    parts = {f"template.{stage}": TEMPLATES[stage] for stage in GRADED_STAGES}
+    parts["data_rule"] = DATA_RULE
+    parts["rubric_version"] = RUBRIC_VERSION
+    parts["weights"] = json.dumps({key: str(value) for key, value in WEIGHTS.items()}, sort_keys=True)
+    digests = {key: hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] for key, value in parts.items()}
+    whole = hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return {"fingerprint": whole, "parts": digests}
+
+
+def _commit(root: Path = REPO_ROOT) -> str | None:
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
+                              timeout=10)
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+                               capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if head.returncode != 0:
+        return None
+    return head.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
+
+
+def grading_usage(stores: list[Store]) -> dict[str, int]:
+    """Tokens the grading of these label databases used, from their llm_calls."""
+    tokens_in = tokens_out = cached = 0
+    for store in stores:
+        row = store.db.execute("""SELECT SUM(tokens_in),SUM(tokens_out),SUM(tokens_cached) FROM llm_calls
+            WHERE stage LIKE 'grade%'""").fetchone()
+        tokens_in, tokens_out, cached = tokens_in + (row[0] or 0), tokens_out + (row[1] or 0), cached + (row[2] or 0)
+    return {"tokens_in": tokens_in, "tokens_out": tokens_out, "tokens_cached": cached}
+
+
+def record_eval_run(reports: list[dict[str, Any]], set_name: str, usage: dict[str, int],
+                    path: Path | None = None, model: str | None = None) -> dict[str, Any]:
+    """Append one graded evaluation (one or more runs over the same labels) to the versioned record."""
+    if not reports:
+        raise ValueError("no evaluation reports to record")
+    agreements = [round(report["exact_agreement"], 4) for report in reports]
+    mean = round(sum(agreements) / len(agreements), 4)
+    evidence_ok = all(report["locatable_evidence"] == report["sample_count"] for report in reports)
+    enough = all(report["sample_count"] >= report["minimum_samples"] for report in reports)
+    record = {"ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "commit": _commit(),
+              **{key: value for key, value in prompt_fingerprint().items() if key == "fingerprint"},
+              "rubric_version": RUBRIC_VERSION, "model": model or os.getenv("ZHIQIU_LLM_MODEL", ""),
+              "set": set_name, "samples": reports[0]["sample_count"], "runs": agreements,
+              "mean_agreement": mean, "evidence_ok": evidence_ok,
+              "passed": enough and evidence_ok and mean >= 0.8, **usage,
+              "cost": pricing.cost(usage.get("tokens_in"), usage.get("tokens_out"), usage.get("tokens_cached"))}
+    path = path or EVAL_RUNS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def eval_runs(path: Path | None = None) -> list[dict[str, Any]]:
+    path = path or EVAL_RUNS
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def passing_run(fingerprint: str, path: Path | None = None) -> dict[str, Any] | None:
+    """The latest passing evaluation recorded for exactly this grading prompt."""
+    return next((run for run in reversed(eval_runs(path))
+                 if run.get("fingerprint") == fingerprint and run.get("passed") is True), None)
 
 
 def label_template(store: Store) -> list[dict[str, Any]]:

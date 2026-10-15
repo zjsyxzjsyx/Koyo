@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import flow
+from . import flow, history
+from .redact import redact, redact_obj
 from .store import Store, new_id
 
 MESSAGE_KINDS = frozenset({"chat", "command", "proposal", "flow_result", "error", "memory_proposal"})
@@ -87,8 +88,8 @@ class Conversations:
             message_id = new_id()
             self.db.execute("""INSERT INTO conversation_messages
                 (id,conversation_id,seq,role,kind,content,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?)""",
-                (message_id, conversation_id, seq, role, kind, content.strip(),
-                 json.dumps(payload or {}, ensure_ascii=False), self.store._ts()))
+                (message_id, conversation_id, seq, role, kind, redact(content.strip()),
+                 json.dumps(redact_obj(payload or {}), ensure_ascii=False), self.store._ts()))
             self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (self.store._ts(), conversation_id))
         return self.message(message_id)
 
@@ -156,7 +157,7 @@ class Conversations:
     def set_error(self, conversation_id: str, error: str) -> None:
         with self.store.transaction():
             self.db.execute("UPDATE conversations SET last_error=?,updated_at=? WHERE id=?",
-                            (error, self.store._ts(), conversation_id))
+                            (redact(error), self.store._ts(), conversation_id))
 
     def reconcile(self, conversation_id: str) -> str | None:
         """After a restart no flow is running, so a non-chat mode is a leftover; return what it pointed at."""
@@ -177,10 +178,17 @@ class Conversations:
                 self.db.execute("""DELETE FROM receipts WHERE operation_key IN
                     (SELECT 'proposal:' || id FROM conversation_messages WHERE conversation_id=?)""", (item,))
                 self.db.execute("UPDATE tool_calls SET conversation_id=NULL WHERE conversation_id=?", (item,))
+                # Trace spans hold only metadata and stay, unlinked; recorded prompt text and raw failed
+                # outputs are content and go.
+                self.db.execute("""DELETE FROM llm_contents WHERE llm_call_id IN (SELECT id FROM llm_calls
+                    WHERE trace_id IN (SELECT trace_id FROM spans WHERE conversation_id=?))""", (item,))
+                self.db.execute("UPDATE spans SET conversation_id=NULL WHERE conversation_id=?", (item,))
+                self.db.execute("DELETE FROM llm_failures WHERE conversation_id=?", (item,))
                 self.db.execute("""DELETE FROM events WHERE type='StateChanged'
                     AND json_extract(payload_json,'$.entity')='conversation'
                     AND json_extract(payload_json,'$.id')=?""", (item,))
                 self.db.execute("DELETE FROM conversations WHERE id=?", (item,))
+            history.purge(self.db)
             return len(ids)
 
     def log(self, conversation_id: str) -> dict[str, Any]:

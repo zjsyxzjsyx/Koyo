@@ -68,13 +68,18 @@ def test_runtime_marks_follow_up_and_rejects_disallowed_target(tmp_path):
     asked = service.next_question(attempt)
     assert asked["followup"] is True
     store.add_answer(asked["question_id"], "是的")
-    proposals.append({"done": False, "dimension": "concept", "question": "还要再追问吗？",
-                      "difficulty": "basic", "difficulty_basis": "重复追问", "followup_of": original})
+    repeat = {"done": False, "dimension": "concept", "question": "还要再追问吗？",
+              "difficulty": "basic", "difficulty_basis": "重复追问", "followup_of": original}
+    # V5: a refused question is retried once with the validation error; refused twice, the quiz stops.
+    proposals.extend([repeat, repeat])
     with pytest.raises(ValueError, match="不允许的追问"):
         service.next_question(attempt)
-    proposals.append({"done": False, "dimension": "mechanism", "question": "为什么中序有序？",
-                      "difficulty": "advanced", "difficulty_basis": "解释机制", "followup_of": None})
-    assert service.next_question(attempt)["followup"] is False
+    proposals.extend([repeat, {"done": False, "dimension": "mechanism", "question": "为什么中序有序？",
+                               "difficulty": "advanced", "difficulty_basis": "解释机制", "followup_of": None}])
+    asked = service.next_question(attempt)
+    assert asked["followup"] is False and asked["dimension"] == "mechanism"
+    assert model.stages.count("next_question") == 5
+    assert store.db.execute("SELECT COUNT(*) FROM llm_failures").fetchone()[0] == 3
 
 
 def test_supplement_is_saved_with_score_and_exported_for_labels(tmp_path):

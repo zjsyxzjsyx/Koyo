@@ -39,10 +39,10 @@ def read_file_spec(readable: Callable[[], Iterable[str]]) -> ToolSpec:
     def allowed(args: dict) -> Path:
         path = Path(args["path"]).expanduser()
         if path.is_symlink():
-            raise ToolError("denied", "不读取符号链接")
+            raise ToolError("denied", "不读取符号链接", rule="read_root")
         resolved = path.resolve()
         if str(resolved) not in {str(Path(item).resolve()) for item in readable()}:
-            raise ToolError("denied", f"只能读取本次已授权的本地资料：{args['path']}")
+            raise ToolError("denied", f"只能读取本次已授权的本地资料：{args['path']}", rule="read_root")
         return resolved
 
     def handler(args: dict) -> str:
@@ -59,20 +59,21 @@ def read_file_spec(readable: Callable[[], Iterable[str]]) -> ToolSpec:
 def read_target(path_arg: str, roots: list[Path]) -> Path:
     """Resolve a chat read request; it must be an existing md/txt file inside one of the read roots."""
     if not roots:
-        raise ToolError("denied", "未配置 ZHIQIU_READ_ROOTS，对话中不能读文件；请先把目录加入白名单")
+        raise ToolError("denied", "未配置 ZHIQIU_READ_ROOTS，对话中不能读文件；请先把目录加入白名单", rule="read_root")
     path = Path(path_arg).expanduser()
     if not path.is_absolute():
         path = roots[0] / path
     if ".." in path.parts:
-        raise ToolError("denied", f"路径中不能含 ..：{path_arg}")
+        raise ToolError("denied", f"路径中不能含 ..：{path_arg}", rule="read_root")
     if path.suffix.lower() not in TEXT_SUFFIXES:
         raise ToolError("invalid_args", "只能读 .md 或 .txt 文件")
     for part in (path, *path.parents):
         if part.is_symlink():
-            raise ToolError("denied", f"路径中含符号链接：{part}")
+            raise ToolError("denied", f"路径中含符号链接：{part}", rule="read_root")
     resolved = path.resolve()
     if not any(resolved.is_relative_to(root.resolve()) for root in roots):
-        raise ToolError("denied", f"不在 ZHIQIU_READ_ROOTS 白名单目录内：{path_arg}；请先把目录加入白名单")
+        raise ToolError("denied", f"不在 ZHIQIU_READ_ROOTS 白名单目录内：{path_arg}；请先把目录加入白名单",
+                        rule="read_root")
     if not resolved.is_file():
         raise ToolError("not_found", f"文件不存在：{path_arg}")
     return resolved
@@ -109,7 +110,7 @@ def read_root_file_spec(roots: list[Path], on_read: Callable[[Material], None] |
 def write_target(path_arg: str, roots: list[Path]) -> Path:
     """Resolve a requested note path; it must be a md/txt file inside one of the write roots."""
     if not roots:
-        raise ToolError("denied", "未配置 ZHIQIU_WRITE_ROOTS，不能写文件")
+        raise ToolError("denied", "未配置 ZHIQIU_WRITE_ROOTS，不能写文件", rule="write_root")
     path = Path(path_arg).expanduser()
     if not path.is_absolute():
         path = roots[0] / path
@@ -118,10 +119,10 @@ def write_target(path_arg: str, roots: list[Path]) -> Path:
     # Refuse links anywhere on the way, then compare the resolved path with the resolved roots.
     for part in (path, *path.parents):
         if part.is_symlink():
-            raise ToolError("denied", f"路径中含符号链接：{part}")
+            raise ToolError("denied", f"路径中含符号链接：{part}", rule="write_root")
     resolved = path.resolve()
     if not any(resolved.is_relative_to(root.resolve()) for root in roots):
-        raise ToolError("denied", f"超出可写目录：{path_arg}")
+        raise ToolError("denied", f"超出可写目录：{path_arg}", rule="write_root")
     if resolved.exists() and not resolved.is_file():
         raise ToolError("invalid_args", f"目标不是文件：{path_arg}")
     return resolved

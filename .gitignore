@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 *.sqlite
 *.sqlite-*
+# Migration backups and temporary copies (state.sqlite.pre-v17.bak, *.migrating) hold user data.
+*.sqlite.*
 .env
 
 # labels/ keeps only the sample inputs; reports, labels and run results stay local.
@@ -13,3 +15,5 @@ labels/**
 !labels/samples.json
 !labels/*/samples.json
 !labels/*/cases.json
+# The graded-evaluation record is versioned: `zhiqiu gate` checks it against the prompt fingerprint.
+!labels/eval-runs.jsonl

@@ -1,0 +1,19 @@
+{
+  "stage": "next_question",
+  "error": "模型返回了不允许的追问；问答保持可恢复",
+  "raw_output": {
+    "done": false,
+    "dimension": "mechanism",
+    "followup_of": "q_mechanism_1",
+    "question": "请举一个具体的、含三到四个节点的小二叉搜索树例子，然后一步步说明中序遍历过程中依次访问到的是哪些键，并解释为什么访问结果会呈现出这样的顺序。",
+    "difficulty": "advanced",
+    "difficulty_basis": "要求学习者用具体实例展开推理，说明中序遍历为何产生特定顺序，属于机制性理解。"
+  },
+  "expect": "accepted",
+  "note": "2026-10-14 live_v5_smoke 真实模型：追问没有填 question_id，而是写了序号或维度名；V5 起程序在同一维度内找唯一可追问的原题作为目标。",
+  "source": {
+    "failure_id": "6990200f-c1d0-406d-ac2d-1c840b572e42",
+    "trace_id": "91ff6748c3a480bd9d8e212efeb135e3",
+    "created_at": "2026-10-14T12:00:00+00:00"
+  }
+}

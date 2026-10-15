@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
+from . import guardrails, tracing
 from .context import ContextManager, ModelRequest
 from .materials import Material
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
@@ -61,7 +62,7 @@ def query_leak_check(private: Iterable[Material], point: str = "", run: int = LE
     def check(spec: ToolSpec, args: dict[str, Any]) -> None:
         query = args.get("query")
         if isinstance(query, str) and len(query) > max_chars:
-            raise ToolError("invalid_args", f"查询超过 {max_chars} 字符")
+            raise ToolError("invalid_args", f"查询超过 {max_chars} 字符", rule="leak_check")
         # Every outgoing string counts: a URL can carry copied text as well as a query can.
         for value in args.values():
             if not isinstance(value, str):
@@ -70,7 +71,8 @@ def query_leak_check(private: Iterable[Material], point: str = "", run: int = LE
             for start in range(len(checked) - run + 1):
                 fragment = checked[start:start + run]
                 if "\x00" not in fragment and any(fragment in text for text in texts):
-                    raise ToolError("invalid_args", f"参数包含本地资料原文（连续 {run} 字以上），请只写知识点和缺口")
+                    raise ToolError("invalid_args", f"参数包含本地资料原文（连续 {run} 字以上），请只写知识点和缺口",
+                                    rule="leak_check")
     return check
 
 
@@ -122,8 +124,22 @@ class ToolLoop:
         round and every tool call, and no model call may wait longer than the time left, so one
         loop overruns its deadline by at most one tool call.
         """
-        deadline = self.clock() + self.deadline_s
+        store = getattr(self.context, "store", None)
+        if store is None:
+            return self._run(request, tool_names, scope, require_final, final_instruction, stop_on, str(uuid.uuid4()))
         loop_id = str(uuid.uuid4())
+        with tracing.span(store, "loop", request.stage or "tool_loop") as span:
+            span.set(loop_id=loop_id, max_rounds=self.max_rounds)
+            result = self._run(request, tool_names, scope, require_final, final_instruction, stop_on, loop_id)
+            span.set(end_reason=result.status, rounds=result.rounds)
+            if result.status in ("max_rounds", "deadline", "budget"):
+                guardrails.record(store, "loop_limit", "stopped", result.reason, stage=request.stage,
+                                  end_reason=result.status, kp_id=request.kp_id, attempt_id=request.attempt_id)
+            return result
+
+    def _run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope, require_final: bool,
+             final_instruction: str | None, stop_on: frozenset[str], loop_id: str) -> LoopResult:
+        deadline = self.clock() + self.deadline_s
         tools = self.registry.openai_schema(tool_names)
         messages: list[dict[str, Any]] = [dict(message) for message in request.messages]
         materials: dict[tuple[str, str], Material] = {}
@@ -139,6 +155,7 @@ class ToolLoop:
                 status = "deadline"
                 break
             rounds = round_number
+            tracing.progress(round=round_number, max_rounds=self.max_rounds, tool=None)
             sent = list(messages)
             message = self.model.tool_round(request, messages, tools, timeout_s=min(MODEL_CALL_SECONDS, left))
             self._observe(request, sent)
@@ -163,6 +180,7 @@ class ToolLoop:
                         # Every call still needs a tool message, but none may start after the deadline.
                         status = "deadline"
                         raise ToolError("timeout", "已超过工具循环总时限，本次调用未执行")
+                    tracing.progress(tool=str(name))
                     value = self.executor.run(str(name), args, round_scope).value
                     if name in stop_on:
                         stopped_by = (str(name), value)
@@ -184,6 +202,7 @@ class ToolLoop:
             messages.append({"role": "user", "content": f"{used_up}。{closing}"})
             estimate, limit = self.context.estimate(messages)
             if limit is None or estimate <= limit:
+                tracing.progress(tool=None, closing=True)
                 closing_message = self.model.tool_round(request, messages, tools, tool_choice="none",
                                                         timeout_s=GRACE_SECONDS)
                 final, text = _parse_final(closing_message), (closing_message.get("content") or "").strip()

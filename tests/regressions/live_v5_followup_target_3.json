@@ -1,0 +1,19 @@
+{
+  "stage": "next_question",
+  "error": "模型返回了不允许的追问；问答保持可恢复",
+  "raw_output": {
+    "done": false,
+    "dimension": "mechanism",
+    "question": "请结合一棵具体的二叉搜索树例子，逐步写出中序遍历的访问过程，并解释为什么这样访问后得到的键序列一定是从小到大的。",
+    "difficulty": "advanced",
+    "difficulty_basis": "要求学习者结合具体例子说明中序遍历产生升序序列的推理过程，属于对机制的理解与论证。",
+    "followup_of": "mechanism-inorder-ascending"
+  },
+  "expect": "accepted",
+  "note": "2026-10-14 live_v5_smoke 真实模型：追问没有填 question_id，而是写了序号或维度名；V5 起程序在同一维度内找唯一可追问的原题作为目标。",
+  "source": {
+    "failure_id": "8d59569a-9e84-42b7-a363-10c0a00d87d9",
+    "trace_id": "91ff6748c3a480bd9d8e212efeb135e3",
+    "created_at": "2026-10-14T12:00:00+00:00"
+  }
+}

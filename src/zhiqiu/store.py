@@ -12,13 +12,18 @@ from typing import Any, Iterator
 
 from fsrs import Card, Rating, Scheduler
 
-from . import flow, queries
+from . import flow, guardrails, history, queries, tracing
+from .redact import redact, redact_obj
 from .clock import Clock
 from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assessments_for, calculate,
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 18
+LLM_FAILURE_CHARS = 20_000
+# Caps for the optional prompt/reply text of one model call (ZHIQIU_TRACE_CONTENT=1).
+TRACE_REQUEST_CHARS = 60_000
+TRACE_RESPONSE_CHARS = 20_000
 
 
 def new_id() -> str:
@@ -70,7 +75,7 @@ class Store:
             "notes": "SELECT * FROM notes",
             "consents": "SELECT * FROM consents",
             "receipts": "SELECT * FROM receipts",
-            "events": "SELECT * FROM events",
+            "events": "SELECT id,kp_id,attempt_id,type,payload_json,created_at FROM events",
             "llm_calls": """SELECT id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,
                 tokens_in,tokens_out,status,created_at FROM llm_calls""",
             "search_calls": "SELECT id,point,query,result_count,status,created_at FROM search_calls",
@@ -482,14 +487,75 @@ class Store:
                     upto_seq INTEGER NOT NULL, source_hash TEXT NOT NULL, content TEXT NOT NULL,
                     created_at TEXT NOT NULL, UNIQUE(conversation_id, upto_seq, source_hash))""")
                 self.db.execute("PRAGMA user_version=15")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 16:
+            with self.transaction():
+                # Trace: spans are written when they start, so a viewer sees what is running now.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS spans (
+                    span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
+                    kind TEXT NOT NULL, name TEXT NOT NULL, started_at_ns INTEGER NOT NULL,
+                    duration_ms INTEGER, status TEXT NOT NULL, end_reason TEXT, error_kind TEXT,
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    kp_id TEXT, attempt_id TEXT, session_id TEXT, conversation_id TEXT,
+                    point TEXT NOT NULL DEFAULT '', attrs_json TEXT NOT NULL DEFAULT '{}')""")
+                # Raw model output that failed validation, kept (redacted) so it can become a regression case.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS llm_failures (
+                    id TEXT PRIMARY KEY, trace_id TEXT, parent_span_id TEXT, context_build_id TEXT,
+                    stage TEXT NOT NULL, kp_id TEXT, attempt_id TEXT, conversation_id TEXT,
+                    point TEXT NOT NULL DEFAULT '', error TEXT NOT NULL, raw_output TEXT NOT NULL,
+                    created_at TEXT NOT NULL, at_ns INTEGER)""")
+                added = {"llm_calls": ("trace_id TEXT", "parent_span_id TEXT", "started_at_ns INTEGER",
+                                       "tokens_cached INTEGER", "error_kind TEXT"),
+                         "tool_calls": ("trace_id TEXT", "parent_span_id TEXT", "started_at_ns INTEGER"),
+                         "events": ("trace_id TEXT", "parent_span_id TEXT", "at_ns INTEGER"),
+                         "context_builds": ("trace_id TEXT", "parent_span_id TEXT")}
+                for table, ddls in added.items():
+                    have = {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                    for ddl in ddls:
+                        if ddl.split()[0] not in have:
+                            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+                for index, table, column in (("spans_trace", "spans", "trace_id"),
+                                             ("spans_started", "spans", "started_at_ns"),
+                                             ("spans_status", "spans", "status"),
+                                             ("llm_calls_trace", "llm_calls", "trace_id"),
+                                             ("tool_calls_trace", "tool_calls", "trace_id"),
+                                             ("events_trace", "events", "trace_id"),
+                                             ("llm_failures_trace", "llm_failures", "trace_id")):
+                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {index} ON {table}({column})")
+                self.db.execute("PRAGMA user_version=16")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 17:
+            with self.transaction():
+                # Prompt and reply text of a model call, kept only when ZHIQIU_TRACE_CONTENT=1 (redacted, capped).
+                self.db.execute("""CREATE TABLE IF NOT EXISTS llm_contents (
+                    llm_call_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, response_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL)""")
+                self.db.execute("PRAGMA user_version=17")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 18:
+            with self.transaction():
+                # Keyword index over lessons and chat messages (history.py), filled lazily on first search.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS search_docs (
+                    id INTEGER PRIMARY KEY, source TEXT NOT NULL, ref_id TEXT NOT NULL, UNIQUE(source, ref_id))""")
+                try:
+                    self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(terms)")
+                except sqlite3.OperationalError:
+                    pass  # SQLite built without FTS5: history search stays off.
+                else:
+                    try:
+                        # Deleted rows leave no tokens behind in the index (SQLite 3.42+).
+                        self.db.execute("INSERT INTO search_fts(search_fts, rank) VALUES('secure-delete', 1)")
+                    except sqlite3.OperationalError:
+                        pass
+                self.db.execute("PRAGMA user_version=18")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield self.db
-        except BaseException:
+        except BaseException as exc:
             self.db.rollback()
+            if isinstance(exc, flow.IllegalTransition):
+                # The refused change was rolled back; the refusal itself is kept.
+                guardrails.record(self, "illegal_transition", "blocked", str(exc), entity=exc.entity)
             raise
         else:
             self.db.commit()
@@ -715,18 +781,53 @@ class Store:
             flow.transition(self, "lesson", session_id, "closed", "ended", kp_id=row["kp_id"])
 
     def _event(self, kp_id: str | None, attempt_id: str | None, kind: str, payload: dict[str, Any]) -> None:
-        self.db.execute("INSERT INTO events(kp_id,attempt_id,type,payload_json,created_at) VALUES(?,?,?,?,?)",
-                        (kp_id, attempt_id, kind, json.dumps(payload, ensure_ascii=False), self._ts()))
+        trace_id, parent = tracing.columns(self)
+        self.db.execute("""INSERT INTO events(kp_id,attempt_id,type,payload_json,created_at,trace_id,parent_span_id,at_ns)
+            VALUES(?,?,?,?,?,?,?,?)""",
+                        (kp_id, attempt_id, kind, json.dumps(payload, ensure_ascii=False), self._ts(),
+                         trace_id, parent, tracing.now_ns()))
+
+    def record_event(self, kp_id: str | None, attempt_id: str | None, kind: str, payload: dict[str, Any]) -> None:
+        """An event outside any business transaction, e.g. a guardrail that stopped a tool call."""
+        if self.db.in_transaction:
+            self._event(kp_id, attempt_id, kind, payload)
+            return
+        with self.transaction():
+            self._event(kp_id, attempt_id, kind, payload)
+
+    def record_llm_failure(self, stage: str, error: str, raw_output: str, *, context_build_id: str | None = None,
+                           kp_id: str | None = None, attempt_id: str | None = None,
+                           conversation_id: str | None = None, point: str = "") -> str:
+        """Keep a model output that failed validation (redacted, capped) so it can become a regression case."""
+        failure_id = new_id()
+        trace_id, parent = tracing.columns(self)
+        with self.transaction():
+            self.db.execute("""INSERT INTO llm_failures(id,trace_id,parent_span_id,context_build_id,stage,kp_id,
+                attempt_id,conversation_id,point,error,raw_output,created_at,at_ns) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (failure_id, trace_id, parent, context_build_id, stage, kp_id, attempt_id, conversation_id,
+                 point or "", redact(error)[:2000], redact(raw_output)[:LLM_FAILURE_CHARS], self._ts(),
+                 tracing.now_ns()))
+        return failure_id
 
     def record_llm_call(self, details: dict[str, Any]) -> None:
+        trace_id, parent = tracing.columns(self)
+        call_id = new_id()
         with self.transaction():
+            if details.get("request_messages") is not None and os.getenv("ZHIQIU_TRACE_CONTENT") == "1":
+                request = json.dumps(redact_obj(details["request_messages"]), ensure_ascii=False, default=str)
+                self.db.execute("""INSERT INTO llm_contents(llm_call_id,request_json,response_text,created_at)
+                    VALUES(?,?,?,?)""", (call_id, request[:TRACE_REQUEST_CHARS],
+                                         redact(str(details.get("response_text") or ""))[:TRACE_RESPONSE_CHARS],
+                                         self._ts()))
             self.db.execute("""INSERT INTO llm_calls
                 (id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,tokens_in,tokens_out,status,
-                 created_at,context_build_id,stage,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (new_id(), details.get("kp_id"), details.get("attempt_id"), details["point"], details["model"],
+                 created_at,context_build_id,stage,session_id,trace_id,parent_span_id,started_at_ns,
+                 tokens_cached,error_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (call_id, details.get("kp_id"), details.get("attempt_id"), details["point"], details["model"],
                              details["prompt_hash"], details["latency_ms"], details.get("tokens_in"),
                              details.get("tokens_out"), details["status"], self._ts(), details.get("context_build_id"),
-                             details.get("stage"), details.get("session_id")))
+                             details.get("stage"), details.get("session_id"), trace_id, parent,
+                             details.get("started_at_ns"), details.get("tokens_cached"), details.get("error_kind")))
             build_id = details.get("context_build_id")
             tokens_in = details.get("tokens_in")
             tokens_out = details.get("tokens_out")
@@ -744,20 +845,23 @@ class Store:
 
     def record_tool_call(self, details: dict[str, Any]) -> None:
         confirmed = details.get("confirmed")
+        trace_id, parent = tracing.columns(self)
         with self.transaction():
             self.db.execute("""INSERT INTO tool_calls
                 (id,tool,source,permission,kp_id,attempt_id,session_id,point,loop_id,round,args_summary_json,
                  confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,truncated,created_at,
-                 conversation_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 conversation_id,trace_id,parent_span_id,started_at_ns)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (details["id"], details["tool"], details.get("source"), details.get("permission"),
                  details.get("kp_id"), details.get("attempt_id"), details.get("session_id"),
                  details.get("point") or "", details.get("loop_id"), details.get("round"),
-                 json.dumps(details.get("args_summary"), ensure_ascii=False),
+                 json.dumps(redact_obj(details.get("args_summary")), ensure_ascii=False),
                  None if confirmed is None else int(bool(confirmed)), details["status"],
                  details.get("error_kind"), details["attempts"], details["latency_ms"],
                  details.get("result_count"), details["output_chars"], int(bool(details.get("truncated"))),
-                 self._ts(), details.get("conversation_id")))
+                 self._ts(), details.get("conversation_id"), trace_id, parent, details.get("started_at_ns")))
+            if details.get("guard"):
+                self._event(details.get("kp_id"), details.get("attempt_id"), "GuardrailTriggered", details["guard"])
 
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
@@ -1294,7 +1398,8 @@ class Store:
                   "dimension_scores", "review_question_assessments", "review_evidence", "review_batches",
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
-                  "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries")
+                  "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries",
+                  "spans", "llm_failures", "llm_contents")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:
@@ -1310,7 +1415,11 @@ class Store:
             self.db.execute("DELETE FROM tool_calls WHERE kp_id=? OR point=?", (kp_id, point["title"]))
             self.db.execute("DELETE FROM context_builds WHERE point=?", (point["title"],))
             self.db.execute("DELETE FROM material_checks WHERE point=?", (point["title"],))
+            self.db.execute("DELETE FROM spans WHERE kp_id=? OR point=?", (kp_id, point["title"]))
+            self.db.execute("DELETE FROM llm_failures WHERE kp_id=? OR point=?", (kp_id, point["title"]))
+            self.db.execute("DELETE FROM llm_contents WHERE llm_call_id NOT IN (SELECT id FROM llm_calls)")
             self.db.execute("DELETE FROM knowledge_points WHERE id=?", (kp_id,))
+            history.purge(self.db)
             self.db.execute("INSERT INTO metrics(name,value) VALUES('forgotten_count',1) ON CONFLICT(name) DO UPDATE SET value=value+1")
 
     def forget_preparation(self, point: str) -> bool:
@@ -1319,6 +1428,8 @@ class Store:
         with self.transaction():
             count = sum(self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE point=?", (point,)).fetchone()[0]
                         for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls"))
-            for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls"):
+            for table in ("material_checks", "context_builds", "llm_calls", "search_calls", "tool_calls",
+                          "spans", "llm_failures"):
                 self.db.execute(f"DELETE FROM {table} WHERE point=?", (point,))
+            self.db.execute("DELETE FROM llm_contents WHERE llm_call_id NOT IN (SELECT id FROM llm_calls)")
             return count > 0

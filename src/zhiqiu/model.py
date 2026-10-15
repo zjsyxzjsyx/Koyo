@@ -27,6 +27,27 @@ def _is_context_overflow(response: httpx.Response) -> bool:
         "too many tokens", "input tokens exceed", "prompt is too long"))
 
 
+def _reply_text(choices: list[Any]) -> str:
+    """The reply's text plus any tool calls, as one string for the optional trace content."""
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message") or {}
+    text = message.get("content") or ""
+    calls = message.get("tool_calls")
+    if calls:
+        text += ("\n" if text else "") + json.dumps({"tool_calls": calls}, ensure_ascii=False, default=str)
+    return text
+
+
+def cached_tokens(usage: dict[str, Any]) -> int | None:
+    """Prompt tokens the provider served from its cache: DeepSeek or OpenAI style usage."""
+    value = usage.get("prompt_cache_hit_tokens")
+    if type(value) is not int:
+        details = usage.get("prompt_tokens_details")
+        value = details.get("cached_tokens") if isinstance(details, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
 class Model(Protocol):
     """Per-stage interface for scripted models in tests and demos.
 
@@ -65,6 +86,7 @@ class OpenAICompatibleModel:
         self.last_usage: dict[str, Any] = {}
         self.last_usage_request_build_id: str | None = None
         self.last_response_model: str | None = None
+        self.last_output = ""
         self.kp_id: str | None = None
         self.attempt_id: str | None = None
         self.point = ""
@@ -92,9 +114,12 @@ class OpenAICompatibleModel:
         if thinking is not None:
             body["thinking"] = {"type": thinking}
         fingerprint = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        started_at_ns = time.time_ns()
         began = time.perf_counter()
         usage: dict[str, Any] = {}
+        choices: list[Any] = []
         status = "error"
+        error_kind: str | None = None
         self.last_usage = {}
         self.last_usage_request_build_id = None
         self.last_response_model = None
@@ -119,6 +144,9 @@ class OpenAICompatibleModel:
                 reported_model = data.get("model")
                 self.last_response_model = reported_model if isinstance(reported_model, str) else None
             status = "ok"
+        except BaseException as exc:
+            error_kind = "context_overflow" if status == "context_overflow" else type(exc).__name__
+            raise
         finally:
             if self.audit:
                 self.audit({"kp_id": request.kp_id if request else self.kp_id,
@@ -130,7 +158,11 @@ class OpenAICompatibleModel:
                             "status": status,
                             "context_build_id": request.build_id if request else None,
                             "stage": request.stage if request else None,
-                            "session_id": request.session_id if request else None})
+                            "session_id": request.session_id if request else None,
+                            "started_at_ns": started_at_ns, "tokens_cached": cached_tokens(usage),
+                            "error_kind": error_kind,
+                            # The store keeps these only when ZHIQIU_TRACE_CONTENT=1.
+                            "request_messages": messages, "response_text": _reply_text(choices)})
         if not choices:
             raise ValueError("模型没有返回结果")
         return choices[0]["message"]
@@ -147,6 +179,7 @@ class OpenAICompatibleModel:
 
     def _json(self, instruction: str, payload: dict[str, Any]) -> dict[str, Any]:
         message = self._chat(instruction + " 仅返回一个 JSON 对象，不要 Markdown。", payload)
+        self.last_output = message.get("content") or ""
         return self._parse_json_message(message)
 
     @staticmethod
@@ -166,6 +199,8 @@ class OpenAICompatibleModel:
         reserve = request.budget.get("output_reserve_tokens")
         max_tokens = reserve if type(reserve) is int and reserve > 0 else None
         message = self._chat_messages(list(request.messages), request=request, max_tokens=max_tokens)
+        # Kept so an answer that fails parsing or validation can be stored for a regression case.
+        self.last_output = message.get("content") or ""
         return self._parse_json_message(message)
 
     def tool_round(self, request: ModelRequest, messages: list[dict[str, Any]],

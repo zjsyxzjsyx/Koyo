@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import atexit
+import functools
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 import click
 import httpx
 import typer
 
+from . import contracts, gate, metrics, regressions, traces, tracing
 from .conversations import Conversations
 from .flows import FlowInterrupted, resume_lesson, run_lesson, run_quiz, show_outcome
 from .notion import NotionReader
@@ -19,7 +21,7 @@ from .files import read_roots_from_env, write_roots_from_env
 from .local_env import load_local_env
 from .memory import MemoryService
 from .model import OpenAICompatibleModel
-from .quality import evaluate_labels, label_template
+from .quality import evaluate_labels, grading_usage, label_template, record_eval_run
 from .retrieval import rank_lessons
 from .runtime import LearningRuntime
 from .search import ExaSearch
@@ -31,6 +33,12 @@ memory_app = typer.Typer(help="显式管理跨会话学习偏好")
 app.add_typer(memory_app, name="memory")
 chat_app = typer.Typer(help="与知秋自由对话；需要时再进入学习、自测或复习")
 app.add_typer(chat_app, name="chat")
+failures_app = typer.Typer(help="失败分类与沉淀为回归样例")
+app.add_typer(failures_app, name="failures")
+
+
+# Observation commands print only what was asked for (often JSON), never the status preamble.
+OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate")
 
 
 def default_db() -> Path:
@@ -40,6 +48,17 @@ def default_db() -> Path:
 
 def context_store(ctx: typer.Context) -> Store:
     return ctx.obj["store"]
+
+
+def traced(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Make one run of a command that calls the model one trace (a root span)."""
+    def decorate(command: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(command)
+        def wrapper(ctx: typer.Context, *args: Any, **kwargs: Any) -> Any:
+            with tracing.span(context_store(ctx), "command", name):
+                return command(ctx, *args, **kwargs)
+        return wrapper
+    return decorate
 
 
 def _mcp_tools(store: Store) -> list[Any]:
@@ -89,7 +108,7 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
         load_local_env()
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from None
-    if ctx.invoked_subcommand == "check-model":
+    if ctx.invoked_subcommand in ("check-model", "gate"):
         ctx.obj = {"offline": offline}
         return
     if ctx.invoked_subcommand == "mcp":
@@ -97,13 +116,15 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
         ctx.obj = {"db": db or default_db()}
         return
     store = Store(db or default_db())
+    # Spans left running by a process that died are closed as interrupted.
+    tracing.reconcile(store)
     ctx.obj = {"store": store, "offline": offline}
     if ctx.invoked_subcommand is None:
         show_status(store, True)
         # Scripts and pipes keep the old behaviour: status only, no conversation.
         if sys.stdin.isatty():
             start_chat(store, offline)
-    elif ctx.invoked_subcommand not in ("status", "chat"):
+    elif ctx.invoked_subcommand not in ("status", "chat") + OBSERVE_COMMANDS:
         show_status(store)
 
 
@@ -222,6 +243,7 @@ class TerminalIO:
 
 
 @app.command()
+@traced("learn")
 def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个具体知识点")],
           source: Annotated[Path | None, typer.Option("--from", help="本地 md/txt 文件或目录")] = None,
           urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复；经 Exa 获取正文")] = None,
@@ -241,6 +263,7 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
 
 
 @app.command()
+@traced("resume")
 def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument()] = None,
            grade_original: Annotated[bool, typer.Option("--grade-original",
                help="待评阅的长原答按段落分段评阅原答（需 ZHIQIU_LONG_ANSWER_SEGMENTS=1）")] = False) -> None:
@@ -283,6 +306,7 @@ def submit_final(ctx: typer.Context, answer_id: str,
 
 
 @app.command("ask")
+@traced("ask")
 def ask_old_lesson(ctx: typer.Context, point: str, question: str,
                    source: Annotated[str | None, typer.Option("--source", help="指定旧讲解的消息 ID")] = None,
                    all_sources: Annotated[bool, typer.Option("--all", help="逐次处理全部旧讲解")] = False) -> None:
@@ -365,6 +389,7 @@ def _run_all_old_lessons(store: Store, query_id: str) -> None:
 
 
 @app.command("resume-all")
+@traced("resume-all")
 def resume_all_old_lessons(ctx: typer.Context, query_id: str) -> None:
     """继续此前中断的全部旧讲解追问。"""
     _run_all_old_lessons(context_store(ctx), query_id)
@@ -384,6 +409,7 @@ def correct_lesson(ctx: typer.Context, message_id: str,
 
 
 @app.command()
+@traced("review")
 def review(ctx: typer.Context, point: Annotated[str | None, typer.Argument()] = None) -> None:
     """开始一条到期复习；同一知识点的到期积压合并作答。"""
     store = context_store(ctx)
@@ -471,20 +497,132 @@ def revise(ctx: typer.Context, review_id: str, dimension: str, score: int,
 
 
 @app.command()
-def trace(ctx: typer.Context, attempt_id: str) -> None:
-    """查看一次尝试的题目、原答、评阅与审计事件。"""
-    typer.echo(json.dumps(context_store(ctx).trace(attempt_id), ensure_ascii=False, indent=2))
+def trace(ctx: typer.Context, ident: Annotated[str, typer.Argument(metavar="ID")],
+          timeline: Annotated[bool, typer.Option("--timeline",
+              help="按树形时间线显示；ID 可以是 trace、尝试、对话或讲解会话")] = False) -> None:
+    """查看一次尝试的题目、原答、评阅与审计事件；--timeline 显示调用链路。"""
+    store = context_store(ctx)
+    if not timeline:
+        typer.echo(json.dumps(store.trace(ident), ensure_ascii=False, indent=2))
+        return
+    trace_ids = traces.resolve(store.db, ident)
+    if not trace_ids:
+        raise typer.BadParameter("没有与该 ID 关联的 trace")
+    typer.echo("\n\n".join(traces.render(traces.tree(store.db, trace_id)) for trace_id in trace_ids))
+
+
+@app.command("metrics")
+def show_metrics(ctx: typer.Context,
+                 days: Annotated[float, typer.Option("--days", help="最近几天")] = 7,
+                 as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """成功率、延迟、token 与花费、重试、人工确认与护栏触发的汇总。"""
+    data = metrics.collect(context_store(ctx).db, days)
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2) if as_json else metrics.render(data))
+
+
+@app.command("check")
+def check_contracts(ctx: typer.Context,
+                    days: Annotated[float, typer.Option("--days", help="最近几天")] = 7,
+                    as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """对已记录的运行做契约检查（PASS / FAIL / 证据不足）；有 FAIL 时退出码为 1。"""
+    data = contracts.check(context_store(ctx).db, days)
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2) if as_json else contracts.render_check(data))
+    if not data["passed"]:
+        raise typer.Exit(1)
+
+
+@failures_app.callback(invoke_without_command=True)
+def list_failures(ctx: typer.Context,
+                  days: Annotated[float, typer.Option("--days", help="最近几天")] = 7,
+                  as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """按类别统计失败，并列出样例 trace。"""
+    if ctx.invoked_subcommand is not None:
+        return
+    data = contracts.failures(context_store(ctx).db, days)
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2) if as_json else contracts.render_failures(data))
+
+
+@failures_app.command("export")
+def export_failure(ctx: typer.Context, failure_id: str,
+                   to: Annotated[Path, typer.Option("--to", help="回归样例文件，例如 tests/regressions/xxx.json")],
+                   expect: Annotated[str, typer.Option("--expect", help="rejected：校验必须拒绝；recovered：重试后必须成功；accepted：修复后直接接受")] = "rejected",
+                   note: Annotated[str, typer.Option("--note")] = "") -> None:
+    """把一次校验失败的模型原文导出为可重放的回归样例。"""
+    if expect not in regressions.EXPECTATIONS:
+        raise typer.BadParameter("--expect 只能是 rejected、recovered 或 accepted")
+    if to.exists():
+        raise typer.BadParameter("导出目标已存在")
+    try:
+        case = regressions.case_from_failure(context_store(ctx).db, failure_id, expect, note)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    to.parent.mkdir(parents=True, exist_ok=True)
+    to.write_text(json.dumps(case, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    typer.echo(f"回归样例已导出：{to}")
+
+
+@app.command("dashboard")
+def dashboard_command(ctx: typer.Context,
+                      port: Annotated[int, typer.Option("--port", help="本机端口")] = 8765,
+                      open_browser: Annotated[bool, typer.Option("--open", help="启动后用默认浏览器打开")] = False) -> None:
+    """本地只读网页看板：实时进度、trace 瀑布图、指标与花费、学习记录（只绑定 127.0.0.1）。"""
+    from .dashboard import serve
+
+    def ready(url: str) -> None:
+        typer.echo(f"看板已启动：{url}（只读，只在本机可访问；Ctrl+C 停止）")
+        typer.echo(f"读取的数据库：{path}（聊天时用同一个 --db 才能在看板上看到）")
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+
+    store = context_store(ctx)
+    path = store.path
+    store.close()  # the dashboard only reads, through its own read-only connections
+    try:
+        serve(path, port, ready)
+    except OSError as exc:
+        raise typer.BadParameter(f"端口 {port} 无法使用：{exc}") from None
+
+
+@app.command("traces")
+def list_traces(ctx: typer.Context,
+                days: Annotated[float, typer.Option("--days", help="最近几天")] = 7,
+                limit: Annotated[int, typer.Option("--limit")] = 30,
+                as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """列出最近的 trace（每轮对话或每次命令一条）。"""
+    items = traces.list_traces(context_store(ctx).db, days, limit)
+    typer.echo(json.dumps(items, ensure_ascii=False, indent=2) if as_json else traces.render_list(items))
 
 
 @app.command()
-def evaluate(ctx: typer.Context, labels: Annotated[Path, typer.Option("--labels", help="人工标注 JSON 数组")]) -> None:
+def evaluate(ctx: typer.Context, labels: Annotated[Path, typer.Option("--labels", help="人工标注 JSON 数组")],
+             record: Annotated[bool, typer.Option("--record",
+                 help="把结果连同评分提示指纹追加到 labels/eval-runs.jsonl，供发布门禁核对")] = False,
+             set_name: Annotated[str, typer.Option("--set", help="样本集名称")] = "labels") -> None:
     """核对人工评分一致率与原答证据定位；至少需要 30 项维度标注。"""
+    store = context_store(ctx)
     try:
         data = json.loads(labels.read_text(encoding="utf-8"))
-        result = evaluate_labels(context_store(ctx), data)
+        result = evaluate_labels(store, data)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if record:
+        saved = record_eval_run([result], set_name, grading_usage([store]))
+        typer.echo(f"已记录评测：指纹 {saved['fingerprint'][:12]}，{'通过' if saved['passed'] else '未通过'}")
+    if not result["passed"]:
+        raise typer.Exit(1)
+
+
+@app.command("gate")
+def release_gate(skip_tests: Annotated[bool, typer.Option("--skip-tests", help="只核对评分提示指纹")] = False,
+                 pytest_args: Annotated[str, typer.Option("--pytest-args", help="传给 pytest 的额外参数")] = "") -> None:
+    """发布门禁：确定性测试全部通过，且当前评分提示指纹有通过的人工标注评测记录。"""
+    try:
+        result = gate.run_gate(skip_tests=skip_tests, pytest_args=pytest_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(gate.render(result))
     if not result["passed"]:
         raise typer.Exit(1)
 

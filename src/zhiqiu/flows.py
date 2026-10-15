@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import tracing
 from .materials import Material
 from .store import Store
 
@@ -150,6 +151,13 @@ def _show_sources(io: FlowIO, materials: list[Material]) -> None:
         io.say(f"  {material.kind}: {material.source}" + (f"（{material.reason}）" if material.reason else ""))
 
 
+def _traced(name: str, result: FlowResult) -> FlowResult:
+    span = tracing.current()
+    if span is not None and span.name == name:
+        span.set(end_reason=result.kind)
+    return result
+
+
 def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Path | None = None,
                urls: list[str] | None = None, notion_pages: list[str] | None = None,
                offline: bool = False) -> FlowResult:
@@ -157,10 +165,19 @@ def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Pa
 
     A preparation failure raises ValueError before anything is taught.
     """
-    urls, notion_pages = urls or [], notion_pages or []
+    with tracing.span(store, "flow", "learn", point=point):
+        return _traced("learn", _run_lesson(io, store, service, point, source, urls or [],
+                                                   notion_pages or [], offline))
+
+
+def _run_lesson(io: FlowIO, store: Store, service: Any, point: str, source: Path | None,
+                urls: list[str], notion_pages: list[str], offline: bool) -> FlowResult:
     approve = approver(io)
+    tracing.progress(step="准备资料")
     kp_id, lesson, materials = service.prepare(point, source, approve, offline=offline, urls=urls,
                                                notion_pages=notion_pages)
+    tracing.link(kp_id=kp_id)
+    tracing.progress(step="讲解")
     _stage(io, "lesson", "point", kp_id)
     _show_sources(io, materials)
     io.say(lesson["lesson"])
@@ -177,6 +194,7 @@ def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Pa
         if command == "/done":
             attempt = _start_first(io, store, kp_id)
             if attempt:
+                tracing.progress(step="自测")
                 return run_quiz(io, store, service, attempt)
             continue
         if command in ("/sources web", "/sources local"):
@@ -217,7 +235,15 @@ def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Pa
 def resume_lesson(io: FlowIO, store: Store, session_id: str,
                   service_factory: Callable[[], Any]) -> FlowResult:
     """Continue a saved lesson; the model runtime is created only when first needed."""
+    with tracing.span(store, "flow", "resume_lesson", session_id=session_id):
+        return _traced("resume_lesson", _resume_lesson(io, store, session_id, service_factory))
+
+
+def _resume_lesson(io: FlowIO, store: Store, session_id: str,
+                   service_factory: Callable[[], Any]) -> FlowResult:
     lesson = store.resume_lesson(session_id)
+    tracing.link(kp_id=lesson["kp_id"], point=lesson["title"])
+    tracing.progress(step="讲解")
     _stage(io, "lesson", "lesson", lesson["session_id"])
     service: Any = None
     io.say(f"继续讲解：{lesson['title']}（会话 {lesson['session_id']}）")
@@ -233,6 +259,7 @@ def resume_lesson(io: FlowIO, store: Store, session_id: str,
             service = service or service_factory()
             attempt = _start_first(io, store, kp_id)
             if attempt:
+                tracing.progress(step="自测")
                 return run_quiz(io, store, service, attempt)
             continue
         question = _lesson_question(command)
@@ -267,6 +294,16 @@ def _is_side_question(io: FlowIO, service: Any, attempt_id: str, question: str, 
 def run_quiz(io: FlowIO, store: Store, service: Any, attempt_id: str,
              clock: Callable[[], float] = time.monotonic) -> FlowResult:
     """Ask questions of a self-test or review attempt until it is finished or paused."""
+    attempt = store.db.execute("""SELECT a.kp_id,a.kind,k.title FROM attempts a
+        JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=?""", (attempt_id,)).fetchone()
+    name = "review" if attempt and attempt["kind"] == "review" else "quiz"
+    with tracing.span(store, "flow", name, attempt_id=attempt_id,
+                      kp_id=attempt["kp_id"] if attempt else None, point=attempt["title"] if attempt else None):
+        return _traced(name, _run_quiz(io, store, service, attempt_id, clock))
+
+
+def _run_quiz(io: FlowIO, store: Store, service: Any, attempt_id: str,
+              clock: Callable[[], float]) -> FlowResult:
     attempt = store.db.execute("SELECT kp_id,kind,state FROM attempts WHERE id=?", (attempt_id,)).fetchone()
     kp_id = attempt["kp_id"]
     if attempt["state"] in ("paused", "needs_self_test"):
@@ -275,16 +312,22 @@ def run_quiz(io: FlowIO, store: Store, service: Any, attempt_id: str,
     started = clock()
 
     def finish(reason: str) -> FlowResult:
+        tracing.progress(step="评分")
         outcome = service.finish(attempt_id, reason)
         show_outcome(io, store, outcome)
         return FlowResult("outcome", kp_id, attempt_id=attempt_id, outcome=outcome)
 
+    asked = store.db.execute("SELECT COUNT(*) FROM questions WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
     while True:
         if clock() - started >= QUIZ_SECONDS:
             return finish("limit")
+        tracing.progress(step="出题", question=asked + 1, dimension=None, followup=None)
         proposed = service.next_question(attempt_id)
         if proposed["done"]:
             return finish(proposed["reason"])
+        asked = proposed["seq"]
+        tracing.progress(step="等待回答", question=proposed["seq"], dimension=proposed["dimension"],
+                         followup=bool(proposed.get("followup")))
         prefix = "追问 · " if proposed.get("followup") else ""
         io.say(f"[{proposed['seq']}/8 · {prefix}{proposed['dimension']}] {proposed['question']}")
         try:

@@ -116,13 +116,16 @@ def test_illegal_transition_changes_nothing(tmp_path, entity, start, target):
         row_id = store.pending_lessons()[0]["session_id"]
     table, column = flow.COLUMNS[entity]
     store.db.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (start, row_id))
-    before = store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    before = store.db.execute("SELECT COUNT(*) FROM events WHERE type='StateChanged'").fetchone()[0]
     with pytest.raises(IllegalTransition) as error:
         with store.transaction():
             flow.transition(store, entity, row_id, target, "test")
     assert isinstance(error.value, ValueError)
     assert store.db.execute(f"SELECT {column} FROM {table} WHERE id=?", (row_id,)).fetchone()[0] == start
-    assert store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
+    assert store.db.execute("SELECT COUNT(*) FROM events WHERE type='StateChanged'").fetchone()[0] == before
+    # V5: the refusal itself is kept as a guardrail event, outside the rolled-back transaction.
+    guard = store.db.execute("SELECT payload_json FROM events WHERE type='GuardrailTriggered'").fetchall()
+    assert [json.loads(row[0])["rule"] for row in guard] == ["illegal_transition"]
 
 
 def test_closed_lesson_stays_closed_and_a_new_lesson_gets_its_own_session(tmp_path):
@@ -174,7 +177,7 @@ def test_v13_database_backfills_lesson_state_and_keeps_pending_lessons(tmp_path)
     store.db.execute("PRAGMA user_version=13")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 2)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 15
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 18
     assert path.with_suffix(".sqlite.pre-v14.bak").exists()
     states = dict(reopened.db.execute("""SELECT k.title,s.lesson_state FROM sessions s
         JOIN knowledge_points k ON k.id=s.kp_id"""))

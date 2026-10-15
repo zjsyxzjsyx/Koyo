@@ -17,6 +17,8 @@ from typing import Any, Callable, Sequence
 
 import httpx
 
+from . import guardrails, tracing
+from . import history as history_search
 from .context import ContextBudgetError, ContextTask
 from .conversations import Conversations
 from .files import read_root_file_spec
@@ -32,9 +34,12 @@ from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 
 CHAT_PERMISSIONS = frozenset({"read", "network", "write_file", "external_mcp", "propose"})
 PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory"})
+TRACED_COMMANDS = frozenset({"/learn", "/review", "/resume"})
 MEMORY_PREFIXES = ("pref.", "soul.")
 MEMORY_ITEM_CHARS = 300
 MEMORY_TOTAL_CHARS = 2000
+# Once the user allows one of these tools in a turn, its later calls in the same turn run without asking again.
+TURN_APPROVAL_PERMISSIONS = frozenset({"network"})
 # Unsummarized history beyond this count is summarized when no input budget is configured.
 HISTORY_MESSAGES = 40
 # With a budget, summarize once unsummarized history pushes the request past this share of it.
@@ -116,6 +121,8 @@ class ChatAgent:
         self.private: list[Material] = []
         self.conversation: dict[str, Any] | None = None
         self._goal = ""
+        # Tools the user allowed during the current turn (see TURN_APPROVAL_PERMISSIONS).
+        self._approved: set[str] = set()
         self.registry = ToolRegistry()
         for spec in service.tools.specs():
             if spec.name in ("read_file", "notion_page") or not spec.in_loops:
@@ -125,6 +132,9 @@ class ChatAgent:
                 spec = replace(spec, requires_confirmation=True, describe=_describe_external(spec))
             self.registry.register(spec)
         self.registry.register(read_root_file_spec(self.read_roots, self.private.append))
+        if history_search.available(store.db):
+            self.registry.register(history_search.tool_spec(
+                store, lambda: self.conversation["id"] if self.conversation else None))
         for spec in self._proposal_specs():
             self.registry.register(spec)
         self.executor = ToolExecutor(self.registry, audit=store.record_tool_call)
@@ -170,28 +180,39 @@ class ChatAgent:
             self.handle(text)
 
     def handle(self, text: str) -> None:
+        """One user input. Each chat turn, and each slash command that runs a flow, is one trace."""
         if text.startswith("/"):
-            self._command(text)
+            name = text.split()[0]
+            if name not in TRACED_COMMANDS:
+                self._command(text)
+                return
+            with tracing.span(self.store, "turn", name, conversation_id=self.conversation_id):
+                self._command(text)
             return
+        with tracing.span(self.store, "turn", "chat", conversation_id=self.conversation_id) as span:
+            span.set(end_reason=self._turn(text))
+
+    def _turn(self, text: str) -> str:
         self.chats.add_message(self.conversation_id, "user", "chat", text)
         try:
             result = self._think(text)
         except KeyboardInterrupt:
             self.chats.add_message(self.conversation_id, "assistant", "error", "已取消")
             self.io.say("已取消本轮。")
-            return
+            return "cancelled"
         except (ContextBudgetError, ModelContextOverflowError, ValueError, httpx.HTTPError) as exc:
             self._fail(f"本轮未完成：{exc}")
-            return
+            return "error"
         if result.status == "proposal" and result.stopped_by:
             self._proposal(*result.stopped_by, loop=result)
-            return
+            return "proposal"
         if not result.text:
             self._fail(f"本轮未完成：{result.reason}，模型没有给出回答。")
-            return
+            return "no_answer"
         self.chats.add_message(self.conversation_id, "assistant", "chat", result.text,
                                {"status": result.status, "rounds": result.rounds, "loop_id": result.loop_id})
         self.io.say(result.text)
+        return result.status
 
     def _fail(self, message: str) -> None:
         self.chats.set_error(self.conversation_id, message)
@@ -220,7 +241,7 @@ class ChatAgent:
         writable = "；".join(str(root) for root in self.write_roots) or "（未配置，不能写文件）"
         return (f"今天：{today}\n学习状态（快照，最新状态请调用 zhiqiu_status）：{status}\n"
                 f"偏好与人设记忆（本段对话开始时的快照）：\n{memory}\n"
-                f"可读目录：{readable}\n可写目录：{writable}\n联网：{'已关闭（--offline）' if self.offline else '可用，每次需确认'}")
+                f"可读目录：{readable}\n可写目录：{writable}\n联网：{'已关闭（--offline）' if self.offline else '可用（由程序向用户确认）'}")
 
     def _history(self, summary: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Messages after the latest summary, without the current input; oldest first."""
@@ -237,6 +258,16 @@ class ChatAgent:
                 note = f"（{message['content']}" + (f"；结果：{status}）" if status else "）")
                 items.append({"id": message["id"], "seq": message["seq"], "role": "assistant", "content": note})
         return items
+
+    def _confirm_tool(self, spec: ToolSpec, args: dict[str, Any]) -> bool:
+        """One approval covers the same network tool for the rest of the turn; each call is still shown."""
+        if spec.permission in TURN_APPROVAL_PERMISSIONS and spec.name in self._approved:
+            self.io.say((spec.describe(args) if spec.describe else f"工具 {spec.name}") + "（本轮已允许）")
+            return True
+        approved = self.io.confirm_tool(spec, args) is True
+        if approved and spec.permission in TURN_APPROVAL_PERMISSIONS:
+            self._approved.add(spec.name)
+        return approved
 
     def _check(self, spec: ToolSpec, args: dict[str, Any]) -> None:
         if spec.permission in ("network", "external_mcp"):
@@ -258,7 +289,8 @@ class ChatAgent:
         context = self._context()
         summary, history = self._summary_and_history(context, text)
         request = self.service.context.build_chat(context, history, text, self.conversation_id, summary)
-        scope = ToolScope(CHAT_PERMISSIONS, confirm=self.io.confirm_tool, check=self._check,
+        self._approved = set()
+        scope = ToolScope(CHAT_PERMISSIONS, confirm=self._confirm_tool, check=self._check,
                           conversation_id=self.conversation_id)
         loop = ToolLoop(model, self.service.context, self.registry, self.executor, self.max_rounds, self.deadline_s)
         try:
@@ -501,6 +533,7 @@ class ChatAgent:
         except ValueError as exc:
             self.chats.add_message(self.conversation_id, "assistant", "proposal", f"建议：{name}",
                                    {"tool": name, "args": args, "status": "refused", "detail": str(exc)})
+            guardrails.record(self.store, "proposal_refused", "blocked", str(exc), tool=name)
             self.io.say(f"这个建议现在无法执行：{exc}")
             return
         message = self.chats.add_message(self.conversation_id, "assistant", "proposal", description,
@@ -509,6 +542,7 @@ class ChatAgent:
         self.io.say(f"建议：{description}" + (f"（{reason}）" if reason else ""))
         if not self.io.confirm("要开始吗？"):
             self.chats.update_payload(message["id"], status="rejected")
+            guardrails.record(self.store, "proposal_rejected", "denied_by_user", description, tool=name)
             self.io.say("好的，先不进入。")
             return
         self.execute_proposal(message["id"], description, runner)
@@ -539,6 +573,7 @@ class ChatAgent:
                     + (f"\n  理由：{args['reason']}" if args.get("reason") else ""))
         if not self.io.confirm("要记住吗？"):
             self.chats.update_payload(message["id"], status="rejected")
+            guardrails.record(self.store, "proposal_rejected", "denied_by_user", key, tool="propose_memory")
             self.io.say("好的，不记。")
             return
         self.memory.set_semantic(key, content, f"chat:{message['id']}")
@@ -548,14 +583,15 @@ class ChatAgent:
     def _memory_precheck(self, args: dict[str, Any]) -> None:
         key, content = args["key"].strip(), args["content"].strip()
         if not key.startswith(MEMORY_PREFIXES) or len(key) <= 5:
-            raise ToolError("invalid_args", "记忆的 key 必须以 pref. 或 soul. 开头，并带上名称")
+            raise ToolError("invalid_args", "记忆的 key 必须以 pref. 或 soul. 开头，并带上名称", rule="memory_limit")
         if len(content) > MEMORY_ITEM_CHARS:
-            raise ToolError("invalid_args", f"单条记忆不能超过 {MEMORY_ITEM_CHARS} 字，请写得更精炼")
+            raise ToolError("invalid_args", f"单条记忆不能超过 {MEMORY_ITEM_CHARS} 字，请写得更精炼",
+                            rule="memory_limit")
         others = sum(len(item["content"]) for item in self.memory.list_semantic(None)
                      if item["key"].startswith(MEMORY_PREFIXES) and item["key"] != key)
         if others + len(content) > MEMORY_TOTAL_CHARS:
             raise ToolError("invalid_args", f"偏好与人设记忆合计不能超过 {MEMORY_TOTAL_CHARS} 字；"
-                                            "请先合并旧条目，或请用户用 memory delete 删除")
+                                            "请先合并旧条目，或请用户用 memory delete 删除", rule="memory_limit")
 
     def _proposal_specs(self) -> list[ToolSpec]:
         return [

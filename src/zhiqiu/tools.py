@@ -14,7 +14,9 @@ from typing import Any, Callable, Iterable
 
 import httpx
 
+from . import guardrails
 from .materials import Material
+from .redact import redact
 
 # propose: the handler only records a suggestion (enter a flow, remember a preference); the program decides.
 PERMISSIONS = ("read", "network", "write_file", "external_mcp", "propose")
@@ -27,13 +29,15 @@ _SUMMARY_CHARS = 200
 class ToolError(ValueError):
     """A classified tool failure; kind decides retry and the audit status."""
 
-    def __init__(self, kind: str, message: str, status: int | None = None):
+    def __init__(self, kind: str, message: str, status: int | None = None, *, rule: str | None = None):
         if kind not in ERROR_KINDS:
             raise ValueError(f"unknown tool error kind: {kind}")
         super().__init__(message)
         self.kind = kind
         # HTTP status when the failure came from a response, so adapters can explain it.
         self.status = status
+        # The guardrail that refused the call (guardrails.RULES), recorded as an event with the audit.
+        self.rule = rule
 
 
 @dataclass(frozen=True)
@@ -186,6 +190,7 @@ def summarize_args(value: Any, key: str = "") -> Any:
     if any(marker in key.lower() for marker in _SECRET_MARKERS):
         return "[redacted]"
     if isinstance(value, str):
+        value = redact(value)
         return value if len(value) <= _SUMMARY_CHARS else value[:_SUMMARY_CHARS] + "…"
     if isinstance(value, dict):
         return {k: summarize_args(v, str(k)) for k, v in value.items()}
@@ -227,20 +232,21 @@ class ToolExecutor:
 
     def _gate(self, spec: ToolSpec, args: dict[str, Any], scope: ToolScope) -> bool | None:
         if scope.names is not None and spec.name not in scope.names:
-            raise ToolError("denied", f"本步骤不能使用工具 {spec.name}")
+            raise ToolError("denied", f"本步骤不能使用工具 {spec.name}", rule="name_not_allowed")
         if spec.permission not in scope.allowed:
-            raise ToolError("denied", f"本步骤未允许 {spec.permission} 类工具：{spec.name}")
+            raise ToolError("denied", f"本步骤未允许 {spec.permission} 类工具：{spec.name}", rule="permission_denied")
         if not spec.requires_confirmation:
             return None
         if scope.confirm is None:
-            raise ToolError("denied", f"{spec.name} 需要用户确认，当前环境无法确认")
+            raise ToolError("denied", f"{spec.name} 需要用户确认，当前环境无法确认", rule="confirmation_unavailable")
         try:
             approved = scope.confirm(spec, args) is True
         except Exception as exc:
             # A broken confirmation path must never let the call through.
-            raise ToolError("denied", f"{spec.name} 的确认失败：{type(exc).__name__}") from exc
+            raise ToolError("denied", f"{spec.name} 的确认失败：{type(exc).__name__}",
+                            rule="confirmation_unavailable") from exc
         if not approved:
-            raise ToolError("denied", f"用户拒绝了 {spec.name}")
+            raise ToolError("denied", f"用户拒绝了 {spec.name}", rule="confirmation_denied")
         return True
 
     def run(self, name: str, args: Any, scope: ToolScope) -> ToolResult:
@@ -254,7 +260,7 @@ class ToolExecutor:
                                   "kp_id": scope.kp_id, "attempt_id": scope.attempt_id,
                                   "session_id": scope.session_id, "point": scope.point,
                                   "loop_id": scope.loop_id, "round": scope.round,
-                                  "conversation_id": scope.conversation_id,
+                                  "conversation_id": scope.conversation_id, "started_at_ns": time.time_ns(),
                                   "args_summary": summarize_args(args) if isinstance(args, dict) else None}
         try:
             if not spec:
@@ -281,6 +287,9 @@ class ToolExecutor:
                     self.sleep(self.backoff_s * 2 ** (attempts - 1))
         except ToolError as exc:
             status = exc.kind if exc.kind in ("invalid_args", "denied", "timeout") else "error"
+            if exc.rule:
+                action = "denied_by_user" if exc.rule == "confirmation_denied" else "blocked"
+                record["guard"] = guardrails.payload(exc.rule, action, str(exc), tool=name)
             self._audit(record, status, exc.kind, attempts, confirmed, began, None, 0, False)
             raise
         except Exception as exc:

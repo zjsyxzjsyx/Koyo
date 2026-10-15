@@ -46,7 +46,7 @@ def _segments(text: str) -> list[str]:
     return [run for run in runs if run]
 
 
-def _terms(text: str) -> list[str]:
+def terms(text: str) -> list[str]:
     """CJK character bigrams within segments plus whole Latin or digit words of two or more characters."""
     terms = [run[index:index + 2] for run in _segments(text) for index in range(max(1, len(run) - 1))]
     return terms + [word for word in _LATIN.findall(text.lower()) if len(word) >= 2]
@@ -79,15 +79,15 @@ def rank_lessons(question: str, candidates: Iterable[dict[str, Any]], today: dat
     "ranked": [...]} where each ranked item explains its score.
     """
     rows = list(candidates)
-    query = set(_terms(question))
-    documents = [set(_terms(row["content"])) for row in rows]
+    query = set(terms(question))
+    documents = [set(terms(row["content"])) for row in rows]
     total = len(rows)
     idf = {term: math.log((total + 1) / (sum(term in doc for doc in documents) + 1)) + 1 for term in query}
     query_weight = sum(idf.values()) or 1.0
     normalized_question = _normalize(question)
     ranked = []
-    for row, terms in zip(rows, documents):
-        matched = sorted(query & terms)
+    for row, doc_terms in zip(rows, documents):
+        matched = sorted(query & doc_terms)
         overlap = sum(idf[term] for term in matched) / query_weight
         phrase = _longest_common(normalized_question, _normalize(row["content"]))
         phrase_score = min(phrase, params.phrase_cap) / params.phrase_cap if phrase >= 3 else 0.0

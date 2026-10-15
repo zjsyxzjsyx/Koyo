@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知秋看板</title>
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --soft: #f3f2f0; --line: #e7e6e4; --line2: #d9d8d5;
+  --ink: #21201d; --ink2: #6f6e69; --ink3: #a3a29d;
+  --accent: #5e6ad2; --accent-soft: #eef0fb;
+  --good: #1f7a4d; --good-soft: #e8f4ee; --bad: #c0392b; --bad-soft: #faeceb; --warn: #a76a12; --warn-soft: #fbf1e1;
+  --k-turn: #8a8984; --k-flow: #7c6bd6; --k-stage: #5e6ad2; --k-loop: #2f9b8a; --k-llm: #4f8fd6; --k-tool: #c48a2c;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101012; --panel: #18181b; --soft: #202024; --line: #26262a; --line2: #333338;
+    --ink: #ececea; --ink2: #96959f; --ink3: #5f5e66;
+    --accent: #7c8aec; --accent-soft: #20223a;
+    --good: #4cc38a; --good-soft: #12291d; --bad: #e5655a; --bad-soft: #331714; --warn: #e0a64a; --warn-soft: #2e2210;
+    --k-turn: #77767f; --k-flow: #a593f0; --k-stage: #7c8aec; --k-loop: #45c2ae; --k-llm: #6aa9ea; --k-tool: #e0a64a;
+  }
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--bg); color: var(--ink); display: flex; height: 100vh; overflow: hidden;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+svg.i { width: 15px; height: 15px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
+nav { width: 212px; flex-shrink: 0; border-right: 1px solid var(--line); padding: 20px 12px; display: flex; flex-direction: column; overflow-y: auto; }
+.brand { font-weight: 650; font-size: 15px; padding: 0 10px; }
+.brand small { display: block; color: var(--ink3); font-weight: 400; font-size: 11px; margin-top: 2px; }
+.grp { font-size: 10.5px; letter-spacing: .08em; color: var(--ink3); padding: 18px 10px 4px; }
+nav a { display: flex; align-items: center; gap: 9px; color: var(--ink2); text-decoration: none; padding: 6px 10px; border-radius: 6px; font-size: 13.5px; margin-top: 2px; cursor: pointer; }
+nav a:hover { background: var(--panel); color: var(--ink); }
+nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
+nav a .n { margin-left: auto; font-size: 11px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+nav a .n.hot { color: var(--bad); font-weight: 600; }
+nav a .n.live { color: var(--good); font-weight: 600; }
+.navfoot { margin-top: auto; padding: 14px 10px 0; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--ink3); display: grid; gap: 6px; }
+.navfoot select { font: inherit; color: var(--ink2); background: var(--panel); border: 1px solid var(--line2); border-radius: 6px; padding: 2px 6px; }
+#dbname { font-family: var(--mono); color: var(--ink2); word-break: break-all; }
+#pulse.err { color: var(--bad); }
+main { flex: 1; min-width: 0; height: 100vh; overflow-y: auto; padding: 0 36px 40px; }
+.pagehead { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 24px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 18px; display: flex; align-items: flex-end; gap: 12px; }
+.pagehead h1 { font-size: 17px; font-weight: 600; }
+.pagehead .sub { color: var(--ink3); font-size: 12px; font-family: var(--mono); }
+.pagehead .act { margin-left: auto; }
+h2 { font-size: 11px; letter-spacing: .08em; color: var(--ink2); font-weight: 600; margin: 26px 0 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 10px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+.tile b { display: block; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile span { color: var(--ink2); font-size: 11.5px; }
+.pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; font-weight: 600; white-space: nowrap; background: var(--soft); color: var(--ink2); }
+.pill.ok, .pill.pass, .pill.done { background: var(--good-soft); color: var(--good); }
+.pill.error, .pill.fail { background: var(--bad-soft); color: var(--bad); }
+.pill.running { background: var(--accent-soft); color: var(--accent); }
+.pill.interrupted, .pill.insufficient, .pill.warn { background: var(--warn-soft); color: var(--warn); }
+.muted { color: var(--ink2); } .faint { color: var(--ink3); } .mono { font-family: var(--mono); font-size: 12px; }
+a.lnk, .lnk { color: var(--accent); cursor: pointer; text-decoration: none; } .lnk:hover { text-decoration: underline; }
+.empty { color: var(--ink3); padding: 18px 0; text-align: center; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--ink3); font-weight: 500; font-size: 11.5px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--soft); }
+.dot { width: 7px; height: 7px; border-radius: 99px; display: inline-block; background: var(--good); flex-shrink: 0; }
+.dot.live { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+.runhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.runhead b { font-size: 15px; }
+.steps { display: flex; gap: 6px; margin: 16px 0 6px; }
+.step { flex: 1; min-width: 0; }
+.step .bar { height: 4px; border-radius: 2px; background: var(--line2); }
+.step.done .bar { background: var(--good); } .step.running .bar { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.step.error .bar { background: var(--bad); }
+.step .lbl { margin-top: 6px; font-size: 12.5px; color: var(--ink3); }
+.step.done .lbl, .step.error .lbl { color: var(--ink2); } .step.running .lbl { color: var(--accent); font-weight: 600; }
+.step .det { font-size: 11px; color: var(--ink3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; font-size: 12.5px; }
+.chain .c { padding: 2px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); display: inline-flex; gap: 6px; align-items: center; }
+.chain .c.last { border-color: var(--accent); color: var(--accent); }
+.chain .sep { color: var(--ink3); }
+.filters { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.filters input, .filters select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 9px; }
+.filters input { flex: 1; min-width: 160px; }
+.minibar { position: relative; height: 6px; background: var(--soft); border-radius: 3px; min-width: 80px; }
+.minibar span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--k-stage); }
+.minibar span.error { background: var(--bad); } .minibar span.running { background: var(--accent); animation: pulse 1.4s infinite; }
+.split { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); gap: 14px; align-items: start; }
+.tree { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 0; font-size: 12.5px; margin-bottom: 12px; }
+.axis { display: grid; grid-template-columns: minmax(0, 1fr) 34% 64px; padding: 4px 12px 6px; color: var(--ink3); font-size: 10.5px; border-bottom: 1px solid var(--line); }
+.axis div:nth-child(2) { display: flex; justify-content: space-between; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) 34% 64px; align-items: center; padding: 3px 12px; cursor: pointer; min-height: 26px; }
+.row:hover { background: var(--soft); } .row.sel { background: var(--accent-soft); }
+.row .name { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; }
+.row .name .t { overflow: hidden; text-overflow: ellipsis; }
+.row .tog { width: 14px; color: var(--ink3); text-align: center; flex-shrink: 0; font-size: 10px; }
+.row .track { position: relative; height: 10px; margin: 0 8px; }
+.row .track span { position: absolute; top: 2px; height: 6px; border-radius: 3px; min-width: 2px; }
+.row .track i { position: absolute; top: 1px; width: 8px; height: 8px; transform: rotate(45deg); margin-left: -4px; }
+.row .dur { text-align: right; color: var(--ink3); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.row.err .t { color: var(--bad); }
+.k-turn, .k-command { color: var(--k-turn); } .k-flow { color: var(--k-flow); } .k-stage { color: var(--k-stage); }
+.k-loop { color: var(--k-loop); } .k-llm { color: var(--k-llm); } .k-tool { color: var(--k-tool); } .k-event { color: var(--k-flow); } .k-guard { color: var(--bad); }
+.bg-turn, .bg-command { background: var(--k-turn); } .bg-flow { background: var(--k-flow); } .bg-stage { background: var(--k-stage); }
+.bg-loop { background: var(--k-loop); } .bg-llm { background: var(--k-llm); } .bg-tool { background: var(--k-tool); } .bg-err { background: var(--bad) !important; }
+.bg-run { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.4) 0 3px, transparent 3px 6px); }
+.detail { position: sticky; top: 76px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; max-height: calc(100vh - 100px); overflow-y: auto; font-size: 13px; }
+.detail h3 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; }
+.kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 4px 10px; font-size: 12.5px; margin: 8px 0; }
+.kv dt { color: var(--ink3); } .kv dd { margin: 0; word-break: break-all; font-variant-numeric: tabular-nums; }
+.errbox { background: var(--bad-soft); color: var(--bad); border-radius: 6px; padding: 7px 10px; margin: 8px 0; font-size: 12.5px; }
+pre.code { background: var(--soft); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; color: var(--ink2); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; margin: 6px 0; }
+.msg { border-left: 2px solid var(--line2); padding: 2px 0 2px 10px; margin: 8px 0; }
+.msg .role { font-size: 11px; color: var(--ink3); }
+details summary { cursor: pointer; color: var(--ink2); font-size: 12px; margin-top: 8px; }
+.hint { font-size: 11.5px; color: var(--ink3); margin-top: 10px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+svg text { fill: var(--ink3); font-size: 10.5px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink3); font-size: 11.5px; margin-top: 6px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.hbar { display: grid; grid-template-columns: 130px minmax(0, 1fr) 48px; align-items: center; gap: 8px; font-size: 12.5px; margin: 5px 0; }
+.hbar .b { height: 8px; background: var(--soft); border-radius: 4px; position: relative; }
+.hbar .b span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--accent); }
+.q { padding: 10px 0; border-bottom: 1px solid var(--line); } .q:last-child { border-bottom: 0; }
+.q .meta { color: var(--ink3); font-size: 11.5px; }
+.ans { background: var(--soft); border-radius: 6px; padding: 6px 10px; margin-top: 6px; white-space: pre-wrap; }
+.score { font-size: 22px; font-weight: 600; } .score small { font-size: 12px; color: var(--ink3); font-weight: 400; }
+blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--accent); background: var(--soft); font-size: 12.5px; }
+@media (max-width: 860px) {
+  body { flex-direction: column; height: auto; overflow: visible; }
+  nav { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .grp, .navfoot { display: none; }
+  main { height: auto; padding: 0 16px 30px; overflow: visible; }
+  .split { grid-template-columns: 1fr; } .detail { position: static; max-height: none; }
+  .row, .axis { grid-template-columns: minmax(0, 1fr) 30% 52px; }
+}
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">知秋<small>观测与治理 · 只读</small></div>
+  <div class="grp">观测</div>
+  <a data-view="live"><span data-icon="activity"></span>实时<span class="n" id="n-live"></span></a>
+  <a data-view="traces"><span data-icon="list"></span>Trace<span class="n" id="n-traces"></span></a>
+  <a data-view="metrics"><span data-icon="chart"></span>指标与花费</a>
+  <a data-view="failures"><span data-icon="alert"></span>失败<span class="n" id="n-failures"></span></a>
+  <a data-view="checks"><span data-icon="shield"></span>契约检查</a>
+  <div class="grp">学习</div>
+  <a data-view="learn"><span data-icon="book"></span>学习记录<span class="n" id="n-learn"></span></a>
+  <div class="navfoot">
+    <label>范围 <select id="days"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="365">1 年</option></select></label>
+    <div>数据库 <span id="dbname">…</span></div>
+    <div id="pulse">连接中…</div>
+  </div>
+</nav>
+<main>
+  <header class="pagehead"><div><h1 id="title">实时</h1><div class="sub" id="sub"></div></div><div class="act" id="act"></div></header>
+  <div id="view"></div>
+</main>
+<script>
+"use strict";
+const ICONS = {
+  activity: '<polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/>',
+  list: '<line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+  chart: '<line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="11" width="3" height="7"/><rect x="11" y="6" width="3" height="12"/><rect x="16" y="13" width="3" height="5"/>',
+  alert: '<path d="M12 4 L21 19 H3 Z"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="16.6" r=".6"/>',
+  shield: '<path d="M12 3 L19 6 V11 C19 15.5 16 19 12 21 C8 19 5 15.5 5 11 V6 Z"/>',
+  book: '<path d="M4 5 C7 4 10 4 12 6 C14 4 17 4 20 5 V19 C17 18 14 18 12 20 C10 18 7 18 4 19 Z"/><line x1="12" y1="6" x2="12" y2="20"/>',
+  turn: '<path d="M4 5 H20 V16 H11 L7 20 V16 H4 Z"/>',
+  command: '<polyline points="5 8 9 12 5 16"/><line x1="11" y1="16" x2="19" y2="16"/>',
+  flow: '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6 H14 A4 4 0 0 1 14 14 H10 A4 4 0 0 0 10 22"/>',
+  loop: '<path d="M20 12 A8 8 0 1 1 17.6 6.3"/><polyline points="20 4 20 9 15 9"/>',
+  stage: '<rect x="5" y="5" width="14" height="14" rx="3"/>',
+  llm: '<path d="M12 3 L13.8 10.2 L21 12 L13.8 13.8 L12 21 L10.2 13.8 L3 12 L10.2 10.2 Z"/>',
+  tool: '<path d="M14.5 5.5 a4 4 0 0 0 4 5 L10 19 a2.1 2.1 0 0 1 -3 -3 L15.5 7.5 a4 4 0 0 0 -1 -2 Z"/>',
+  event: '<path d="M12 4 L20 12 L12 20 L4 12 Z"/>',
+  guard: '<path d="M12 3 L19 6 V11 C19 15.5 16 19 12 21 C8 19 5 15.5 5 11 V6 Z"/><line x1="12" y1="9" x2="12" y2="13"/>',
+};
+const icon = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ICONS.stage}</svg>`;
+document.querySelectorAll("[data-icon]").forEach((node) => { node.outerHTML = icon(node.dataset.icon); });
+
+const STAGE = {assess: "资料评估", assess_chunk: "分段检查资料", assess_combine: "综合资料判断", teach: "讲解", clarify: "澄清",
+  clarify_chunk: "分段澄清", clarify_combine: "综合澄清", next_question: "出题", grade: "评分", grade_extract: "分批评阅",
+  grade_segment: "分段评阅", grade_combine: "维度合并评分", gather: "补充资料", synthesize: "归纳旧讲解", synthesize_batch: "分批归纳",
+  chat: "对话", chat_summary: "对话摘要", classify_turn: "识别输入"};
+const FLOW = {learn: "学习", quiz: "自测", review: "复习", resume_lesson: "继续讲解"};
+const DIM = {concept: "概念准确", mechanism: "机制解释", application: "应用辨析"};
+const STATUS = {running: "运行中", ok: "完成", error: "出错", interrupted: "中断", done: "完成", pending: "未开始"};
+const END = {done: "完成", outcome: "已评阅", proposal: "提出建议", cancelled: "已取消", no_answer: "无回答", error: "出错",
+  max_rounds: "达到轮数上限", deadline: "超时", budget: "超预算", paused: "已暂停", ended: "已结束", interrupted: "已中断", process_exited: "进程已退出"};
+const KIND = {first: "首次自测", review: "复习"};
+const RULE = {leak_check: "泄露检查", read_root: "读取白名单", write_root: "写入白名单", name_not_allowed: "工具不在本步骤",
+  permission_denied: "权限类别不允许", confirmation_denied: "用户拒绝确认", confirmation_unavailable: "无法确认",
+  proposal_rejected: "拒绝提议", proposal_refused: "提议未通过校验", memory_limit: "记忆超限", loop_limit: "循环上限",
+  output_invalid: "模型输出无效", illegal_transition: "非法状态转换", consent_missing: "未获发送授权"};
+const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", learn: "学习记录"};
+
+const S = {view: "live", arg: null, days: 7, currency: "", trees: null, selected: null, collapsed: new Set(), timer: null, llm: {}, states: false};
+const $ = (sel) => document.querySelector(sel);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const num = (v) => (v ?? 0).toLocaleString("zh-CN");
+const pct = (v) => v == null ? "—" : (v * 100).toFixed(1) + "%";
+const money = (v, cur = S.currency) => v == null ? "—" : `${cur}${v < 0.01 ? v.toFixed(4) : v.toFixed(3)}`;
+const ms = (v) => v == null ? "运行中" : v < 1000 ? `${v}ms` : v < 60000 ? `${(v / 1000).toFixed(1)}s` : `${Math.floor(v / 60000)}分${Math.round(v % 60000 / 1000)}秒`;
+const clock = (ns) => ns ? new Date(ns / 1e6).toLocaleString("zh-CN", {hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "—";
+const pill = (status, text) => `<span class="pill ${esc(status)}">${esc(text ?? STATUS[status] ?? status)}</span>`;
+const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
+
+async function api(path) {
+  const response = await fetch(path, {cache: "no-store"});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function pulse(error) {
+  const node = $("#pulse");
+  node.className = error ? "err" : "";
+  node.textContent = error ? `读取失败：${error}` : `已更新 ${new Date().toLocaleTimeString("zh-CN", {hour12: false})}`;
+}
+
+function spanLabel(s) {
+  const point = s.point ? `：${s.point}` : "";
+  if (s.kind === "flow") return (FLOW[s.name] || s.name) + point;
+  if (s.kind === "stage") return STAGE[s.name] || s.name;
+  if (s.kind === "loop") return `工具循环 · ${STAGE[s.name] || s.name}`;
+  if (s.kind === "turn") return s.name === "chat" ? "对话一轮" : `对话命令 ${s.name}`;
+  return `zhiqiu ${s.name}${point}`;
+}
+
+function progressText(p) {
+  if (!p) return "";
+  const parts = [];
+  if (p.step) parts.push(p.step);
+  if (p.question) parts.push(`第 ${p.question} 题`);
+  if (p.dimension) parts.push(DIM[p.dimension] || p.dimension);
+  if (p.followup) parts.push("追问");
+  if (p.round) parts.push(`第 ${p.round}/${p.max_rounds || "?"} 轮`);
+  if (p.tool) parts.push(`调用 ${p.tool}`);
+  if (p.closing) parts.push("收尾回答");
+  return parts.join(" · ");
+}
+
+function setHead(title, sub = "", act = "") {
+  $("#title").textContent = title;
+  $("#sub").textContent = sub;
+  $("#act").innerHTML = act;
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.view === S.view));
+}
+
+document.addEventListener("click", (event) => {
+  const nav = event.target.closest("[data-view]");
+  if (nav) { go(`#${nav.dataset.view}`); return; }
+  const trace = event.target.closest("[data-trace]");
+  if (trace) { event.preventDefault(); go(`#trace/${trace.dataset.trace}`); return; }
+  const attempt = event.target.closest("[data-attempt]");
+  if (attempt) { event.preventDefault(); go(`#learn/${attempt.dataset.attempt}`); return; }
+  if (event.target.matches("[data-states]")) { S.states = event.target.checked; renderTraceDetail(); return; }
+  const row = event.target.closest(".row[data-node]");
+  if (row) {
+    if (event.target.closest(".tog") && row.dataset.kids === "1") {
+      S.collapsed.has(row.dataset.node) ? S.collapsed.delete(row.dataset.node) : S.collapsed.add(row.dataset.node);
+    } else {
+      S.selected = row.dataset.node;
+    }
+    renderTraceDetail();
+  }
+});
+
+function tiles(items) {
+  return `<div class="tiles">${items.map(([label, value]) => `<div class="tile"><b>${value}</b><span>${esc(label)}</span></div>`).join("")}</div>`;
+}
+
+function stepBar(phases) {
+  if (!phases || !phases.length) return "";
+  return `<div class="steps">${phases.map((p) => {
+    const detail = p.status === "running" ? (progressText(p.progress) || ms(p.duration_ms)) : p.status === "pending" ? "—" : ms(p.duration_ms);
+    return `<div class="step ${p.status}"><div class="bar"></div><div class="lbl">${esc(p.label)}</div><div class="det">${esc(detail)}</div></div>`;
+  }).join("")}</div>`;
+}
+
+async function viewLive() {
+  const data = await api("/api/live");
+  S.currency = data.currency || "";
+  $("#dbname").textContent = data.db || "—";
+  setHead("实时", data.running.length ? `${data.running.length} 条正在运行` : "当前空闲");
+  const skew = Date.now() * 1e6 - data.now_ns;
+  let html = "";
+  for (const run of data.running) {
+    const root = run.chain[0];
+    const cache = run.tokens_in ? run.tokens_cached / run.tokens_in : null;
+    html += `<div class="card"><div class="runhead"><span class="dot live"></span><b>${esc(spanLabel(root))}</b>
+      ${pill("running")}<span class="faint mono" style="margin-left:auto">已用 <span data-since="${root.started_at_ns}" data-skew="${skew}">${ms(run.elapsed_ms)}</span></span></div>
+      ${tiles([["模型调用", num(run.llm_calls)], ["输入 token", num(run.tokens_in)], ["缓存命中", pct(cache)], ["输出 token", num(run.tokens_out)], ["花费", money(run.cost)]])}
+      ${stepBar(run.phases)}
+      <div class="chain">${run.chain.map((s, i) => {
+        const detail = progressText(s.progress);
+        return `<span class="c ${i === run.chain.length - 1 ? "last" : ""}">${icon(s.kind, "k-" + s.kind)}${esc(spanLabel(s))}${detail ? `<span class="faint">${esc(detail)}</span>` : ""}</span>`;
+      }).join('<span class="sep">›</span>')}</div>
+      <div class="hint">${run.last_tool ? `最近工具：${esc(run.last_tool.tool)}（${esc(run.last_tool.status)}） · ` : ""}<a class="lnk" data-trace="${esc(run.trace_id)}">打开 trace →</a></div></div>`;
+  }
+  if (!data.running.length) {
+    html += `<div class="card empty">当前没有运行中的任务。在终端和知秋对话、学习或复习时，这里会实时显示进行到哪一步。</div>`;
+  }
+  const latest = data.latest;
+  if (latest) {
+    html += `<h2>最近一次</h2><div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${icon(latest.kind, "k-" + latest.kind)}
+      <b>${esc(spanLabel(latest))}</b>${pill(latest.status)}${latest.end_reason ? `<span class="faint">${esc(END[latest.end_reason] || latest.end_reason)}</span>` : ""}
+      <span class="muted">${clock(latest.started_at_ns)} · ${ms(latest.duration_ms)} · 模型 ${num(latest.llm_calls)} 次 · token ${num(latest.tokens_in)} / ${num(latest.tokens_out)} · 花费 ${money(latest.cost)}</span>
+      <a class="lnk" style="margin-left:auto" data-trace="${esc(latest.trace_id)}">查看 →</a></div>`;
+  }
+  $("#view").innerHTML = html;
+}
+
+setInterval(() => document.querySelectorAll("[data-since]").forEach((node) => {
+  node.textContent = ms(Math.round((Date.now() * 1e6 - Number(node.dataset.skew) - Number(node.dataset.since)) / 1e6));
+}), 1000);
+
+const traceFilter = {q: "", status: ""};
+async function viewTraces() {
+  const data = await api(`/api/traces?days=${S.days}&limit=300`);
+  S.currency = data.currency || "";
+  setHead("Trace", `最近 ${S.days} 天 · ${data.traces.length} 条（每轮对话或每次命令一条）`);
+  const q = traceFilter.q.trim().toLowerCase();
+  const failedOf = (t) => t.status === "error" || t.end_reason === "error" || t.llm_errors > 0;
+  const items = data.traces.filter((t) => (!traceFilter.status || (traceFilter.status === "error" ? failedOf(t) : t.status === traceFilter.status))
+    && (!q || `${spanLabel(t)} ${t.point || ""} ${t.trace_id}`.toLowerCase().includes(q)));
+  const longest = Math.max(1, ...items.map((t) => t.duration_ms || 0));
+  const keep = document.activeElement && document.activeElement.id === "tq";
+  $("#view").innerHTML = `<div class="filters"><input id="tq" placeholder="按名称、知识点或 trace ID 筛选" value="${esc(traceFilter.q)}">
+    <select id="ts">${[["", "全部状态"], ["error", "有错误"], ["interrupted", "中断"], ["running", "运行中"], ["ok", "完成"]]
+      .map(([v, l]) => `<option value="${v}" ${traceFilter.status === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+    <div class="card" style="padding:4px 8px">${items.length ? `<table><thead><tr><th>开始</th><th>内容</th><th>状态</th><th style="width:18%">耗时</th>
+      <th class="num">模型</th><th class="num">token 入 / 出</th><th class="num">花费</th><th class="num">工具</th></tr></thead><tbody>` +
+      items.map((t) => {
+        const failed = failedOf(t);
+        const badge = t.status === "ok" && failed ? pill("error", "有错误") : pill(t.status);
+        return `<tr class="click" data-trace="${esc(t.trace_id)}"><td class="faint" style="white-space:nowrap">${clock(t.started_at_ns)}</td>
+        <td>${icon(t.kind, "k-" + t.kind)} ${esc(spanLabel(t))}${t.end_reason ? ` <span class="faint">${esc(END[t.end_reason] || t.end_reason)}</span>` : ""}</td>
+        <td>${badge}</td>
+        <td><div style="display:flex;align-items:center;gap:8px"><div class="minibar" style="flex:1"><span class="${t.status === "running" ? "running" : failed ? "error" : ""}" style="width:${Math.max(2, (t.duration_ms || longest) / longest * 100)}%"></span></div><span class="faint mono">${ms(t.duration_ms)}</span></div></td>
+        <td class="num">${num(t.llm_calls)}</td><td class="num">${num(t.tokens_in)} / ${num(t.tokens_out)}</td><td class="num">${money(t.cost)}</td><td class="num">${num(t.tool_calls)}</td></tr>`;
+      }).join("") + "</tbody></table>" : `<div class="empty">没有符合条件的 trace。</div>`}</div>`;
+  const input = $("#tq");
+  input.addEventListener("input", (e) => { traceFilter.q = e.target.value; viewTraces().catch((err) => pulse(err.message)); });
+  $("#ts").addEventListener("change", (e) => { traceFilter.status = e.target.value; viewTraces().catch((err) => pulse(err.message)); });
+  if (keep) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+function flatten(tree, nowNs) {
+  const rows = [];
+  function walk(node, depth) {
+    const id = "s:" + node.span_id;
+    const end = node.duration_ms == null ? nowNs : node.started_at_ns + node.duration_ms * 1e6;
+    const leaf = (type, key, item, start, finish) => ({at: start, leaf: {type, id: key, node: item, start, end: finish}});
+    const kids = [
+      ...node.children.map((c) => ({at: c.started_at_ns, span: c})),
+      ...node.llm_calls.map((c) => { const s0 = c.started_at_ns || node.started_at_ns; return leaf("llm", "l:" + c.id, c, s0, s0 + c.latency_ms * 1e6); }),
+      ...node.tool_calls.map((c) => { const s0 = c.started_at_ns || node.started_at_ns; return leaf("tool", "t:" + c.id, c, s0, s0 + c.latency_ms * 1e6); }),
+      ...node.events.filter((e) => e.type === "GuardrailTriggered" || (S.states && e.type === "StateChanged"))
+        .map((e) => { const s0 = e.at_ns || node.started_at_ns; return leaf(e.type === "GuardrailTriggered" ? "guard" : "event", "e:" + e.id, e, s0, s0); }),
+    ].sort((a, b) => a.at - b.at);
+    rows.push({type: "span", id, node, start: node.started_at_ns, end, depth, kids: kids.length > 0});
+    if (S.collapsed.has(id)) return;
+    for (const k of kids) k.span ? walk(k.span, depth + 1) : rows.push({...k.leaf, depth: depth + 1, kids: false});
+  }
+  tree.roots.forEach((r) => walk(r, 0));
+  return rows;
+}
+
+function rowName(r) {
+  const n = r.node;
+  if (r.type === "span") return {kind: n.kind, text: spanLabel(n), err: n.status === "error" || n.end_reason === "error"};
+  if (r.type === "llm") return {kind: "llm", text: `${STAGE[n.stage] || n.stage || "模型"} · ${n.model}`, err: !!n.error_kind || n.status !== "ok"};
+  if (r.type === "tool") return {kind: "tool", text: `${n.tool}${n.status !== "ok" ? " · " + n.status : ""}`, err: ["error", "timeout"].includes(n.status)};
+  const p = n.payload || {};
+  if (r.type === "guard") return {kind: "guard", text: `护栏 · ${RULE[p.rule] || p.rule}`, err: true};
+  return {kind: "event", text: `${p.entity} ${p.from ?? "新建"} → ${p.to}`, err: false};
+}
+
+function renderTraceDetail() {
+  const box = $("#tracebox");
+  if (!S.trees || !box) return;
+  let allRows = [];
+  const html = S.trees.trees.map((tree) => {
+    const rows = flatten(tree, S.trees.now_ns);
+    allRows = allRows.concat(rows);
+    const t0 = Math.min(...rows.map((r) => r.start));
+    const t1 = Math.max(...rows.map((r) => r.end), t0 + 1e6);
+    const total = t1 - t0;
+    const body = rows.map((r) => {
+      const nm = rowName(r);
+      const left = (r.start - t0) / total * 100;
+      const width = Math.max((r.end - r.start) / total * 100, 0.4);
+      const running = r.type === "span" && r.node.status === "running";
+      const mark = r.type === "event" || r.type === "guard"
+        ? `<i class="${r.type === "guard" ? "bg-err" : "bg-flow"}" style="left:${left}%"></i>`
+        : `<span class="bg-${nm.kind} ${nm.err ? "bg-err" : ""} ${running ? "bg-run" : ""}" style="left:${left}%;width:${width}%"></span>`;
+      const dur = r.type === "span" ? ms(r.node.duration_ms) : r.type === "llm" || r.type === "tool" ? ms(r.node.latency_ms) : "";
+      const tog = r.kids ? (S.collapsed.has(r.id) ? "▸" : "▾") : "";
+      return `<div class="row ${r.id === S.selected ? "sel" : ""} ${nm.err ? "err" : ""}" data-node="${esc(r.id)}" data-kids="${r.kids ? 1 : 0}">
+        <div class="name" style="padding-left:${r.depth * 14}px"><span class="tog">${tog}</span>${icon(nm.kind, "k-" + nm.kind)}<span class="t">${esc(nm.text)}</span></div>
+        <div class="track">${mark}</div><div class="dur">${dur}</div></div>`;
+    }).join("");
+    const scale = [0, 0.5, 1].map((x) => `<span>${ms(Math.round(total * x / 1e6))}</span>`).join("");
+    return `<div class="tree"><div class="axis"><div>${clock(t0)} · <label style="cursor:pointer"><input type="checkbox" data-states ${S.states ? "checked" : ""}> 显示状态迁移</label></div><div>${scale}</div><div></div></div>${body}</div>`;
+  }).join("");
+  if (!S.selected || !allRows.some((r) => r.id === S.selected)) {
+    const firstErr = allRows.find((r) => r.type !== "span" && rowName(r).err);
+    S.selected = (firstErr || allRows[0] || {}).id || null;
+    if (S.selected) return renderTraceDetail();
+  }
+  box.innerHTML = `<div class="split"><div>${html}</div><div class="detail" id="nodedetail"></div></div>`;
+  renderNode();
+}
+
+function findNode(id) {
+  for (const tree of S.trees.trees) {
+    const stack = [...tree.roots];
+    while (stack.length) {
+      const n = stack.pop();
+      if ("s:" + n.span_id === id) return {type: "span", node: n};
+      for (const c of n.llm_calls) if ("l:" + c.id === id) return {type: "llm", node: c};
+      for (const c of n.tool_calls) if ("t:" + c.id === id) return {type: "tool", node: c};
+      for (const e of n.events) if ("e:" + e.id === id) return {type: e.type === "GuardrailTriggered" ? "guard" : "event", node: e};
+      stack.push(...n.children);
+    }
+  }
+  return null;
+}
+
+const kv = (pairs) => `<dl class="kv">${pairs.filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+
+function renderNode() {
+  const box = $("#nodedetail");
+  if (!box) return;
+  const found = S.selected ? findNode(S.selected) : null;
+  if (!found) { box.innerHTML = `<div class="empty">点左侧任一行查看详情。</div>`; return; }
+  const n = found.node;
+  if (found.type === "span") {
+    const t = n.totals || {};
+    box.innerHTML = `<h3>${icon(n.kind, "k-" + n.kind)}${esc(spanLabel(n))}</h3>${pill(n.status)} ${n.end_reason ? `<span class="faint">${esc(END[n.end_reason] || n.end_reason)}</span>` : ""}
+      ${n.error_kind ? `<div class="errbox">错误：${esc(n.error_kind)}</div>` : ""}
+      ${kv([["开始", clock(n.started_at_ns)], ["耗时", ms(n.duration_ms)], ["模型调用", num(t.llm_calls)], ["输入 token", `${num(t.tokens_in)}${t.tokens_cached ? `（缓存 ${num(t.tokens_cached)}）` : ""}`],
+        ["输出 token", num(t.tokens_out)], ["花费", money(t.cost)], ["工具调用", num(t.tool_calls)], ["进度", esc(progressText(n.progress))],
+        ["知识点", esc(n.point)], ["尝试", n.attempt_id ? `<a class="lnk" data-attempt="${esc(n.attempt_id)}">${esc(n.attempt_id.slice(0, 8))} →</a>` : ""],
+        ["对话", esc((n.conversation_id || "").slice(0, 8))], ["loop_id", esc((n.attrs || {}).loop_id || "")], ["span", `<span class="mono">${esc(n.span_id)}</span>`]])}`;
+    return;
+  }
+  if (found.type === "tool") {
+    let args = n.args_summary_json;
+    try { args = JSON.stringify(JSON.parse(args), null, 2); } catch (e) { /* keep raw */ }
+    box.innerHTML = `<h3>${icon("tool", "k-tool")}工具 · ${esc(n.tool)}</h3>${pill(n.status === "ok" ? "ok" : n.status === "denied" ? "warn" : "error", n.status)}
+      ${n.error_kind ? `<div class="errbox">${esc(n.error_kind)}</div>` : ""}
+      ${kv([["权限", esc(n.permission)], ["耗时", ms(n.latency_ms)], ["轮次", n.round ? `第 ${n.round} 轮` : ""], ["确认", n.confirmed === 1 ? "已确认" : n.confirmed === 0 ? "被拒" : "无需确认"],
+        ["尝试次数", num(n.attempts)], ["结果条数", n.result_count ?? ""], ["输出字数", num(n.output_chars)], ["截断", n.truncated ? "是" : ""]])}
+      <div class="faint" style="font-size:11.5px">参数摘要</div><pre class="code">${esc(args || "—")}</pre>`;
+    return;
+  }
+  if (found.type === "event" || found.type === "guard") {
+    const p = n.payload || {};
+    box.innerHTML = found.type === "guard"
+      ? `<h3>${icon("guard", "k-guard")}护栏 · ${esc(RULE[p.rule] || p.rule)}</h3>${pill("error", p.action)}<div class="errbox">${esc(p.reason || "")}</div>${kv([["规则", `<span class="mono">${esc(p.rule)}</span>`], ["工具", esc(p.tool || "")], ["阶段", esc(p.stage || "")], ["时间", clock(n.at_ns)]])}`
+      : `<h3>${icon("event", "k-event")}状态迁移</h3>${kv([["对象", esc(p.entity)], ["从", esc(p.from ?? "新建")], ["到", `<b>${esc(p.to)}</b>`], ["原因", esc(p.cause)], ["时间", clock(n.at_ns)]])}`;
+    return;
+  }
+  const cached = S.llm[n.id];
+  const head = `<h3>${icon("llm", "k-llm")}${esc(STAGE[n.stage] || n.stage || "模型调用")}<span class="faint mono" style="font-weight:400">${esc(n.model)}</span></h3>
+    ${pill(n.error_kind || n.status !== "ok" ? "error" : "ok", n.error_kind || n.status)}
+    ${kv([["耗时", ms(n.latency_ms)], ["输入 token", `${num(n.tokens_in)}${n.tokens_cached ? `（缓存 ${num(n.tokens_cached)}）` : ""}`], ["输出 token", num(n.tokens_out)], ["花费", money(n.cost)]])}`;
+  if (!cached) {
+    box.innerHTML = head + `<div class="faint">加载详情…</div>`;
+    api(`/api/llm/${encodeURIComponent(n.id)}`).then((data) => { S.llm[n.id] = data; if (S.selected === "l:" + n.id) renderNode(); })
+      .catch((e) => { box.innerHTML = head + `<div class="errbox">${esc(e.message)}</div>`; });
+    return;
+  }
+  let extra = "";
+  if (cached.build) {
+    extra += kv([["模板", `<span class="mono">${esc(cached.build.template_version)}</span>`], ["构建状态", esc(cached.build.status)],
+      ["纳入来源", num(cached.build.sources)], ["排除", num(cached.build.excluded)]]);
+  }
+  if (cached.failure) {
+    extra += `<div class="errbox">${esc(cached.failure.error)}</div><div class="faint" style="font-size:11.5px">模型原文（已脱敏）</div><pre class="code">${esc(cached.failure.raw_output)}</pre>
+      <div class="hint">沉淀为回归样例：</div><pre class="code">uv run zhiqiu failures export ${esc(cached.failure.id)} --to tests/regressions/NAME.json --expect rejected</pre>`;
+  }
+  if (cached.content) {
+    const req = cached.content.request;
+    const msgs = Array.isArray(req) ? req.map((m) => `<div class="msg"><div class="role">${esc(m.role)}${m.tool_call_id ? " · " + esc(m.tool_call_id) : ""}</div><pre class="code">${esc(typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? m.tool_calls ?? "", null, 2))}</pre></div>`).join("")
+      : `<pre class="code">${esc(req)}</pre>`;
+    extra += `<details open><summary>回复</summary><pre class="code">${esc(cached.content.response || "（空）")}</pre></details><details><summary>请求消息（${Array.isArray(req) ? req.length : 1} 条）</summary>${msgs}</details>`;
+  } else {
+    extra += `<div class="hint">未保存提示与回复正文。需要时在 .env 设置 ZHIQIU_TRACE_CONTENT=1，之后的调用会记录（脱敏、截断，随 forget 删除）。</div>`;
+  }
+  if (cached.build && Object.keys(cached.build.budget || {}).length) {
+    extra += `<details><summary>上下文预算</summary><pre class="code">${esc(JSON.stringify(cached.build.budget, null, 2))}</pre></details>`;
+  }
+  box.innerHTML = head + extra;
+}
+
+function hasError(data) {
+  const stack = data.trees.flatMap((tree) => tree.roots);
+  while (stack.length) {
+    const n = stack.pop();
+    if (n.status === "error" || n.llm_calls.some((c) => c.error_kind || c.status !== "ok")) return true;
+    stack.push(...n.children);
+  }
+  return false;
+}
+
+async function viewTrace(id, refresh) {
+  const data = await api(`/api/trace/${encodeURIComponent(id)}`);
+  if (!refresh) { S.selected = null; S.collapsed = new Set(); S.llm = {}; }
+  S.trees = data;
+  const first = data.trees[0];
+  const root = first.roots[0] || {};
+  const t = root.totals || {};
+  const running = data.trees.some((tr) => tr.roots.some((r) => r.status === "running"));
+  setHead(spanLabel(root), `trace ${first.trace_id}${data.trees.length > 1 ? ` 等 ${data.trees.length} 条` : ""}`, `<a class="lnk" onclick="go('#traces')">← 返回列表</a>`);
+  if (!refresh || !$("#tracebox")) $("#view").innerHTML = `<div id="tracetiles"></div><h2>调用树</h2><div id="tracebox"></div>`;
+  const failed = root.end_reason === "error" || root.status === "error" || hasError(data);
+  $("#tracetiles").innerHTML = tiles([["状态", running ? pill("running") : failed ? pill("error", root.status === "error" ? "出错" : "有错误") : pill(root.status, END[root.end_reason] || undefined)],
+    ["耗时", ms(root.duration_ms)], ["模型调用", num(t.llm_calls)], ["输入 / 缓存", `${num(t.tokens_in)}<span class="faint" style="font-size:12px"> / ${num(t.tokens_cached)}</span>`],
+    ["输出 token", num(t.tokens_out)], ["花费", money(t.cost, first.currency)]]);
+  renderTraceDetail();
+  return running;
+}
+
+function dailyChart(daily) {
+  const days = Object.entries(daily);
+  if (!days.length) return `<div class="empty">没有模型调用。</div>`;
+  const W = 640, H = 170, pad = 30, gap = 6;
+  const max = Math.max(...days.map(([, d]) => d.tokens_in + d.tokens_out), 1);
+  const bw = Math.min(46, (W - pad) / days.length - gap);
+  const bars = days.map(([day, d], i) => {
+    const x = pad + i * (bw + gap);
+    const sc = (v) => v / max * (H - 34);
+    let y = H - 18;
+    const parts = [[d.tokens_cached, "var(--k-loop)", "缓存命中"], [d.tokens_in - d.tokens_cached, "var(--k-llm)", "输入"], [d.tokens_out, "var(--k-tool)", "输出"]]
+      .map(([v, c, l]) => { const h = sc(v); y -= h; return `<rect x="${x}" y="${y}" width="${bw}" height="${Math.max(h, 0)}" rx="2" fill="${c}"><title>${day} ${l} ${num(v)}</title></rect>`; }).join("");
+    return parts + `<text x="${x + bw / 2}" y="${H - 4}" text-anchor="middle">${day.slice(5)}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="每日 token"><text x="0" y="10">${num(max)}</text>
+    <line x1="${pad}" x2="${W}" y1="${H - 18}" y2="${H - 18}" stroke="var(--line2)"/>${bars}</svg>
+    <div class="legend"><span><i style="background:var(--k-loop)"></i>缓存命中输入</span><span><i style="background:var(--k-llm)"></i>其余输入</span><span><i style="background:var(--k-tool)"></i>输出</span></div>`;
+}
+
+function hbars(entries, labeler = (k) => k) {
+  const rows = Object.entries(entries || {});
+  if (!rows.length) return `<div class="empty">无</div>`;
+  const max = Math.max(...rows.map(([, v]) => v), 1);
+  return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="hbar"><span>${esc(labeler(k))}</span><div class="b"><span style="width:${v / max * 100}%"></span></div><span style="text-align:right">${num(v)}</span></div>`).join("");
+}
+
+async function viewMetrics() {
+  const d = await api(`/api/metrics?days=${S.days}`);
+  const m = d.model;
+  S.currency = d.currency;
+  setHead("指标与花费", `最近 ${S.days} 天${d.priced ? "" : " · 未配置价格，只显示 token"}`);
+  const stages = Object.entries(m.by_stage);
+  const tools = Object.entries(d.tools.by_tool);
+  $("#view").innerHTML = tiles([["模型调用", num(m.calls)], ["错误率", pct(m.error_rate)], ["无效输出率", pct(m.invalid_rate)],
+    ["p50 / p95", `${ms(m.p50_ms)}<span class="faint" style="font-size:12px"> / ${ms(m.p95_ms)}</span>`], ["输入 token", num(m.tokens_in)], ["缓存命中率", pct(m.cache_hit_rate)],
+    ["输出 token", num(m.tokens_out)], ["花费", money(m.cost)], ["工具调用", num(d.tools.calls)], ["确认被拒", `${num(d.human.denied_by_user)} / ${num(d.human.confirmations_asked)}`]]) +
+    `<h2>每日 token</h2><div class="card">${dailyChart(d.daily)}</div>
+    <h2>按阶段</h2><div class="card" style="padding:4px 8px">${stages.length ? `<table><thead><tr><th>阶段</th><th class="num">调用</th><th class="num">错误</th><th class="num">无效</th>
+      <th class="num">p95</th><th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th class="num">花费</th></tr></thead><tbody>` +
+      stages.sort((a, b) => b[1].tokens_in - a[1].tokens_in).map(([k, s]) => `<tr><td>${esc(STAGE[k] || k)} <span class="faint mono">${esc(k)}</span></td><td class="num">${num(s.calls)}</td>
+      <td class="num">${s.errors ? `<span style="color:var(--bad)">${num(s.errors)}</span>` : 0}</td><td class="num">${s.invalid_output ? `<span style="color:var(--bad)">${num(s.invalid_output)}</span>` : 0}</td>
+      <td class="num">${ms(s.p95_ms)}</td><td class="num">${num(s.tokens_in)}</td><td class="num">${num(s.tokens_cached)}</td><td class="num">${num(s.tokens_out)}</td><td class="num">${money(s.cost)}</td></tr>`).join("") +
+      "</tbody></table>" : `<div class="empty">没有模型调用。</div>`}</div>
+    <div class="grid2"><div><h2>工具</h2><div class="card">${tools.length ? tools.map(([name, t]) => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)"><span class="mono">${esc(name)}</span><span>${Object.entries(t).filter(([k]) => k !== "calls").map(([k, v]) => pill(k === "ok" ? "ok" : k === "denied" ? "warn" : "error", `${k} ${v}`)).join(" ")}</span></div>`).join("") + `<div class="hint">重试率 ${pct(d.tools.retry_rate)} · 已确认执行 ${num(d.tools.confirmed)} 次</div>` : `<div class="empty">无</div>`}</div></div>
+    <div><h2>护栏触发</h2><div class="card">${hbars(d.guardrails, (k) => RULE[k] || k)}</div></div>
+    <div><h2>工具循环结束原因</h2><div class="card">${hbars(d.loops.end_reasons, (k) => END[k] || k)}</div></div>
+    <div><h2>人工介入</h2><div class="card">${kv([["确认次数", num(d.human.confirmations_asked)], ["确认被拒", `${num(d.human.denied_by_user)}（${pct(d.human.denial_rate)}）`],
+      ["提议", esc(Object.entries(d.human.proposals).map(([k, v]) => `${k} ${v}`).join("，") || "无")], ["人工改分", num(d.human.review_revisions)], ["评分延期", num(d.grading.deferred)]])}</div></div></div>`;
+}
+
+async function viewFailures() {
+  const d = await api(`/api/failures?days=${S.days}`);
+  setHead("失败", `最近 ${S.days} 天 · 共 ${d.total} 条`);
+  $("#view").innerHTML = d.categories.length ? d.categories.map((c) => `<div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+      ${icon(c.category.startsWith("guard:") ? "guard" : "alert", "k-guard")}<b class="mono" style="font-size:13px">${esc(c.category)}</b>
+      <span class="pill error" style="margin-left:auto">${num(c.count)}</span></div>
+      ${c.samples.map((s) => `<div style="display:flex;gap:10px;font-size:12.5px;padding:4px 0;border-top:1px solid var(--line)"><span class="faint" style="white-space:nowrap">${esc((s.at || "").replace("T", " ").slice(5, 19))}</span>
+        <span class="muted" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.detail)}</span>${s.trace_id ? `<a class="lnk" data-trace="${esc(s.trace_id)}">trace →</a>` : ""}</div>`).join("")}</div>`).join("")
+    : `<div class="card empty">这段时间没有失败。</div>`;
+}
+
+async function viewChecks() {
+  const d = await api(`/api/check?days=${S.days}`);
+  setHead("契约检查", `最近 ${S.days} 天 · ${d.passed ? "全部通过" : "有未通过项"}`, d.passed ? pill("pass", "通过") : pill("fail", "未通过"));
+  const label = {pass: "PASS", fail: "FAIL", insufficient: "证据不足"};
+  $("#view").innerHTML = d.results.map((r) => `<div class="card"><div style="display:flex;align-items:center;gap:10px">${pill(r.status, label[r.status])}<b class="mono" style="font-size:13px">${esc(r.check)}</b>
+    <span class="faint" style="margin-left:auto">检查 ${num(r.checked)} 项${r.failures ? `，失败 ${num(r.failures)}` : ""}</span></div><div class="muted" style="margin-top:4px;font-size:12.5px">${esc(r.note)}</div>
+    ${r.evidence.length ? `<pre class="code">${r.evidence.map((e) => esc(JSON.stringify(e))).join("\n")}</pre>` : ""}</div>`).join("") +
+    `<div class="hint">全部通过只说明程序守住了规则，不代表讲解或评分的质量。没有可检查的数据时显示“证据不足”。</div>`;
+}
+
+async function viewLearn() {
+  const d = await api("/api/attempts?limit=100");
+  setHead("学习记录", `${d.attempts.length} 次自测与复习`);
+  $("#view").innerHTML = `<div class="card" style="padding:4px 8px">${d.attempts.length ? `<table><thead><tr><th>开始</th><th>知识点</th><th>类型</th><th>状态</th><th class="num">题数</th><th class="num">总分</th></tr></thead><tbody>` +
+    d.attempts.map((a) => `<tr class="click" data-attempt="${esc(a.id)}"><td class="faint">${esc((a.started_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(a.title)}</td>
+      <td>${esc(KIND[a.kind] || a.kind)}</td><td>${pill(a.state === "completed" ? "ok" : "running", a.state)}</td><td class="num">${num(a.questions)}</td><td class="num">${a.total ?? "—"}</td></tr>`).join("") +
+    "</tbody></table>" : `<div class="empty">还没有自测或复习。</div>`}</div>`;
+}
+
+async function viewAttempt(id) {
+  const d = await api(`/api/attempt/${encodeURIComponent(id)}`);
+  const review = d.review[0];
+  const task = d.tasks[0];
+  setHead(`${d.knowledge_point?.title || ""} · ${KIND[d.attempt.kind] || d.attempt.kind}`, `尝试 ${id}`, `<a class="lnk" onclick="go('#learn')">← 返回列表</a>`);
+  const assess = Object.fromEntries(d.question_assessments.map((x) => [x.question_id, x]));
+  const ev = {};
+  d.review_evidence.forEach((x) => { (ev[x.dimension] ||= []).push(x); });
+  $("#view").innerHTML = tiles([["状态", pill(d.attempt.state === "completed" ? "ok" : "running", d.attempt.state)], ["总分", review ? `${review.total ?? "—"}<span class="faint" style="font-size:12px"> / 100</span>` : "—"],
+    ["评阅", review ? (review.kind === "complete" ? "完整" : review.kind) : "尚未评阅"], ["下次复习", task ? esc(task.due_date) : "—"], ["题数", num(d.questions.length)]]) +
+    `<div class="hint">相关 trace：${d.trace_ids.map((t) => `<a class="lnk" data-trace="${esc(t)}">${esc(t.slice(0, 8))}</a>`).join("、") || "无"}</div>
+    <h2>分维度评分</h2><div class="grid2">${d.dimension_scores.map((s) => `<div class="card"><div class="muted">${esc(DIM[s.dimension] || s.dimension)}</div>
+      <div class="score">${s.score}<small> / 4</small></div><div style="margin-top:4px">${esc(s.rationale)}</div>${s.supplement ? `<div class="hint">补充：${esc(s.supplement)}</div>` : ""}
+      ${(ev[s.dimension] || []).map((e) => `<blockquote>${esc(e.quote)}</blockquote>`).join("")}</div>`).join("") || `<div class="card empty">没有分维度评分。</div>`}</div>
+    <h2>题目与回答</h2><div class="card">${d.questions.map((q) => `<div class="q"><div class="meta">第 ${q.seq} 题 · ${esc(DIM[q.dimension] || q.dimension)} · ${esc(q.difficulty)}${q.followup_of ? " · 追问" : ""}</div>
+      <div>${esc(q.question)}</div><div class="ans">${q.answer ? esc(q.scoring_text || q.answer) : '<span class="faint">未作答</span>'}</div>
+      ${assess[q.question_id] ? `<div class="meta" style="margin-top:4px">评阅：${esc(assess[q.question_id].judgment)}</div>` : ""}</div>`).join("") || `<div class="empty">没有题目。</div>`}</div>
+    ${d.notes.length ? `<h2>提问与兴趣（不计入评分）</h2><div class="card">${d.notes.map((n) => `<div class="q"><div class="meta">${esc(n.kind)}</div><div>${esc(n.text)}</div>${n.explanation ? `<div class="muted" style="font-size:12.5px;margin-top:4px">${esc(n.explanation).slice(0, 300)}</div>` : ""}</div>`).join("")}</div>` : ""}
+    <h2>状态迁移</h2><div class="card">${d.state_events.map((e) => `<div style="display:flex;gap:10px;font-size:12.5px;padding:3px 0"><span class="faint">${esc((e.created_at || "").slice(0, 16).replace("T", " "))}</span>
+      <span>${esc(e.payload.entity)} ${esc(e.payload.from ?? "新建")} → <b>${esc(e.payload.to)}</b></span><span class="faint">${esc(e.payload.cause)}</span></div>`).join("") || `<div class="empty">没有记录。</div>`}</div>`;
+}
+
+async function summary() {
+  try {
+    const s = await api(`/api/summary?days=${S.days}`);
+    const set = (id, v, cls = "") => { const node = $(id); node.textContent = v ? num(v) : ""; node.className = "n " + cls; };
+    set("#n-live", s.running, "live"); set("#n-traces", s.traces); set("#n-failures", s.failures, "hot"); set("#n-learn", s.attempts);
+  } catch (e) { /* the view's own poll reports errors */ }
+}
+
+function schedule(fn, every) {
+  clearTimeout(S.timer);
+  const token = {};
+  S.token = token;
+  const tick = async () => {
+    let again = every;
+    try { const result = await fn(); if (result === false) again = 0; pulse(); } catch (e) { pulse(e.message); }
+    if (again && S.token === token) S.timer = setTimeout(tick, again);
+  };
+  tick();
+}
+
+const main = document.querySelector("main");
+function route() {
+  const [view, arg] = (location.hash.slice(1) || "live").split("/");
+  S.view = view === "trace" ? "traces" : view in VIEWS ? view : "live";
+  S.arg = arg ? decodeURIComponent(arg) : null;
+  main.scrollTop = 0;
+  if (view === "trace" && S.arg) {
+    let first = true;
+    schedule(async () => { const running = await viewTrace(S.arg, !first); first = false; return running; }, 1500);
+  } else if (view === "learn" && S.arg) {
+    schedule(() => viewAttempt(S.arg), 0);
+  } else {
+    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], learn: [viewLearn, 15000]};
+    schedule(...loaders[S.view]);
+  }
+}
+
+window.addEventListener("hashchange", route);
+$("#days").addEventListener("change", (e) => { S.days = Number(e.target.value); summary(); route(); });
+setInterval(summary, 10000);
+summary();
+api("/api/live").then((d) => { $("#dbname").textContent = d.db || "—"; }).catch(() => {});
+route();
+</script>
+</body>
+</html>

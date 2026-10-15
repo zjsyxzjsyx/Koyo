@@ -50,7 +50,7 @@ def test_query_tools_never_change_the_database(tmp_path):
     assert trace["attempt"]["id"] == outcome["attempt_id"]
     assert fingerprint(db_path) == before
     with sqlite3.connect(db_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 18
 
 
 def test_readonly_connection_cannot_write(tmp_path):

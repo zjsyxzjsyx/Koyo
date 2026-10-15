@@ -1,0 +1,14 @@
+{
+  "stage": "next_question",
+  "error": "模型返回了无效题目难度；问答保持可恢复",
+  "raw_output": {
+    "done": false,
+    "dimension": "concept",
+    "question": "二叉搜索树的中序遍历结果有什么特点？",
+    "difficulty": "hard",
+    "difficulty_basis": "难度取值不在 basic、advanced、transfer 之内"
+  },
+  "expect": "recovered",
+  "note": "合成样例：难度取值越界会被拒绝；带着校验错误重试一次后，模型给出合法题目即恢复（覆盖重试路径）。",
+  "source": {"failure_id": null, "trace_id": null, "created_at": "2026-10-14"}
+}

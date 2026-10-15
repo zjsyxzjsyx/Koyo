@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from . import guardrails, tracing
 from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_VERSION
 from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
@@ -43,6 +45,29 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
     return [sorted(set(cuts) | {len(text)}) for cuts in (paragraphs, sentences, fixed)]
 
 
+QUESTION_RETRIES = 1
+
+
+class _RejectedQuestion(ValueError):
+    """A proposed question failed validation because of the model's output."""
+
+
+def _followup_target(qa: list[dict[str, Any]], dimension: str, given: str) -> str:
+    """The question a follow-up refers to.
+
+    Real models often write the sequence number or the dimension name instead of the
+    question_id (V5 smoke: "2", "mechanism…"). The intent is still clear when exactly one
+    answered original question in that dimension has no follow-up yet, so the program
+    resolves it; otherwise the given value is kept and the store refuses it as before.
+    """
+    if any(row["question_id"] == given for row in qa):
+        return given
+    followed = {row["followup_of"] for row in qa if row["followup_of"]}
+    candidates = [row["question_id"] for row in qa if row["dimension"] == dimension and row["answer_id"]
+                  and row["followup_of"] is None and row["question_id"] not in followed]
+    return candidates[0] if len(candidates) == 1 else given
+
+
 class LearningRuntime:
     def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None,
                  write_roots: Sequence[Path] = (), extra_tools: Sequence[ToolSpec] = (),
@@ -71,6 +96,8 @@ class LearningRuntime:
         self.max_tool_rounds = 5
         self.tool_loop_seconds = LOOP_SECONDS
         self.last_loop: LoopResult | None = None
+        # The context build of the latest model answer, so a later validation failure can be tied to it.
+        self.last_build_id: str | None = None
         self.context = ContextManager(store, model)
         # Grading one over-budget original answer in segments stays off until its
         # human-labelled long-answer samples pass; a user must also ask for it.
@@ -83,6 +110,32 @@ class LearningRuntime:
         return f"{getattr(self.model, 'endpoint', '')}|{getattr(self.model, 'model', type(self.model).__name__)}"
 
     def _invoke(self, task: ContextTask, legacy: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        with tracing.span(self.store, "stage", task.stage, kp_id=task.kp_id, attempt_id=task.attempt_id,
+                          point=task.point or None):
+            return self._invoke_stage(task, legacy)
+
+    def mark_invalid_output(self, build_id: str | None) -> None:
+        """The model answered but its output failed validation: say so on the call, not just the build."""
+        if not build_id:
+            return
+        with self.store.transaction():
+            self.store.db.execute("""UPDATE llm_calls SET error_kind='invalid_output' WHERE id=(
+                SELECT id FROM llm_calls WHERE context_build_id=? ORDER BY rowid DESC LIMIT 1)""", (build_id,))
+
+    def _output_invalid(self, stage: str, error: str, raw: Any, *, kp_id: str | None = None,
+                        attempt_id: str | None = None, point: str = "") -> None:
+        """A model answer the program refused: flag the call, keep the raw output, record the guardrail."""
+        self.mark_invalid_output(self.last_build_id)
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+        try:
+            self.store.record_llm_failure(stage, error, text, context_build_id=self.last_build_id, kp_id=kp_id,
+                                          attempt_id=attempt_id, point=point)
+        except sqlite3.Error:
+            pass
+        guardrails.record(self.store, "output_invalid", "rejected", error, stage=stage,
+                          kp_id=kp_id, attempt_id=attempt_id)
+
+    def _invoke_stage(self, task: ContextTask, legacy: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         sender = getattr(self.model, "request", None)
         try:
             request = self.context.build(task)
@@ -105,13 +158,21 @@ class LearningRuntime:
                 if attempt or len(request.messages) < 3 or not callable(sender):
                     raise
                 request = self.context.build(task, drop_optional=True)
-            except Exception:
+            except Exception as exc:
                 with self.store.transaction():
                     self.store.db.execute("UPDATE context_builds SET status='model_error' WHERE id=?", (request.build_id,))
+                if type(exc) is ValueError:
+                    # The adapter raises a plain ValueError for an unparsable answer.
+                    self.last_build_id = request.build_id
+                    self._output_invalid(task.stage, str(exc), getattr(self.model, "last_output", None) or "",
+                                         kp_id=task.kp_id, attempt_id=task.attempt_id, point=task.point)
                 raise
+        self.last_build_id = request.build_id
         if not isinstance(result, dict):
             with self.store.transaction():
                 self.store.db.execute("UPDATE context_builds SET status='invalid_output' WHERE id=?", (request.build_id,))
+            self._output_invalid(task.stage, "模型必须返回 JSON 对象", repr(result), kp_id=task.kp_id,
+                                 attempt_id=task.attempt_id, point=task.point)
             raise ValueError("模型必须返回 JSON 对象")
         with self.store.transaction():
             self.store.db.execute("UPDATE context_builds SET status='response_object' WHERE id=?", (request.build_id,))
@@ -257,6 +318,7 @@ class LearningRuntime:
             remote.extend(f"本地资料不足时，可调用外部 MCP 服务 {server} 的工具：{'、'.join(tools)}"
                           for server, tools in servers.items())
         if not approve(materials, self.model.endpoint, remote):
+            guardrails.record(self.store, "confirmation_denied", "denied_by_user", "未获发送资料授权", point=point)
             raise ValueError("未获发送资料授权；学习未开始")
         self._readable = [item.source for item in materials if item.kind == "local"]
         fetch_scope = ToolScope(frozenset({"network"}), point=point)
@@ -344,6 +406,8 @@ class LearningRuntime:
         sources = [dict(r) for r in self.store.materials_for(kp_id)]
         stored = [Material(row["kind"], row["source"], row["content_hash"], row["content"]) for row in sources]
         if not self.store.has_consent(kp_id, consent_hash(stored), self.model.endpoint):
+            guardrails.record(self.store, "consent_missing", "blocked", "当前资料或模型端点未获发送授权",
+                              kp_id=kp_id)
             raise ValueError("当前资料或模型端点未获发送授权；请用 learn 重新确认")
         return sources
 
@@ -518,32 +582,53 @@ class LearningRuntime:
             return {"done": True, "reason": "limit"}
         focus = self.store.wrong_points_for(attempt["kp_id"]) if attempt["kind"] == "review" else []
         sources = self.sources_for(attempt["kp_id"])
-        proposal = self._invoke(ContextTask("next_question", point, attempt["kp_id"], attempt_id,
-                                            sources=tuple(sources), question_history=tuple(qa), focus=tuple(focus)),
-                                lambda: self.model.next_question(point, qa, sources, focus))
+        feedback = ""
+        # Like grading, a question that fails validation gets one retry with the reason (V5: the
+        # first failure turned into a regression case, tests/regressions/).
+        for retry in range(QUESTION_RETRIES + 1):
+            proposal = self._invoke(ContextTask("next_question", point, attempt["kp_id"], attempt_id,
+                                                current_input=feedback, sources=tuple(sources),
+                                                question_history=tuple(qa), focus=tuple(focus)),
+                                    lambda: self.model.next_question(point, qa, sources, focus))
+            try:
+                return self._accept_question(attempt, attempt_id, point, qa, proposal)
+            except _RejectedQuestion as rejected:
+                self._output_invalid("next_question", str(rejected), proposal, kp_id=attempt["kp_id"],
+                                     attempt_id=attempt_id, point=point)
+                if retry == QUESTION_RETRIES:
+                    raise ValueError(str(rejected)) from rejected.__cause__
+                feedback = f"上一次输出未通过校验：{rejected}。请修正后重新输出完整 JSON。"
+
+    def _accept_question(self, attempt: Any, attempt_id: str, point: str, qa: list[dict[str, Any]],
+                         proposal: dict[str, Any]) -> dict[str, Any]:
+        """Validate a proposed question and save it; a model-caused problem raises _RejectedQuestion."""
         if proposal.get("done") is True:
             answered_dimensions = {row["dimension"] for row in qa if row["answer_id"]}
             if answered_dimensions != {"concept", "mechanism", "application"}:
-                raise ValueError("模型提前结束，尚有未作答维度；问答保持可恢复")
+                raise _RejectedQuestion("模型提前结束，尚有未作答维度；问答保持可恢复")
             return {"done": True, "reason": "natural"}
         dimension = proposal.get("dimension")
         question = proposal.get("question")
         if dimension not in ("concept", "mechanism", "application") or not isinstance(question, str) or not question.strip():
-            raise ValueError("模型返回了无效问题；问答保持可恢复")
+            raise _RejectedQuestion("模型返回了无效问题；问答保持可恢复")
         difficulty = proposal.get("difficulty")
         basis = proposal.get("difficulty_basis")
         if difficulty not in ("basic", "advanced", "transfer") or not isinstance(basis, str) or not basis.strip():
-            raise ValueError("模型返回了无效题目难度；问答保持可恢复")
+            raise _RejectedQuestion("模型返回了无效题目难度；问答保持可恢复")
         followup_of = proposal.get("followup_of")
+        if type(followup_of) is int:
+            followup_of = str(followup_of)
         if followup_of is not None and not isinstance(followup_of, str):
-            raise ValueError("模型返回了无效追问目标；问答保持可恢复")
+            raise _RejectedQuestion("模型返回了无效追问目标；问答保持可恢复")
+        if followup_of:
+            followup_of = _followup_target(qa, dimension, followup_of)
         try:
             question_id, seq = self.store.add_question(attempt_id, dimension, question, difficulty, basis,
                                                        followup_of or None)
         except ValueError as exc:
             if str(exc) != "invalid follow-up question":
                 raise
-            raise ValueError("模型返回了不允许的追问；问答保持可恢复") from exc
+            raise _RejectedQuestion("模型返回了不允许的追问；问答保持可恢复") from exc
         return {"done": False, "question_id": question_id, "question": question, "dimension": dimension,
                 "seq": seq, "followup": bool(followup_of)}
 
@@ -571,6 +656,7 @@ class LearningRuntime:
                 row["answer"] = row["scoring_text"]
         error: Exception | None = None
         for _ in range(self.context.validation_retries):
+            proposal: Any = None
             try:
                 sources = self.sources_for(attempt["kp_id"])
                 feedback = f"上一次输出未通过校验：{error}。请修正后重新输出完整 JSON。" if error else ""
@@ -604,6 +690,9 @@ class LearningRuntime:
                     return self.store.mark_awaiting_review(attempt_id, f"分批评阅待恢复：{batch_exc}")
             except (ValueError, KeyError, TypeError) as exc:
                 error = exc
+                if proposal is not None:
+                    self._output_invalid("grade", f"{type(exc).__name__}: {exc}", proposal, kp_id=attempt["kp_id"],
+                                         attempt_id=attempt_id, point=point_row["title"])
         return self.store.mark_awaiting_review(attempt_id, f"评阅未通过校验：{error}")
 
     def _grade_in_batches(self, attempt_id: str, point: str, qa: list[dict[str, Any]],

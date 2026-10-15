@@ -13,6 +13,7 @@ from typing import Any
 
 from .clock import Clock
 from .queries import open_readonly, query_tool_specs, readonly_runner
+from .redact import redact_obj
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope
 
 READ_ONLY = ToolScope(frozenset({"read"}))
@@ -25,7 +26,8 @@ class JsonlAudit:
 
     def __call__(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **record}, ensure_ascii=False, default=str)
+        line = json.dumps(redact_obj({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **record}),
+                          ensure_ascii=False, default=str)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 

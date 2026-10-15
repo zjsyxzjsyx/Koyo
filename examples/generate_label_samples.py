@@ -7,7 +7,10 @@ and labels/评分审阅.md for side-by-side review.
 
 `--set NAME` uses labels/NAME/ instead. `--runs N` grades the same samples N times into
 separate databases and gates on the mean exact agreement, since one run can drift by a
-point on borderline answers even at temperature 0. A sample may put several items in one dimension
+point on borderline answers even at temperature 0. `--out DIR` writes the databases, materials
+and generated files there instead, leaving the committed label files untouched. Every graded
+run (not --relabel) is appended to labels/eval-runs.jsonl with the grading-prompt fingerprint,
+which `zhiqiu gate` checks. A sample may put several items in one dimension
 (an item with "answer": null stays unanswered); its pre-registered scores then live in
 sample["labels"][dimension] rather than on each item.
 """
@@ -22,7 +25,7 @@ from pathlib import Path
 from zhiqiu.clock import FixedClock
 from zhiqiu.local_env import load_local_env
 from zhiqiu.model import OpenAICompatibleModel
-from zhiqiu.quality import evaluate_labels, label_template
+from zhiqiu.quality import evaluate_labels, grading_usage, label_template, record_eval_run
 from zhiqiu.runtime import LearningRuntime
 from zhiqiu.store import Store
 
@@ -35,9 +38,12 @@ def db_paths(root: Path, runs: int) -> list[Path]:
     return [root / "state.sqlite"] + [root / f"state-run{run}.sqlite" for run in range(2, runs + 1)]
 
 
-def main(relabel: bool = False, root: Path = ROOT, runs: int = 1) -> None:
+def main(relabel: bool = False, root: Path = ROOT, runs: int = 1, out: Path | None = None) -> None:
     load_local_env()
     samples = json.loads((root / "samples.json").read_text(encoding="utf-8"))
+    set_name = "labels" if root == ROOT else root.name
+    root = out or root
+    root.mkdir(parents=True, exist_ok=True)
     paths = db_paths(root, runs)
     if relabel:
         # Refresh labels and review from samples.json without calling the model again.
@@ -51,7 +57,11 @@ def main(relabel: bool = False, root: Path = ROOT, runs: int = 1) -> None:
         if not relabel:
             for run, store in enumerate(stores, 1):
                 grade(store, samples, root, run)
-        export(stores, samples, root)
+        reports = export(stores, samples, root)
+        if not relabel:
+            saved = record_eval_run(reports, set_name, grading_usage(stores))
+            print(f"已写入 labels/eval-runs.jsonl：指纹 {saved['fingerprint'][:12]}，"
+                  f"{'通过' if saved['passed'] else '未通过'}")
     finally:
         for store in stores:
             store.close()
@@ -76,7 +86,7 @@ def grade(store: Store, samples: list[dict], root: Path, run: int) -> None:
         print(f"[第 {run} 次 {index}/{len(samples)}] {sample['point']}: {outcome['kind']}", flush=True)
 
 
-def export(stores: list[Store], samples: list[dict], root: Path = ROOT) -> None:
+def export(stores: list[Store], samples: list[dict], root: Path = ROOT) -> list[dict]:
     mine = {(s["point"], d): label for s in samples if "labels" in s for d, label in s["labels"].items()} | {
         (s["point"], i["dimension"]): i for s in samples if "labels" not in s for i in s["items"]}
     runs = []
@@ -100,6 +110,7 @@ def export(stores: list[Store], samples: list[dict], root: Path = ROOT) -> None:
     write_review(runs[0][0], reports, scores, mean, passed, root)
     print(json.dumps({"runs": [{k: v for k, v in report.items() if k != "disagreements"} for report in reports],
                       "mean_exact_agreement": round(mean, 4), "passed": passed}, ensure_ascii=False))
+    return reports
 
 
 def cell(text: str) -> str:
@@ -138,7 +149,7 @@ def write_review(labels: list[dict], reports: list[dict], scores: dict, mean: fl
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    options = {"--set": None, "--runs": "1"}
+    options = {"--set": None, "--runs": "1", "--out": None}
     relabel = "--relabel" in args
     if relabel:
         args.remove("--relabel")
@@ -146,6 +157,6 @@ if __name__ == "__main__":
         key = args.pop(0)
         options[key] = args.pop(0)
     if args or (options["--set"] and not options["--set"].isidentifier()) or not options["--runs"].isdigit():
-        raise SystemExit("用法：generate_label_samples.py [--relabel] [--set NAME] [--runs N]")
+        raise SystemExit("用法：generate_label_samples.py [--relabel] [--set NAME] [--runs N] [--out DIR]")
     main(relabel=relabel, root=ROOT / options["--set"] if options["--set"] else ROOT,
-         runs=max(1, int(options["--runs"])))
+         runs=max(1, int(options["--runs"])), out=Path(options["--out"]) if options["--out"] else None)

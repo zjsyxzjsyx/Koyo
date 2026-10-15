@@ -114,6 +114,37 @@ def test_network_calls_need_confirmation_and_cannot_copy_read_notes(tmp_path):
     assert tool_rows(store)[2]["confirmed"] == 1
 
 
+def test_one_network_approval_covers_the_rest_of_the_turn(tmp_path):
+    search = QuerySearch([])
+    store, model, io, agent = make_agent(tmp_path, [
+        tool("web_search", {"query": "北京 天气 明天"}, "a"),
+        tool("web_search", {"query": "Beijing weather tomorrow"}, "b"), say("明天晴")], search=search)
+    asked = []
+    io.confirm_tool = lambda spec, args: asked.append(args["query"]) or True
+    agent.handle("查明天北京的天气")
+    assert asked == ["北京 天气 明天"]
+    assert search.queries == ["北京 天气 明天", "Beijing weather tomorrow"]
+    assert [r["confirmed"] for r in tool_rows(store)] == [1, 1]
+    # The second query is still shown, only not asked about.
+    assert any("Beijing weather tomorrow" in line and "本轮已允许" in line for line in io.said)
+    # The approval ends with the turn.
+    model.rounds = [tool("web_search", {"query": "上海 天气"}, "c"), say("多云")]
+    agent.handle("上海呢")
+    assert asked == ["北京 天气 明天", "上海 天气"]
+
+
+def test_a_refused_network_call_is_asked_again_in_the_same_turn(tmp_path):
+    search = QuerySearch([])
+    store, model, io, agent = make_agent(tmp_path, [
+        tool("web_search", {"query": "第一次"}, "a"), tool("web_search", {"query": "第二次"}, "b"), say("好")],
+        search=search)
+    answers = [False, True]
+    io.confirm_tool = lambda spec, args: answers.pop(0)
+    agent.handle("搜一下")
+    assert answers == [] and search.queries == ["第二次"]
+    assert [r["status"] for r in tool_rows(store)] == ["denied", "ok"]
+
+
 def test_offline_chat_offers_no_network_tools(tmp_path):
     store, model, io, agent = make_agent(tmp_path, [say("离线")], search=QuerySearch([]), offline=True)
     agent.handle("你好")
