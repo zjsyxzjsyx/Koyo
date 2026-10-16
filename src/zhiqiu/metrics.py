@@ -80,6 +80,19 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
     tool_stats = {name: {"calls": sum(counts.values()), **dict(counts)} for name, counts in sorted(by_tool.items())}
     retried = sum(1 for row in tools if (row["attempts"] or 0) > 1)
     confirmed = sum(1 for row in tools if row["confirmed"] == 1)
+    # Gated calls by who decided: the policy, or the user (now or earlier in the turn; before
+    # schema v19 every approval was the user's).
+    approvals: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in tools:
+        if row["confirmed"] is None:
+            continue
+        source = row["approval_source"]
+        approvals[row["tool"]]["policy_allowed" if source == "policy" else
+                               "user_approved" if row["confirmed"] == 1 else "user_denied"] += 1
+    policy_allowed = sum(counts["policy_allowed"] for counts in approvals.values())
+    user_approved = sum(counts["user_approved"] for counts in approvals.values())
+    # Only these approvals came from a question just put to the user.
+    asked_approved = sum(1 for row in tools if row["confirmed"] == 1 and row["approval_source"] in (None, "user"))
 
     # Guardrails and other events.
     guards: Counter[str] = Counter()
@@ -96,7 +109,8 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
     proposals: Counter[str] = Counter()
     for row in messages:
         proposals[json.loads(row["payload_json"]).get("status", "pending")] += 1
-    asked = confirmed + denied_by_user
+    # Denials come from guard events, so refused material sends in learn count as asked too.
+    asked = asked_approved + denied_by_user
 
     # Tool loops and flows, from spans.
     loops = Counter(row["end_reason"] or row["status"] for row in spans if row["kind"] == "loop")
@@ -134,7 +148,8 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
         "traces": {"count": sum(span_status.values()), "by_status": dict(span_status)},
         "human": {"confirmations_asked": asked, "denied_by_user": denied_by_user,
                   "denial_rate": _rate(denied_by_user, asked), "proposals": dict(proposals),
-                  "review_revisions": revised},
+                  "review_revisions": revised, "policy_allowed": policy_allowed, "user_approved": user_approved,
+                  "approvals_by_tool": {name: dict(counts) for name, counts in sorted(approvals.items())}},
         "grading": {"deferred": deferred},
         "guardrails": dict(guards),
         "daily": dict(sorted(daily.items())),
@@ -169,6 +184,9 @@ def render(data: dict[str, Any]) -> str:
     for name, counts in data["flows"].items():
         lines.append(f"  {name:<24} {json.dumps(counts, ensure_ascii=False)}")
     human = data["human"]
+    lines.append(f"审批：策略放行 {human['policy_allowed']} 次，用户批准 {human['user_approved']} 次"
+                 + "".join(f"；{name} " + " ".join(f"{key} {value}" for key, value in counts.items())
+                           for name, counts in human["approvals_by_tool"].items()))
     lines.append(f"人工：确认 {human['confirmations_asked']} 次，拒绝 {human['denied_by_user']}（{_pct(human['denial_rate'])}）；"
                  f"提议 {json.dumps(human['proposals'], ensure_ascii=False)}；人工改分 {human['review_revisions']} 次；"
                  f"评分延期 {data['grading']['deferred']} 次")

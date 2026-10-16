@@ -23,12 +23,12 @@ def loop_span(store, span_id, rounds, end_reason="done", loop_id="L1", max_round
 
 
 def tool_call(store, call_id, tool="zhiqiu_status", status_="ok", loop_id="L1", round_=1, permission="read",
-              confirmed=None, conversation_id=None, trace_id="T" * 32, parent="S1"):
+              confirmed=None, conversation_id=None, trace_id="T" * 32, parent="S1", source=None):
     store.db.execute("""INSERT INTO tool_calls(id,tool,permission,status,attempts,latency_ms,output_chars,truncated,
-        created_at,loop_id,round,confirmed,conversation_id,trace_id,parent_span_id,started_at_ns)
-        VALUES(?,?,?,?,1,1,0,0,'2026-10-14',?,?,?,?,?,?,?)""",
+        created_at,loop_id,round,confirmed,conversation_id,trace_id,parent_span_id,started_at_ns,approval_source)
+        VALUES(?,?,?,?,1,1,0,0,'2026-10-14',?,?,?,?,?,?,?,?)""",
         (call_id, tool, permission, status_, loop_id, round_, confirmed, conversation_id, trace_id, parent,
-         tracing.now_ns() + len(call_id)))
+         tracing.now_ns() + len(call_id), source))
 
 
 def state_event(store, entity, entity_id, source, target):
@@ -74,6 +74,25 @@ def test_side_effects_need_confirmation(tmp_path):
     assert status(store, "confirmed_side_effects")["status"] == "pass"
     tool_call(store, "c", tool="web_search", permission="network", conversation_id="C1")
     assert status(store, "confirmed_side_effects")["status"] == "fail"
+
+
+def test_writes_need_the_user_and_chat_network_calls_need_policy_or_user(tmp_path):
+    store = Store(tmp_path / "s.sqlite")
+    tool_call(store, "a", tool="web_search", permission="network", conversation_id="C1", confirmed=1, source="policy")
+    tool_call(store, "b", tool="write_file", permission="write_file", confirmed=1, source="user")
+    tool_call(store, "c", tool="web_search", permission="network", conversation_id="C1", confirmed=1, source="turn")
+    tool_call(store, "d", tool="write_file", permission="write_file", confirmed=1)  # written before v19
+    tool_call(store, "e", tool="web_search", permission="network", conversation_id="C1", confirmed=0,
+              status_="denied", source="user")  # refused calls never ran, so they are not checked
+    assert status(store, "confirmed_side_effects")["status"] == "pass"
+    tool_call(store, "f", tool="write_file", permission="write_file", confirmed=1, source="policy")
+    bad = status(store, "confirmed_side_effects")
+    assert bad["status"] == "fail" and bad["evidence"] == [
+        {"trace_id": "T" * 32, "tool_call": "f", "tool": "write_file", "confirmed": 1, "approval_source": "policy"}]
+    other = Store(tmp_path / "t.sqlite")
+    tool_call(other, "g", tool="notion__search", permission="external_mcp", conversation_id="C1", confirmed=0,
+              source="user")
+    assert status(other, "confirmed_side_effects")["status"] == "fail"
 
 
 def test_state_replay_catches_moves_outside_the_table_and_gaps(tmp_path):
@@ -139,3 +158,43 @@ def test_failures_are_grouped_into_categories_with_trace_samples(tmp_path):
     sample = next(item for item in data["categories"] if item["category"] == "guard:leak_check")["samples"][0]
     assert sample["trace_id"] == turn.trace_id and "夹带原文" in sample["detail"]
     assert "invalid_followup" in contracts.render_failures(data)
+
+
+def approval(store, request_id, status, call=None, age_ns=0, tool="write_file"):
+    store.db.execute("""INSERT INTO approval_requests(id,conversation_id,trace_id,tool,permission,status,tool_call_id,
+        created_at_ns,created_at) VALUES(?,?,?,?,?,?,?,?,'2026-10-16')""",
+        (request_id, "C1", "T" * 32, tool, "write_file", status, call, tracing.now_ns() - age_ns))
+
+
+def test_approval_records_must_agree_with_the_calls_they_decided(tmp_path):
+    store = Store(tmp_path / "s.sqlite")
+    approval(store, "fresh", "pending")  # may still be waiting on a screen: not checked
+    assert status(store, "approvals_consistent")["status"] == "insufficient"
+    tool_call(store, "a", tool="write_file", permission="write_file", confirmed=1, conversation_id="C1", source="user")
+    approval(store, "r1", "approved", call="a")
+    tool_call(store, "b", tool="write_file", permission="write_file", status_="denied", confirmed=0,
+              conversation_id="C1", source="user")
+    approval(store, "r2", "denied", call="b")
+    tool_call(store, "c", tool="web_search", permission="network", status_="error", conversation_id="C1")
+    approval(store, "r3", "cancelled", call="c", tool="web_search")
+    tool_call(store, "d", tool="web_search", permission="network", confirmed=1, conversation_id="C1", source="policy")
+    assert status(store, "approvals_consistent")["status"] == "pass"
+
+
+@pytest.mark.parametrize("setup, problem", [
+    (lambda s: approval(s, "old", "pending", age_ns=31 * 60 * 10**9), "仍未取消"),
+    (lambda s: approval(s, "r", "approved"), "没有关联"),
+    (lambda s: (tool_call(s, "x", tool="write_file", permission="write_file", status_="denied", confirmed=0,
+                          conversation_id="C1", source="user"), approval(s, "r", "approved", call="x")), "批准了"),
+    (lambda s: (tool_call(s, "x", tool="write_file", permission="write_file", confirmed=1,
+                          conversation_id="C1", source="user"), approval(s, "r", "denied", call="x")), "拒绝了"),
+    (lambda s: (tool_call(s, "x", tool="web_search", permission="network", confirmed=1, conversation_id="C1",
+                          source="user"), approval(s, "r", "cancelled", call="x")), "已取消"),
+    (lambda s: tool_call(s, "x", tool="write_file", permission="write_file", confirmed=1, conversation_id="C1",
+                         source="user"), "没有审批记录"),
+])
+def test_each_approval_inconsistency_is_caught(tmp_path, setup, problem):
+    store = Store(tmp_path / "s.sqlite")
+    setup(store)
+    result = status(store, "approvals_consistent")
+    assert result["status"] == "fail" and problem in result["evidence"][0]["problem"]

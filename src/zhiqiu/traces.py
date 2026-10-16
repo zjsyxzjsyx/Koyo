@@ -66,8 +66,18 @@ def _leaf_llm(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def approval_label(call: dict[str, Any]) -> str:
+    """How a gated call was decided; rows from before schema v19 carry no source and read as the user's."""
+    if call["confirmed"] is None:
+        return "无需确认"
+    if call["confirmed"] == 0:
+        return "被拒"
+    return {"policy": "策略放行", "turn": "本轮已允许"}.get(call.get("approval_source") or "user", "用户批准")
+
+
 def _leaf_tool(row: sqlite3.Row) -> dict[str, Any]:
-    return {key: row[key] for key in ("id", "tool", "permission", "status", "error_kind", "confirmed", "attempts",
+    return {key: row[key] for key in ("id", "tool", "permission", "status", "error_kind", "confirmed",
+                                      "approval_source", "attempts",
                                       "latency_ms", "round", "result_count", "output_chars", "truncated",
                                       "started_at_ns", "args_summary_json")}
 
@@ -291,7 +301,7 @@ def render(data: dict[str, Any]) -> str:
                            f"{pad}  · 模型 {call['stage'] or '-'}  {call['model']}  {_ms(call['latency_ms'])}  "
                            f"{_tokens(call)}{_money(call['cost'], currency)}{flag}"))
         for call in node["tool_calls"]:
-            confirm = {1: "  已确认", 0: "  被拒"}.get(call["confirmed"], "")
+            confirm = f"  {approval_label(call)}" if call["confirmed"] is not None else ""
             leaves.append((call["started_at_ns"] or 0,
                            f"{pad}  · 工具 {call['tool']}  {call['status']}  {_ms(call['latency_ms'])}"
                            f"{'  第' + str(call['round']) + '轮' if call['round'] else ''}{confirm}"))

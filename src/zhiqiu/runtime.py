@@ -4,11 +4,11 @@ import hashlib
 import json
 import os
 import sqlite3
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import guardrails, tracing
+from . import guardrails, lessons, tracing
 from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_VERSION
 from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
@@ -30,6 +30,14 @@ def _supplement(grade: dict[str, Any]) -> str:
     if not isinstance(value, str):
         raise ValueError("模型返回了无效的补充说明")
     return value.strip()
+
+
+@dataclass(frozen=True)
+class Outbound:
+    """What one learning preparation sends: local files (read, not yet sent), remote items and the endpoint."""
+    materials: list[Material]
+    remote: list[str]
+    endpoint: str
 
 
 _SENTENCE_ENDS = "。！？；.!?;"
@@ -290,9 +298,13 @@ class LearningRuntime:
             raise ValueError("模型未给出有效的资料综合判断")
         return result, summaries
 
-    def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
-                offline: bool = False, force_web: bool = False, force_local: bool = False,
-                urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
+    def outbound(self, path: Path | None, offline: bool = False, force_local: bool = False,
+                 urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> Outbound:
+        """What a preparation will send out, worked out before anything is sent.
+
+        `prepare` asks for consent on exactly this; the chat shell shows it with a learning proposal so
+        that one answer covers both starting and sending.
+        """
         if path is None and not urls and not notion_pages:
             raise ValueError("请用 --from 指定本地资料，或用 --url、--notion 指定网页或 Notion 页面")
         if (urls or notion_pages) and offline:
@@ -317,7 +329,14 @@ class LearningRuntime:
                     servers.setdefault(spec.source[4:], []).append(name.split("__", 1)[-1])
             remote.extend(f"本地资料不足时，可调用外部 MCP 服务 {server} 的工具：{'、'.join(tools)}"
                           for server, tools in servers.items())
-        if not approve(materials, self.model.endpoint, remote):
+        return Outbound(materials, remote, self.model.endpoint)
+
+    def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
+                offline: bool = False, force_web: bool = False, force_local: bool = False,
+                urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
+        plan = self.outbound(path, offline, force_local, urls, notion_pages)
+        materials = list(plan.materials)
+        if not approve(materials, plan.endpoint, plan.remote):
             guardrails.record(self.store, "confirmation_denied", "denied_by_user", "未获发送资料授权", point=point)
             raise ValueError("未获发送资料授权；学习未开始")
         self._readable = [item.source for item in materials if item.kind == "local"]
@@ -351,12 +370,14 @@ class LearningRuntime:
             pass
         lesson = self._invoke(ContextTask("teach", point, sources=tuple(teaching_sources)),
                               lambda: self.model.teach(point, teaching_sources))
-        if not isinstance(lesson.get("lesson"), str) or not lesson["lesson"].strip():
-            raise ValueError("模型未生成可靠的学习说明")
+        sections = lessons.normalize(lesson)
+        lesson = {**lesson, "sections": sections, "lesson": lessons.render(sections)}
         kp_id = self.store.ensure_knowledge_point(point)
         self.store.add_materials(kp_id, self._sources(materials))
         self.store.record_consent(kp_id, consent_hash(materials), self.model.endpoint)
-        self.store.record_message(kp_id, "assistant", "lesson", lesson["lesson"].strip())
+        lesson["message_id"] = self.store.record_message(kp_id, "assistant", "lesson", lesson["lesson"])
+        self.store.record_event(kp_id, None, "LessonSections",
+                                {"message_id": lesson["message_id"], "sections": sections})
         return kp_id, lesson, materials
 
     def _gather(self, point: str, gap: str, materials: list[Material]) -> tuple[list[Material], str]:
@@ -433,7 +454,8 @@ class LearningRuntime:
     def clarify(self, kp_id: str, question: str, attempt_id: str | None = None,
                 source_message_id: str | None = None,
                 confirm: Callable[[Any, dict[str, Any]], bool] | None = None,
-                via: str | None = None) -> dict[str, str]:
+                via: str | None = None, section: dict[str, str] | None = None) -> dict[str, str]:
+        """section: the lesson section on screen, so an answer to its check question is read as one."""
         if not question.strip():
             raise ValueError("澄清问题不能为空")
         point = self.store.get_knowledge_point(kp_id)
@@ -445,7 +467,8 @@ class LearningRuntime:
             self.model.set_trace_context(kp_id, attempt_id)
         sources = self.sources_for(kp_id)
         task = ContextTask("clarify", point["title"], kp_id, attempt_id, current_input=question,
-                           sources=tuple(sources), source_message_id=source_message_id, current_note_id=note_id)
+                           sources=tuple(sources), focus=(section,) if section else (),
+                           source_message_id=source_message_id, current_note_id=note_id)
         try:
             result = None
             # Tools are open only while learning; self-tests and reviews never get a loop.
@@ -465,9 +488,14 @@ class LearningRuntime:
 
     def _clarify_with_tools(self, task: ContextTask, kp_id: str, sources: list[dict[str, Any]],
                             confirm: Callable[[Any, dict[str, Any]], bool] | None) -> dict[str, Any] | None:
-        """Clarify while learning with read tools and confirmed note writes; None falls back to a plain call."""
+        """Clarify while learning with read tools and confirmed note writes; None falls back to a plain call.
+
+        The chat's status queries are left out: a learner's question is about the material, and the model
+        used to look the state up on every question and recite it (state, attempts, tasks) to the user.
+        """
         names = [name for name in self.tools.names() if self.tools.get(name).in_loops
-                 and self.tools.get(name).permission in ("read", "write_file")]
+                 and self.tools.get(name).permission in ("read", "write_file")
+                 and self.tools.get(name).source != "zhiqiu.queries"]
         self._readable = [str(item["source"]) for item in sources if item.get("kind") == "local"]
         request = self.context.build(task)
         scope = ToolScope(frozenset({"read", "write_file"}), confirm=confirm, kp_id=kp_id, point=task.point)

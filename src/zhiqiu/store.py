@@ -19,11 +19,15 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 LLM_FAILURE_CHARS = 20_000
 # Caps for the optional prompt/reply text of one model call (ZHIQIU_TRACE_CONTENT=1).
 TRACE_REQUEST_CHARS = 60_000
 TRACE_RESPONSE_CHARS = 20_000
+# An approval request keeps only the first line of what the user was shown (a write's preview is content).
+APPROVAL_TITLE_CHARS = 200
+# No prompt waits longer than this (the web workbench gives up after 30 minutes); older pending rows are stale.
+APPROVAL_STALE_NS = 30 * 60 * 10**9
 
 
 def new_id() -> str:
@@ -545,6 +549,24 @@ class Store:
                     except sqlite3.OperationalError:
                         pass
                 self.db.execute("PRAGMA user_version=18")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 19:
+            with self.transaction():
+                # Who let a gated tool call through: policy, user, or the user earlier in the turn.
+                if "approval_source" not in {row["name"] for row in self.db.execute("PRAGMA table_info(tool_calls)")}:
+                    self.db.execute("ALTER TABLE tool_calls ADD COLUMN approval_source TEXT")
+                # Every time a tool asks the user, whichever interface answered (written from Issue 3 on).
+                self.db.execute("""CREATE TABLE IF NOT EXISTS approval_requests (
+                    id TEXT PRIMARY KEY, conversation_id TEXT, trace_id TEXT, parent_span_id TEXT,
+                    tool TEXT NOT NULL, permission TEXT, title TEXT NOT NULL DEFAULT '',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','cancelled')),
+                    decided_via TEXT, tool_call_id TEXT,
+                    created_at_ns INTEGER NOT NULL, decided_at_ns INTEGER, created_at TEXT NOT NULL)""")
+                for index, column in (("approval_requests_status", "status"),
+                                      ("approval_requests_conversation", "conversation_id"),
+                                      ("approval_requests_created", "created_at_ns")):
+                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {index} ON approval_requests({column})")
+                self.db.execute("PRAGMA user_version=19")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -668,6 +690,24 @@ class Store:
                 AND kind IN ('lesson','lesson_resume') ORDER BY rowid DESC LIMIT 1)
             WHERE s.attempt_id IS NULL AND s.lesson_state='teaching'
             ORDER BY s.rowid DESC""").fetchall()
+
+    def lesson_sections(self, message_id: str) -> tuple[str, list[dict[str, str]]] | None:
+        """The original lesson message and its sections; None for a lesson taught before sections existed."""
+        row = self.db.execute("SELECT id,kind,source_message_id FROM messages WHERE id=?", (message_id,)).fetchone()
+        # A lesson continued on a later day is a lesson_resume copy that points at the original.
+        while row and row["kind"] == "lesson_resume" and row["source_message_id"]:
+            row = self.db.execute("SELECT id,kind,source_message_id FROM messages WHERE id=?",
+                                  (row["source_message_id"],)).fetchone()
+        if not row:
+            return None
+        event = self.db.execute("""SELECT payload_json FROM events WHERE type='LessonSections'
+            AND json_extract(payload_json,'$.message_id')=? ORDER BY id DESC LIMIT 1""", (row["id"],)).fetchone()
+        return (row["id"], json.loads(event["payload_json"])["sections"]) if event else None
+
+    def lesson_markers(self, lesson_id: str) -> list[str]:
+        """The section markers left while showing a lesson, across the days it was continued."""
+        return [row[0] for row in self.db.execute("""SELECT content FROM messages
+            WHERE kind='lesson_section' AND source_message_id=? ORDER BY rowid""", (lesson_id,))]
 
     def lesson_candidates(self, kp_id: str) -> list[sqlite3.Row]:
         return self.db.execute("""SELECT m.id message_id,m.content,s.id session_id,s.session_date
@@ -850,8 +890,8 @@ class Store:
             self.db.execute("""INSERT INTO tool_calls
                 (id,tool,source,permission,kp_id,attempt_id,session_id,point,loop_id,round,args_summary_json,
                  confirmed,status,error_kind,attempts,latency_ms,result_count,output_chars,truncated,created_at,
-                 conversation_id,trace_id,parent_span_id,started_at_ns)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 conversation_id,trace_id,parent_span_id,started_at_ns,approval_source)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (details["id"], details["tool"], details.get("source"), details.get("permission"),
                  details.get("kp_id"), details.get("attempt_id"), details.get("session_id"),
                  details.get("point") or "", details.get("loop_id"), details.get("round"),
@@ -859,9 +899,50 @@ class Store:
                  None if confirmed is None else int(bool(confirmed)), details["status"],
                  details.get("error_kind"), details["attempts"], details["latency_ms"],
                  details.get("result_count"), details["output_chars"], int(bool(details.get("truncated"))),
-                 self._ts(), details.get("conversation_id"), trace_id, parent, details.get("started_at_ns")))
+                 self._ts(), details.get("conversation_id"), trace_id, parent, details.get("started_at_ns"),
+                 details.get("approval_source")))
             if details.get("guard"):
                 self._event(details.get("kp_id"), details.get("attempt_id"), "GuardrailTriggered", details["guard"])
+
+    # ----- approval requests: one row each time a tool asks the user, whatever interface answers -----
+
+    def open_approval(self, tool: str, permission: str, title: str, summary: Any,
+                      conversation_id: str | None) -> str:
+        request_id = new_id()
+        trace_id, parent = tracing.columns(self)
+        with self.transaction():
+            self.db.execute("""INSERT INTO approval_requests(id,conversation_id,trace_id,parent_span_id,tool,permission,
+                title,summary_json,status,created_at_ns,created_at) VALUES(?,?,?,?,?,?,?,?,'pending',?,?)""",
+                (request_id, conversation_id, trace_id, parent, tool, permission,
+                 redact(title)[:APPROVAL_TITLE_CHARS], json.dumps(redact_obj(summary), ensure_ascii=False),
+                 tracing.now_ns(), self._ts()))
+        return request_id
+
+    def decide_approval(self, request_id: str, approved: bool, via: str) -> None:
+        with self.transaction():
+            self.db.execute("""UPDATE approval_requests SET status=?,decided_via=?,decided_at_ns=?
+                WHERE id=? AND status='pending'""", ("approved" if approved else "denied", via, tracing.now_ns(),
+                                                     request_id))
+
+    def cancel_approval(self, request_id: str) -> None:
+        """The prompt went away unanswered (interrupted, or the interface closed)."""
+        with self.transaction():
+            self.db.execute("""UPDATE approval_requests SET status='cancelled',decided_at_ns=?
+                WHERE id=? AND status='pending'""", (tracing.now_ns(), request_id))
+
+    def link_approval(self, request_id: str, tool_call_id: str) -> None:
+        with self.transaction():
+            self.db.execute("UPDATE approval_requests SET tool_call_id=? WHERE id=?", (tool_call_id, request_id))
+
+    def cancel_stale_approvals(self, conversation_id: str | None = None,
+                               older_than_ns: int = APPROVAL_STALE_NS) -> int:
+        """Pending requests nobody can answer any more: those of this conversation (its process
+        restarted) and those older than the longest wait anywhere."""
+        cutoff = tracing.now_ns() - older_than_ns
+        with self.transaction():
+            return self.db.execute("""UPDATE approval_requests SET status='cancelled',decided_at_ns=?
+                WHERE status='pending' AND (conversation_id IS ? OR created_at_ns<?)""",
+                (tracing.now_ns(), conversation_id, cutoff)).rowcount
 
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
@@ -1399,7 +1480,7 @@ class Store:
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
                   "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries",
-                  "spans", "llm_failures", "llm_contents")
+                  "spans", "llm_failures", "llm_contents", "approval_requests")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:

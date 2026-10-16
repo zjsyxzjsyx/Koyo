@@ -831,7 +831,7 @@ wheels = [
 
 [[package]]
 name = "zhiqiu"
-version = "5.0.0"
+version = "6.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fsrs" },

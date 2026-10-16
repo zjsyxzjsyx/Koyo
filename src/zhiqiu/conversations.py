@@ -184,6 +184,8 @@ class Conversations:
                     WHERE trace_id IN (SELECT trace_id FROM spans WHERE conversation_id=?))""", (item,))
                 self.db.execute("UPDATE spans SET conversation_id=NULL WHERE conversation_id=?", (item,))
                 self.db.execute("DELETE FROM llm_failures WHERE conversation_id=?", (item,))
+                # What the user was asked (queries, paths) belongs to the conversation.
+                self.db.execute("DELETE FROM approval_requests WHERE conversation_id=?", (item,))
                 self.db.execute("""DELETE FROM events WHERE type='StateChanged'
                     AND json_extract(payload_json,'$.entity')='conversation'
                     AND json_extract(payload_json,'$.id')=?""", (item,))

@@ -11,6 +11,7 @@ import pytest
 
 from zhiqiu import contracts, tracing, traces
 from zhiqiu.agent import ChatAgent
+from zhiqiu.approvals import ApprovalPolicy
 from zhiqiu.clock import FixedClock
 from zhiqiu.flows import run_lesson, run_quiz
 from zhiqiu.runtime import LearningRuntime
@@ -99,7 +100,7 @@ def lesson_setup(tmp_path, model):
     return store, LearningRuntime(store, model), path
 
 
-def chat_setup(tmp_path, rounds, *inputs, confirm=True, search=None):
+def chat_setup(tmp_path, rounds, *inputs, confirm=True, search=None, policy=None):
     root = tmp_path / "notes"
     root.mkdir(parents=True, exist_ok=True)
     (root / "rbtree.md").write_text(NOTE, encoding="utf-8")
@@ -107,7 +108,7 @@ def chat_setup(tmp_path, rounds, *inputs, confirm=True, search=None):
     model = AuditedChatModel(rounds)
     model.store = store
     service = LearningRuntime(store, model, search, search)
-    agent = ChatAgent(store, service, ScriptedIO(*inputs, confirm=confirm), read_roots=[root])
+    agent = ChatAgent(store, service, ScriptedIO(*inputs, confirm=confirm), read_roots=[root], policy=policy)
     agent.start()
     return store, agent, root
 
@@ -170,7 +171,8 @@ def test_scenario_leak_is_blocked_and_a_refused_search_is_never_sent(tmp_path):
         tool("read_file", {"path": "rbtree.md"}),
         tool("web_search", {"query": NOTE[:20]}),
         tool("web_search", {"query": "红黑树 插入"}),
-        say("按笔记回答：先染红再旋转。")], confirm=False, search=search)
+        say("按笔记回答：先染红再旋转。")], confirm=False, search=search,
+        policy=ApprovalPolicy({"network": "ask"}))
     agent.handle("红黑树插入怎么做？")
     assert search.queries == []
     assert guard_rules(store) == ["leak_check", "confirmation_denied"]
@@ -208,3 +210,96 @@ def test_scenario_interruption_and_recovery(tmp_path):
     assert_run_rules_hold(store, ["turn:chat", "turn:chat", "command:learn"])
     failures = {item["category"] for item in contracts.failures(store.db, 1)["categories"]}
     assert "flow_interrupted" in failures
+
+
+# ----- V6: approvals and the web workbench --------------------------------------------------
+
+
+def statuses(data):
+    return {item["check"]: item["status"] for item in data["results"]}
+
+
+def approval_rows(store):
+    return [(row[0], row[1], row[2]) for row in store.db.execute(
+        "SELECT tool,status,decided_via FROM approval_requests ORDER BY created_at_ns")]
+
+
+def test_scenario_default_policy_searches_freely_and_asks_before_writing(tmp_path):
+    root = tmp_path / "notes"
+    root.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    model = AuditedChatModel([tool("web_search", {"query": "杭州 天气"}, "a"),
+                              tool("write_file", {"path": "天气.md", "content": "小雨"}, "b"), say("记好了")])
+    model.store = store
+    search = QuerySearch([])
+    agent = ChatAgent(store, LearningRuntime(store, model, search, search, write_roots=[out]), ScriptedIO(),
+                      read_roots=[root], write_roots=[out])
+    agent.start()
+    agent.handle("查天气并记下来")
+    data = assert_run_rules_hold(store, ["turn:chat"])
+    assert statuses(data)["confirmed_side_effects"] == "pass" and statuses(data)["approvals_consistent"] == "pass"
+    sources = [tuple(row) for row in store.db.execute("SELECT tool,approval_source FROM tool_calls ORDER BY rowid")]
+    assert sources == [("web_search", "policy"), ("write_file", "user")]
+    assert approval_rows(store) == [("write_file", "approved", "terminal")]
+    assert (out / "天气.md").exists()
+
+
+def test_scenario_a_denied_tool_is_withheld_and_refused(tmp_path):
+    store, agent, _ = chat_setup(tmp_path, [tool("fetch_url", {"url": "https://example.org"}), say("没打开")],
+                                 search=QuerySearch([]), policy=ApprovalPolicy(tools={"fetch_url": "deny"}))
+    agent.handle("打开这个网页")
+    data = assert_run_rules_hold(store, ["turn:chat"])
+    assert guard_rules(store) == ["policy_denied"]
+    assert statuses(data)["confirmed_side_effects"] == "insufficient"  # nothing outgoing ran
+
+
+def workbench_setup(tmp_path, rounds, write=False):
+    from zhiqiu.webio import Workbench
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "rbtree.md").write_text(NOTE, encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    model = AuditedChatModel(rounds)
+    search = QuerySearch([])
+
+    def make_agent(store, io):
+        model.store = store  # audits are written on the worker thread, like the real adapter's
+        return ChatAgent(store, LearningRuntime(store, model, search, search, write_roots=[out] if write else ()),
+                         io, read_roots=[root], write_roots=[out] if write else ())
+    bench = Workbench(tmp_path / "state.sqlite", make_agent, clock=FixedClock(date(2026, 10, 16)))
+    bench.start()
+    return bench, out
+
+
+def test_scenario_a_write_refused_on_the_web_page(tmp_path):
+    from test_webio import drive
+    bench, out = workbench_setup(tmp_path, [tool("write_file", {"path": "a.md", "content": "笔记"}, "a"),
+                                            say("那就不写了")], write=True)
+    try:
+        drive(bench, "写下来", approve=False)
+    finally:
+        assert bench.close()
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    data = assert_run_rules_hold(store, ["turn:chat"])
+    assert statuses(data)["approvals_consistent"] == "pass"
+    assert approval_rows(store) == [("write_file", "denied", "web")]
+    assert guard_rules(store) == ["confirmation_denied"] and not (out / "a.md").exists()
+
+
+def test_scenario_a_lesson_and_quiz_taken_on_the_web_page(tmp_path):
+    from test_webio import drive
+    bench, _ = workbench_setup(tmp_path, [tool("propose_learn", {"point": "红黑树", "path": "rbtree.md"})])
+    try:
+        drive(bench, "我想学红黑树", answers=["/done", "先染红", "旋转变色", "插入修复"])
+    finally:
+        assert bench.close()
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    data = assert_run_rules_hold(store, ["turn:chat"])
+    assert statuses(data)["state_replay"] == "pass" and statuses(data)["proposal_stops_round"] == "pass"
+    assert store.db.execute("SELECT state FROM attempts").fetchone()[0] == "completed"
+    modes = [json.loads(row[0])["to"] for row in store.db.execute("""SELECT payload_json FROM events
+        WHERE type='StateChanged' AND json_extract(payload_json,'$.entity')='conversation' ORDER BY id""")]
+    assert modes == ["chat", "lesson", "self_test", "chat"]

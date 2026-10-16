@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from . import flow, tracing
 from .metrics import _window
+from .store import APPROVAL_STALE_NS
 from .toolloop import MAX_ROUNDS, STOP_REASONS
 
 PASS, FAIL, INSUFFICIENT = "pass", "fail", "insufficient"
@@ -80,13 +81,21 @@ def proposal_stops_round(db: sqlite3.Connection, since_ns: int, since_iso: str) 
 
 
 def confirmed_side_effects(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
-    rows = db.execute("""SELECT id,tool,permission,confirmed,conversation_id,trace_id FROM tool_calls
+    """Writes need the user's approval; chat network and MCP calls need the policy's or the user's.
+    Rows from before schema v19 have no approval_source and count as the user's."""
+    rows = db.execute("""SELECT id,tool,permission,confirmed,approval_source,conversation_id,trace_id FROM tool_calls
         WHERE status='ok' AND started_at_ns>=? AND (permission='write_file'
             OR (permission IN ('network','external_mcp') AND conversation_id IS NOT NULL))""", (since_ns,)).fetchall()
-    problems = [{"trace_id": row["trace_id"], "tool_call": row["id"], "tool": row["tool"], "confirmed": row["confirmed"]}
-                for row in rows if row["confirmed"] != 1]
+
+    def holds(row: sqlite3.Row) -> bool:
+        if row["confirmed"] != 1:
+            return False
+        return row["permission"] != "write_file" or row["approval_source"] in (None, "user", "turn")
+    problems = [{"trace_id": row["trace_id"], "tool_call": row["id"], "tool": row["tool"],
+                 "confirmed": row["confirmed"], "approval_source": row["approval_source"]}
+                for row in rows if not holds(row)]
     return _result("confirmed_side_effects", len(rows), problems,
-                   "写文件、对话中的联网与外部 MCP 调用都经过用户确认")
+                   "写文件经用户批准；对话中的联网与外部 MCP 调用都经过策略或用户批准")
 
 
 def state_replay(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
@@ -142,9 +151,49 @@ def spans_closed(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[
     return _result("spans_closed", len(rows), problems, "没有被遗留在运行中的 span（进程已退出却未结束）")
 
 
+def approvals_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
+    """Every question put to the user is recorded once and agrees with the call it decided.
+
+    A pending request younger than the longest wait may still be on someone's screen and is not checked."""
+    rows = db.execute("SELECT * FROM approval_requests WHERE created_at_ns>=?", (since_ns,)).fetchall()
+    calls = {row["id"]: row for row in db.execute("""SELECT id,tool,status,confirmed,approval_source,conversation_id,
+        trace_id FROM tool_calls WHERE started_at_ns>=?""", (since_ns,))}
+    stale_before = tracing.now_ns() - APPROVAL_STALE_NS
+    problems, checked = [], 0
+    for row in rows:
+        if row["status"] == "pending" and row["created_at_ns"] >= stale_before:
+            continue
+        checked += 1
+        call = calls.get(row["tool_call_id"]) if row["tool_call_id"] else None
+        problem = None
+        if row["status"] == "pending":
+            problem = "等待超过 30 分钟仍未取消"
+        elif row["status"] in ("approved", "denied") and call is None:
+            problem = "已回答却没有关联的工具调用"
+        elif row["status"] == "approved" and (call["confirmed"] != 1 or call["approval_source"] != "user"):
+            problem = f"批准了，调用却记为 confirmed={call['confirmed']}、approval_source={call['approval_source']}"
+        elif row["status"] == "denied" and (call["confirmed"] != 0 or call["status"] == "ok"):
+            problem = f"拒绝了，调用却记为 confirmed={call['confirmed']}、status={call['status']}"
+        elif row["status"] == "cancelled" and call is not None and call["status"] == "ok":
+            problem = "已取消，调用却执行了"
+        if problem:
+            problems.append({"trace_id": row["trace_id"], "approval_request": row["id"], "tool": row["tool"],
+                             "problem": problem})
+    asked = {row["tool_call_id"] for row in rows if row["tool_call_id"]}
+    for call in calls.values():
+        # Approval sources exist from schema v19 on; a chat call the user approved must have been asked.
+        if call["approval_source"] == "user" and call["conversation_id"] and call["confirmed"] is not None:
+            checked += 1
+            if call["id"] not in asked:
+                problems.append({"trace_id": call["trace_id"], "tool_call": call["id"], "tool": call["tool"],
+                                 "problem": "用户批准的对话调用没有审批记录"})
+    return _result("approvals_consistent", checked, problems,
+                   "每次询问都有审批记录，记录的结果与被决定的工具调用一致，没有遗留的待审批")
+
+
 CHECKS: tuple[Callable[[sqlite3.Connection, int, str], dict[str, Any]], ...] = (
-    loop_rounds, tool_round_bound, proposal_stops_round, confirmed_side_effects, state_replay, trace_linked,
-    spans_closed)
+    loop_rounds, tool_round_bound, proposal_stops_round, confirmed_side_effects, approvals_consistent,
+    state_replay, trace_linked, spans_closed)
 
 
 def check(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:

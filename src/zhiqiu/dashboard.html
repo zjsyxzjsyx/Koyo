@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>知秋看板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23BA7517'/%3E%3Cpath d='M32 7L36.5 16L41 14L39 26L46 19L48 23.5L55 22L52 30L55 32L44 40L45.5 44L34 42.5L30 42.5L18.5 44L20 40L9 32L12 30L9 22L16 23.5L18 19L25 26L23 14L27.5 16Z' fill='white'/%3E%3Cpath d='M32 42L32 53' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#BA7517">
 <style>
 :root {
   --bg: #fafaf9; --panel: #ffffff; --soft: #f3f2f0; --line: #e7e6e4; --line2: #d9d8d5;
@@ -128,6 +130,50 @@ svg text { fill: var(--ink3); font-size: 10.5px; }
 .ans { background: var(--soft); border-radius: 6px; padding: 6px 10px; margin-top: 6px; white-space: pre-wrap; }
 .score { font-size: 22px; font-weight: 600; } .score small { font-size: 12px; color: var(--ink3); font-weight: 400; }
 blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--accent); background: var(--soft); font-size: 12.5px; }
+/* Workbench chat */
+.stream { display: flex; flex-direction: column; gap: 10px; padding-bottom: 8px; }
+.bubble { max-width: min(760px, 88%); padding: 9px 13px; border-radius: 12px; word-break: break-word; }
+.bubble.user { align-self: flex-end; background: var(--accent-soft); white-space: pre-wrap; border-bottom-right-radius: 4px; }
+.bubble.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bubble.old { opacity: .72; }
+.note { align-self: flex-start; font-size: 12.5px; color: var(--ink3); display: flex; gap: 6px; align-items: baseline; white-space: pre-wrap; word-break: break-word; }
+.note.err { color: var(--bad); }
+.divider { text-align: center; font-size: 11.5px; color: var(--ink3); margin: 6px 0; }
+.acard { align-self: flex-start; width: min(760px, 100%); background: var(--panel); border: 1px solid var(--line2); border-left: 3px solid var(--warn); border-radius: 10px; padding: 12px 14px; }
+.acard.ask { border-left-color: var(--accent); }
+.acard.done { border-left-color: var(--line2); opacity: .8; }
+.acard .head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+.acard .acts { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.acard .result { font-size: 12.5px; color: var(--ink2); margin-top: 8px; }
+.btn { font: inherit; font-size: 13px; padding: 5px 14px; border-radius: 7px; border: 1px solid var(--line2); background: var(--panel); color: var(--ink); cursor: pointer; }
+.btn:hover:not(:disabled) { border-color: var(--ink3); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--bad); }
+.composer { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 16px; border-top: 1px solid var(--line); margin-top: 8px; }
+.composer .askbar { font-size: 12.5px; color: var(--accent); margin-bottom: 6px; white-space: pre-wrap; }
+.composer .line { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; min-height: 42px; max-height: 200px; resize: vertical; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 9px 12px; }
+.composer textarea:focus { outline: none; border-color: var(--accent); }
+.composer .state { font-size: 11.5px; color: var(--ink3); margin-top: 6px; display: flex; gap: 8px; align-items: center; min-height: 16px; }
+.chatgrid { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 20px; align-items: start; }
+.chatmain { min-width: 0; }
+.spanel { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; font-size: 12.5px; }
+.spanel > summary { display: none; }
+.spanel section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.spanel h4 { font-size: 11px; letter-spacing: .06em; color: var(--ink3); font-weight: 600; margin-bottom: 6px; display: flex; gap: 6px; align-items: center; }
+.spanel .big { font-size: 14px; font-weight: 600; }
+.spanel .kv { grid-template-columns: 64px minmax(0, 1fr); margin: 4px 0 0; }
+.spanel .path { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+.spanel .li { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-top: 1px solid var(--line); }
+.spanel .li:first-of-type { border-top: 0; }
+.md p { margin: 0 0 6px; } .md p:last-child { margin-bottom: 0; }
+.md + .md { margin-top: 6px; }
+.md .h { font-weight: 650; margin: 8px 0 4px; } .md .h1 { font-size: 16px; } .md .h2 { font-size: 15px; } .md .h3, .md .h4 { font-size: 14px; }
+.md ul, .md ol { margin: 4px 0 6px; padding-left: 22px; }
+.md code { font-family: var(--mono); font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+.md pre.code code { background: none; padding: 0; }
+.md table { margin: 6px 0; font-size: 12.5px; } .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
 @media (max-width: 860px) {
   body { flex-direction: column; height: auto; overflow: visible; }
   nav { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -135,6 +181,9 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   main { height: auto; padding: 0 16px 30px; overflow: visible; }
   .split { grid-template-columns: 1fr; } .detail { position: static; max-height: none; }
   .row, .axis { grid-template-columns: minmax(0, 1fr) 30% 52px; }
+  .chatgrid { grid-template-columns: 1fr; gap: 0; }
+  .spanel { position: static; max-height: none; order: -1; margin-bottom: 10px; }
+  .spanel > summary { display: block; cursor: pointer; font-size: 12.5px; color: var(--ink2); padding: 4px 0 8px; }
 }
 </style>
 </head>
@@ -147,6 +196,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   <a data-view="metrics"><span data-icon="chart"></span>指标与花费</a>
   <a data-view="failures"><span data-icon="alert"></span>失败<span class="n" id="n-failures"></span></a>
   <a data-view="checks"><span data-icon="shield"></span>契约检查</a>
+  <a data-view="approvals"><span data-icon="guard"></span>审批<span class="n" id="n-approvals"></span></a>
   <div class="grp">学习</div>
   <a data-view="learn"><span data-icon="book"></span>学习记录<span class="n" id="n-learn"></span></a>
   <div class="navfoot">
@@ -192,10 +242,17 @@ const END = {done: "完成", outcome: "已评阅", proposal: "提出建议", can
   max_rounds: "达到轮数上限", deadline: "超时", budget: "超预算", paused: "已暂停", ended: "已结束", interrupted: "已中断", process_exited: "进程已退出"};
 const KIND = {first: "首次自测", review: "复习"};
 const RULE = {leak_check: "泄露检查", read_root: "读取白名单", write_root: "写入白名单", name_not_allowed: "工具不在本步骤",
-  permission_denied: "权限类别不允许", confirmation_denied: "用户拒绝确认", confirmation_unavailable: "无法确认",
+  permission_denied: "权限类别不允许", confirmation_denied: "用户拒绝确认", confirmation_unavailable: "无法确认", policy_denied: "审批策略禁止", web_request_refused: "网页请求被拒",
   proposal_rejected: "拒绝提议", proposal_refused: "提议未通过校验", memory_limit: "记忆超限", loop_limit: "循环上限",
   output_invalid: "模型输出无效", illegal_transition: "非法状态转换", consent_missing: "未获发送授权"};
-const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", learn: "学习记录"};
+const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", approvals: "审批", learn: "学习记录"};
+// Served by `zhiqiu web`, the page carries a per-start token for /api/chat/*; the read-only dashboard has none.
+const meta = (name) => document.querySelector(`meta[name="${name}"]`)?.content || "";
+const WB = {on: meta("zhiqiu-mode") === "workbench", token: meta("zhiqiu-token")};
+if (WB.on) VIEWS.chat = "对话";
+const DEFAULT_VIEW = WB.on ? "chat" : "live";
+const APPROVAL = {pending: ["running", "待审批"], approved: ["ok", "已批准"], denied: ["warn", "已拒绝"], cancelled: ["interrupted", "已取消"]};
+const VIA = {terminal: "终端", web: "网页"};
 
 const S = {view: "live", arg: null, days: 7, currency: "", trees: null, selected: null, collapsed: new Set(), timer: null, llm: {}, states: false};
 const $ = (sel) => document.querySelector(sel);
@@ -205,12 +262,24 @@ const pct = (v) => v == null ? "—" : (v * 100).toFixed(1) + "%";
 const money = (v, cur = S.currency) => v == null ? "—" : `${cur}${v < 0.01 ? v.toFixed(4) : v.toFixed(3)}`;
 const ms = (v) => v == null ? "运行中" : v < 1000 ? `${v}ms` : v < 60000 ? `${(v / 1000).toFixed(1)}s` : `${Math.floor(v / 60000)}分${Math.round(v % 60000 / 1000)}秒`;
 const clock = (ns) => ns ? new Date(ns / 1e6).toLocaleString("zh-CN", {hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "—";
+// How a gated tool call was decided; rows from before schema v19 have no source and read as the user's.
+const approvalLabel = (n) => n.confirmed === 0 ? "被拒" : n.confirmed !== 1 ? "无需确认"
+  : ({policy: "策略放行", turn: "本轮已允许"})[n.approval_source] || "用户批准";
 const pill = (status, text) => `<span class="pill ${esc(status)}">${esc(text ?? STATUS[status] ?? status)}</span>`;
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
 async function api(path) {
-  const response = await fetch(path, {cache: "no-store"});
+  const headers = path.startsWith("/api/chat/") ? {"X-Zhiqiu-Token": WB.token} : {};
+  const response = await fetch(path, {cache: "no-store", headers});
   const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {method: "POST", cache: "no-store", body: JSON.stringify(body),
+    headers: {"Content-Type": "application/json", "X-Zhiqiu-Token": WB.token}});
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
 }
@@ -251,6 +320,8 @@ function setHead(title, sub = "", act = "") {
 }
 
 document.addEventListener("click", (event) => {
+  const respond = event.target.closest("[data-respond]");
+  if (respond) { chatRespond(respond); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) { go(`#${nav.dataset.view}`); return; }
   const trace = event.target.closest("[data-trace]");
@@ -454,7 +525,7 @@ function renderNode() {
     try { args = JSON.stringify(JSON.parse(args), null, 2); } catch (e) { /* keep raw */ }
     box.innerHTML = `<h3>${icon("tool", "k-tool")}工具 · ${esc(n.tool)}</h3>${pill(n.status === "ok" ? "ok" : n.status === "denied" ? "warn" : "error", n.status)}
       ${n.error_kind ? `<div class="errbox">${esc(n.error_kind)}</div>` : ""}
-      ${kv([["权限", esc(n.permission)], ["耗时", ms(n.latency_ms)], ["轮次", n.round ? `第 ${n.round} 轮` : ""], ["确认", n.confirmed === 1 ? "已确认" : n.confirmed === 0 ? "被拒" : "无需确认"],
+      ${kv([["权限", esc(n.permission)], ["耗时", ms(n.latency_ms)], ["轮次", n.round ? `第 ${n.round} 轮` : ""], ["审批", approvalLabel(n)],
         ["尝试次数", num(n.attempts)], ["结果条数", n.result_count ?? ""], ["输出字数", num(n.output_chars)], ["截断", n.truncated ? "是" : ""]])}
       <div class="faint" style="font-size:11.5px">参数摘要</div><pre class="code">${esc(args || "—")}</pre>`;
     return;
@@ -573,7 +644,8 @@ async function viewMetrics() {
     <div class="grid2"><div><h2>工具</h2><div class="card">${tools.length ? tools.map(([name, t]) => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)"><span class="mono">${esc(name)}</span><span>${Object.entries(t).filter(([k]) => k !== "calls").map(([k, v]) => pill(k === "ok" ? "ok" : k === "denied" ? "warn" : "error", `${k} ${v}`)).join(" ")}</span></div>`).join("") + `<div class="hint">重试率 ${pct(d.tools.retry_rate)} · 已确认执行 ${num(d.tools.confirmed)} 次</div>` : `<div class="empty">无</div>`}</div></div>
     <div><h2>护栏触发</h2><div class="card">${hbars(d.guardrails, (k) => RULE[k] || k)}</div></div>
     <div><h2>工具循环结束原因</h2><div class="card">${hbars(d.loops.end_reasons, (k) => END[k] || k)}</div></div>
-    <div><h2>人工介入</h2><div class="card">${kv([["确认次数", num(d.human.confirmations_asked)], ["确认被拒", `${num(d.human.denied_by_user)}（${pct(d.human.denial_rate)}）`],
+    <div><h2>人工介入</h2><div class="card">${kv([["策略放行", num(d.human.policy_allowed ?? 0)], ["用户批准", num(d.human.user_approved ?? 0)],
+      ["确认次数", num(d.human.confirmations_asked)], ["确认被拒", `${num(d.human.denied_by_user)}（${pct(d.human.denial_rate)}）`],
       ["提议", esc(Object.entries(d.human.proposals).map(([k, v]) => `${k} ${v}`).join("，") || "无")], ["人工改分", num(d.human.review_revisions)], ["评分延期", num(d.grading.deferred)]])}</div></div></div>`;
 }
 
@@ -596,6 +668,22 @@ async function viewChecks() {
     <span class="faint" style="margin-left:auto">检查 ${num(r.checked)} 项${r.failures ? `，失败 ${num(r.failures)}` : ""}</span></div><div class="muted" style="margin-top:4px;font-size:12.5px">${esc(r.note)}</div>
     ${r.evidence.length ? `<pre class="code">${r.evidence.map((e) => esc(JSON.stringify(e))).join("\n")}</pre>` : ""}</div>`).join("") +
     `<div class="hint">全部通过只说明程序守住了规则，不代表讲解或评分的质量。没有可检查的数据时显示“证据不足”。</div>`;
+}
+
+async function viewApprovals() {
+  const d = await api(`/api/approvals?days=${S.days}`);
+  const counts = Object.entries(APPROVAL).map(([k, [, label]]) => `${label} ${num(d.counts[k] || 0)}`).join(" · ");
+  setHead("审批", `最近 ${S.days} 天 · ${counts}`, d.pending ? pill("running", `${d.pending} 项待审批`) : "");
+  // The content column takes the remaining width and truncates (max-width:0 lets a table cell shrink).
+  const nw = 'style="white-space:nowrap"';
+  $("#view").innerHTML = `<div class="card" style="padding:4px 8px">${d.approvals.length ? `<table><thead><tr><th ${nw}>发起</th><th ${nw}>工具</th><th>内容</th><th ${nw}>结果</th><th ${nw}>决定于</th><th class="num" ${nw}>等待</th><th></th></tr></thead><tbody>` +
+    d.approvals.map((a) => { const [cls, label] = APPROVAL[a.status] || ["", a.status];
+      return `<tr><td class="faint" ${nw}>${clock(a.created_at_ns)}</td><td class="mono" ${nw}>${esc(a.tool)}<div class="faint" style="font-size:11px">${esc(a.permission || "")}</div></td>
+      <td style="max-width:0;width:100%"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.title)}">${esc(a.title)}</div></td>
+      <td ${nw}>${pill(cls, label)}</td><td ${nw}>${esc(VIA[a.decided_via] || "—")}</td><td class="num" ${nw}>${a.wait_ms == null ? "—" : ms(a.wait_ms)}</td>
+      <td ${nw}>${a.trace_id ? `<a class="lnk" data-trace="${esc(a.trace_id)}">trace →</a>` : ""}</td></tr>`; }).join("") +
+    "</tbody></table>" : `<div class="empty">这段时间没有需要审批的动作。策略自动放行的调用不在这里，见 Trace 中的“策略放行”。</div>`}</div>
+    <div class="hint">每次询问都记一条，终端与网页共用；只保存描述的第一行和参数摘要，不保存写入的内容。</div>`;
 }
 
 async function viewLearn() {
@@ -629,11 +717,270 @@ async function viewAttempt(id) {
       <span>${esc(e.payload.entity)} ${esc(e.payload.from ?? "新建")} → <b>${esc(e.payload.to)}</b></span><span class="faint">${esc(e.payload.cause)}</span></div>`).join("") || `<div class="empty">没有记录。</div>`}</div>`;
 }
 
+// ----- workbench chat ---------------------------------------------------------------------
+
+// Markdown for the model's answers. Everything is escaped first; only these few constructs then become
+// tags, built from already-escaped text, so no HTML from an answer can run. Links show their address as text.
+function md(source) {
+  const inline = (s) => s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1（$2）");
+  const cells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const lines = esc(source).split("\n");
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length) { out.push(`<p>${para.map(inline).join("<br>")}</p>`); para = []; } };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flush();
+      const code = [];
+      for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]);
+      out.push(`<pre class="code"><code>${code.join("\n")}</code></pre>`);
+    } else if (/^#{1,4}\s/.test(line)) {
+      flush();
+      const level = line.match(/^#+/)[0].length;
+      out.push(`<div class="h h${level}">${inline(line.replace(/^#+\s*/, ""))}</div>`);
+    } else if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      flush();
+      const head = cells(line);
+      const rows = [];
+      for (i += 2; i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]); i++) rows.push(cells(lines[i]));
+      i--;
+      out.push(`<table><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>` +
+        rows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("") + "</tbody></table>");
+    } else if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      flush();
+      const ordered = /^\s*\d+\./.test(line);
+      const items = [];
+      for (; i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i]); i++) items.push(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, ""));
+      i--;
+      out.push(`<${ordered ? "ol" : "ul"}>${items.map((x) => `<li>${inline(x)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`);
+    } else if (!line.trim()) {
+      flush();
+    } else {
+      para.push(line);
+    }
+  }
+  flush();
+  return `<div class="md">${out.join("")}</div>`;
+}
+
+// Chat state: the last event seen, the prompt cards by request id, and what is waiting now.
+const C = {mounted: false, after: 0, cards: {}, ask: null, busy: false, pending: [], tick: 0, sending: false};
+// Lines the agent says about tools rather than to the user.
+const TOOL_NOTE = /（(自动|本轮已允许)）$/;
+
+function chatMount() {
+  setHead("对话", "加载中…");
+  $("#view").innerHTML = `<div class="chatgrid"><div class="chatmain"><div class="stream" id="stream"></div>
+    <div class="composer"><div class="askbar" id="askbar" hidden></div>
+      <div class="line"><textarea id="say" rows="1" placeholder="和知秋说点什么（/help 查看命令，Shift+Enter 换行）"></textarea>
+        <button class="btn primary" id="send">发送</button><button class="btn" id="stop" disabled title="停止正在等待的提问或审批">停止</button></div>
+      <div class="state" id="cstate"></div></div></div>
+    <details class="spanel" id="spanel"${matchMedia("(max-width: 860px)").matches ? "" : " open"}><summary>当前状态（目标、上下文、风险动作、结果）</summary><div id="spbody"><div class="faint">加载中…</div></div></details></div>`;
+  Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: []});
+  $("#say").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); } });
+  $("#send").addEventListener("click", chatSend);
+  $("#stop").addEventListener("click", async () => { try { await post("/api/chat/stop", {}); chatTick(true); } catch (e) { chatNote(e.message, true); } });
+}
+
+function chatAppend(html) {
+  const stream = $("#stream");
+  if (!stream) return null;
+  const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+  stream.insertAdjacentHTML("beforeend", html);
+  if (nearBottom) main.scrollTop = main.scrollHeight;
+  return stream.lastElementChild;
+}
+
+function chatNote(text, error = false) {
+  chatAppend(`<div class="note${error ? " err" : ""}">${esc(text)}</div>`);
+}
+
+function promptCard(e) {
+  const buttons = (yes, no) => `<div class="acts"><button class="btn primary" data-respond="${esc(e.request_id)}" data-value="true">${yes}</button>
+    <button class="btn danger" data-respond="${esc(e.request_id)}" data-value="false">${no}</button></div>`;
+  if (e.kind === "approval") {
+    return `<div class="acard" data-card="${esc(e.request_id)}"><div class="head">${icon("guard", "k-guard")}需要你批准：<span class="mono">${esc(e.tool)}</span>${pill("warn", e.permission)}</div>
+      <pre class="code">${esc(e.text)}</pre>${buttons("批准", "拒绝")}</div>`;
+  }
+  if (e.kind === "confirm") {
+    return `<div class="acard ask" data-card="${esc(e.request_id)}"><div class="head">${esc(e.text)}</div>${buttons("是", "否")}</div>`;
+  }
+  return `<div class="note" data-card="${esc(e.request_id)}">${icon("turn")}<span>${esc(e.prompt)}</span></div>`;
+}
+
+function resolveCard(e) {
+  const card = document.querySelector(`[data-card="${CSS.escape(e.request_id)}"]`);
+  const kind = card ? (card.classList.contains("acard") ? (card.querySelector(".k-guard") ? "approval" : "confirm") : "ask") : null;
+  const stopped = {stopped: "已停止", timeout: "超时未回答，已停止"}[e.reason];
+  if (card && kind !== "ask") {
+    card.classList.add("done");
+    card.querySelector(".acts")?.remove();
+    const label = stopped || (kind === "approval" ? (e.value ? "已批准（网页）" : "已拒绝（网页）") : (e.value ? "是" : "否"));
+    card.insertAdjacentHTML("beforeend", `<div class="result">${esc(label)} · ${clock(e.at_ns)}</div>`);
+  } else if (stopped) {
+    chatNote(stopped);
+  } else if (typeof e.value === "string") {
+    chatAppend(`<div class="bubble user">${esc(e.value)}</div>`);
+  }
+  if (C.ask === e.request_id) C.ask = null;
+}
+
+function chatEvent(e) {
+  if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}</div>`);
+  else if (e.kind === "say") {
+    if (TOOL_NOTE.test(e.text) || /^对话 [0-9a-f-]{36}/.test(e.text)) chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${esc(e.text)}</span></div>`);
+    else {
+      // Lines said one after another (a lesson, a grading report) belong in one bubble.
+      const last = $("#stream")?.lastElementChild;
+      if (last && last.matches(".bubble.bot:not(.old)")) {
+        const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+        last.insertAdjacentHTML("beforeend", md(e.text));
+        if (nearBottom) main.scrollTop = main.scrollHeight;
+      } else chatAppend(`<div class="bubble bot">${md(e.text)}</div>`);
+    }
+  } else if (e.kind in {ask: 1, confirm: 1, approval: 1}) {
+    chatAppend(promptCard(e));
+    if (e.kind === "ask") C.ask = e.request_id;
+  } else if (e.kind === "resolved") resolveCard(e);
+  else if (e.kind === "status") chatNote(e.text);
+  else if (e.kind === "error") chatNote(e.text, true);
+}
+
+async function chatHistory() {
+  const h = await api("/api/chat/history");
+  if (!h.messages.length) return;
+  chatAppend(`<div class="divider">之前的消息</div>`);
+  for (const m of h.messages) {
+    if (m.role === "user") chatAppend(`<div class="bubble user old">${esc(m.content)}</div>`);
+    else if (m.kind === "chat") chatAppend(`<div class="bubble bot old">${md(m.content)}</div>`);
+    else chatNote(m.content, m.kind === "error");
+  }
+  chatAppend(`<div class="divider">本次工作台</div>`);
+}
+
+async function chatState() {
+  const waiting = C.pending.length;
+  $("#stop").disabled = !waiting;
+  $("#send").disabled = C.sending || (C.busy && !C.ask);
+  const bar = $("#askbar");
+  const prompt = C.ask && C.pending.find((p) => p.request_id === C.ask);
+  bar.hidden = !prompt;
+  bar.textContent = prompt ? `需要你回答：${prompt.prompt}` : "";
+  $("#say").placeholder = prompt ? "在这里输入回答（Enter 发送）" : C.busy ? "知秋正在处理上一条…" : "和知秋说点什么（/help 查看命令，Shift+Enter 换行）";
+  let state = "";
+  if (waiting) state = `<span class="dot live"></span>等待你${C.pending.some((p) => p.kind === "approval") ? "批准" : "回答"}`;
+  else if (C.busy) {
+    let step = "";
+    try {
+      const live = await api("/api/live");
+      const run = live.running[0];
+      if (run) step = run.chain.map(spanLabel).slice(-2).join(" › ") + (progressText(run.chain.at(-1).progress) ? ` · ${progressText(run.chain.at(-1).progress)}` : "");
+    } catch (e) { /* the step is only a hint */ }
+    state = `<span class="dot live"></span>知秋正在思考…${step ? ` <span class="mono">${esc(step)}</span>` : ""}`;
+  }
+  $("#cstate").innerHTML = state;
+}
+
+const MODE = {chat: "对话", lesson: "讲解", self_test: "自测", review: "复习"};
+
+// The status panel follows the L6 guideline: goal, context in scope, what runs, risky actions, results.
+async function chatPanel() {
+  const d = await api("/api/chat/state");
+  const body = $("#spbody");
+  if (!body) return;
+  const list = (items, empty) => items.length ? items.map((p) => `<div class="path">${esc(p)}</div>`).join("") : `<span class="faint">${empty}</span>`;
+  const g = d.goal;
+  const goal = g ? `<div class="big">${esc(MODE[g.mode] || g.mode)}</div>
+    ${g.goal ? `<div>${esc(g.goal)}</div>` : `<div class="faint">没有进行中的流程</div>`}${g.step && g.step !== g.mode ? `<div class="faint">步骤：${esc(MODE[g.step] || g.step)}</div>` : ""}` : `<span class="faint">没有对话</span>`;
+  const c = d.context;
+  const context = `<dl class="kv"><dt>可读</dt><dd>${list(c.read_roots, "未配置，不能读文件")}</dd><dt>可写</dt><dd>${list(c.write_roots, "未配置，不能写文件")}</dd>
+    <dt>记忆</dt><dd>${num(c.memories)} 条（本段对话开始时的快照）</dd><dt>摘要</dt><dd>${c.summarized ? "较早的对话已摘要" : "无"}</dd>
+    <dt>联网</dt><dd>${c.network ? "可用" : "已关闭（--offline）"}</dd></dl>`;
+  const running = d.running.length ? d.running.map((run) => {
+    const last = run.chain.at(-1);
+    return `<div><span class="dot live"></span> ${esc(run.chain.map(spanLabel).join(" › "))}</div>
+      ${progressText(last.progress) ? `<div class="faint">${esc(progressText(last.progress))}</div>` : ""}
+      <div class="faint">已用 ${ms(run.elapsed_ms)} · 模型调用 ${num(run.llm_calls)} 次 · <a class="lnk" data-trace="${esc(run.trace_id)}">trace →</a></div>`;
+  }).join("") : `<span class="faint">${d.pending ? "等待你回答" : "空闲"}</span>`;
+  const r = d.risk;
+  const risk = `<div>${esc(r.policy_text || "—")}</div>
+    ${r.pending.length ? r.pending.map((p) => `<div class="li"><span class="dot live"></span><span>${p.kind === "approval" ? `待批准 <span class="mono">${esc(p.tool)}</span>` : esc(p.text)}</span></div>`).join("") : ""}
+    ${r.recent.length ? `<div class="faint" style="margin-top:6px">最近的审批</div>` + r.recent.map((a) => {
+      const [cls, label] = APPROVAL[a.status] || ["", a.status];
+      return `<div class="li">${pill(cls, label)}<span class="mono">${esc(a.tool)}</span><span class="faint" style="margin-left:auto">${clock(a.created_at_ns).slice(-8)}</span></div>`;
+    }).join("") : `<div class="faint" style="margin-top:4px">本段对话还没有询问过你</div>`}`;
+  const res = d.result;
+  const result = (res ? `${res.total != null ? `<div class="big">${res.total}<span class="faint" style="font-size:12px"> / 100</span></div>` : ""}
+      <div>${esc(res.summary)}</div>${res.next_review ? `<div class="faint">下次复习 ${esc(res.next_review)}</div>` : ""}
+      ${res.attempt_id ? `<a class="lnk" data-attempt="${esc(res.attempt_id)}">学习记录 →</a>` : ""}`
+    : `<span class="faint">本段对话还没有学习或复习结果</span>`) +
+    `<div style="margin-top:8px">${d.verification.passed == null ? `<span class="faint">还没有可检查的运行记录</span>`
+      : d.verification.passed ? `${pill("pass", "契约无违反")} <span class="faint">${num(d.verification.traces)} 条 trace</span>`
+      : `${pill("fail", "有违反")} <span class="mono">${esc(d.verification.failed.join("、"))}</span> <a class="lnk" data-view="checks">查看 →</a>`}</div>`;
+  const section = (title, iconName, html) => `<section><h4>${icon(iconName)}${title}</h4>${html}</section>`;
+  body.innerHTML = section("当前目标", "flow", goal) + section("上下文范围", "book", context) + section("执行状态", "activity", running) +
+    section("风险动作", "guard", risk) + section("验证结果", "shield", result);
+}
+
+async function chatTick(force = false) {
+  if (!C.mounted) {
+    chatMount();
+    await chatHistory().catch((e) => chatNote(`读取之前的消息失败：${e.message}`, true));
+  }
+  // Every second while something runs or waits; every third second when idle.
+  C.tick++;
+  if (!force && !C.busy && !C.pending.length && C.after && C.tick % 3) return;
+  const d = await api(`/api/chat/events?after=${C.after}`);
+  if (d.events.length && d.events[0].seq > C.after + 1 && C.after) chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
+  for (const e of d.events) chatEvent(e);
+  C.after = d.next;
+  C.busy = d.busy;
+  C.pending = d.pending;
+  if (C.ask && !C.pending.some((p) => p.request_id === C.ask)) C.ask = null;
+  setHead("对话", d.conversation_id ? `对话 ${d.conversation_id}` : "", C.pending.length ? pill("running", "等待你") : C.busy ? pill("running", "处理中") : pill("ok", "空闲"));
+  await chatState();
+  // The panel reads the database, so it refreshes less often than the event stream.
+  if (force || d.events.length || C.tick % 3 === 0) await chatPanel().catch((e) => pulse(e.message));
+}
+
+async function chatSend() {
+  const box = $("#say");
+  const text = box.value.trim();
+  if (!text || C.sending) return;
+  C.sending = true;
+  try {
+    if (C.ask) await post("/api/chat/respond", {request_id: C.ask, value: text});
+    else await post("/api/chat/input", {text});
+    box.value = "";
+  } catch (e) {
+    chatNote(`没有发出：${e.message}`, true);
+  } finally {
+    C.sending = false;
+  }
+  await chatTick(true).catch((e) => pulse(e.message));
+  box.focus();
+}
+
+async function chatRespond(button) {
+  const card = button.closest(".acard");
+  card?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  try {
+    await post("/api/chat/respond", {request_id: button.dataset.respond, value: button.dataset.value === "true"});
+  } catch (e) {
+    chatNote(`回答失败：${e.message}`, true);
+    card?.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+  }
+  await chatTick(true).catch((e) => pulse(e.message));
+}
+
 async function summary() {
   try {
     const s = await api(`/api/summary?days=${S.days}`);
     const set = (id, v, cls = "") => { const node = $(id); node.textContent = v ? num(v) : ""; node.className = "n " + cls; };
     set("#n-live", s.running, "live"); set("#n-traces", s.traces); set("#n-failures", s.failures, "hot"); set("#n-learn", s.attempts);
+    set("#n-approvals", s.approvals_pending, "hot");
   } catch (e) { /* the view's own poll reports errors */ }
 }
 
@@ -651,9 +998,10 @@ function schedule(fn, every) {
 
 const main = document.querySelector("main");
 function route() {
-  const [view, arg] = (location.hash.slice(1) || "live").split("/");
-  S.view = view === "trace" ? "traces" : view in VIEWS ? view : "live";
+  const [view, arg] = (location.hash.slice(1) || DEFAULT_VIEW).split("/");
+  S.view = view === "trace" ? "traces" : view in VIEWS ? view : DEFAULT_VIEW;
   S.arg = arg ? decodeURIComponent(arg) : null;
+  C.mounted = false;  // the chat rebuilds from its events whenever it is shown again
   main.scrollTop = 0;
   if (view === "trace" && S.arg) {
     let first = true;
@@ -661,11 +1009,18 @@ function route() {
   } else if (view === "learn" && S.arg) {
     schedule(() => viewAttempt(S.arg), 0);
   } else {
-    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], learn: [viewLearn, 15000]};
+    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], approvals: [viewApprovals, 5000], learn: [viewLearn, 15000], chat: [chatTick, 1000]};
     schedule(...loaders[S.view]);
   }
 }
 
+if (WB.on) {
+  // The workbench adds the chat on top of the observation pages; the read-only dashboard never shows it.
+  document.title = "知秋工作台";
+  document.querySelector(".brand small").textContent = "工作台 · 仅本机";
+  document.querySelector(".brand").insertAdjacentHTML("afterend",
+    `<div class="grp">工作台</div><a data-view="chat">${icon("turn")}对话</a>`);
+}
 window.addEventListener("hashchange", route);
 $("#days").addEventListener("change", (e) => { S.days = Number(e.target.value); summary(); route(); });
 setInterval(summary, 10000);

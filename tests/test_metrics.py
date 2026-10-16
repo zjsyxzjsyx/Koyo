@@ -20,10 +20,10 @@ def llm(store, stage, latency, tokens_in=100, tokens_out=10, cached=0, status="o
                            "started_at_ns": tracing.now_ns()})
 
 
-def tool(store, name, status, confirmed=None, attempts=1):
-    store.record_tool_call({"id": f"{name}-{status}-{attempts}-{confirmed}", "tool": name, "status": status,
+def tool(store, name, status, confirmed=None, attempts=1, source=None):
+    store.record_tool_call({"id": f"{name}-{status}-{attempts}-{confirmed}-{source}", "tool": name, "status": status,
                             "confirmed": confirmed, "attempts": attempts, "latency_ms": 3, "output_chars": 0,
-                            "started_at_ns": tracing.now_ns()})
+                            "started_at_ns": tracing.now_ns(), "approval_source": source})
 
 
 def test_cached_tokens_reads_deepseek_and_openai_usage():
@@ -82,6 +82,9 @@ def test_collect_aggregates_models_tools_loops_humans_and_guardrails(tmp_path, m
         tool(store, "web_search", "ok", confirmed=True, attempts=2)
         tool(store, "web_search", "denied")
         tool(store, "zhiqiu_status", "ok")
+        # Approved by the policy, and by an earlier answer in the same turn: neither was asked.
+        tool(store, "fetch_url", "ok", confirmed=True, source="policy")
+        tool(store, "fetch_url", "ok", confirmed=True, source="turn")
         store.record_event(None, None, "GuardrailTriggered", {"rule": "confirmation_denied", "action": "denied_by_user"})
         store.record_event(None, None, "GuardrailTriggered", {"rule": "leak_check", "action": "blocked"})
         store.record_event(None, None, "ReviewRevised", {})
@@ -97,9 +100,12 @@ def test_collect_aggregates_models_tools_loops_humans_and_guardrails(tmp_path, m
     assert grade["cost"] == pytest.approx((400 * 2 + 40 * 8) / 1e6)
     assert model["cache_hit_rate"] == pytest.approx(200 / 500)
     assert data["tools"]["by_tool"]["web_search"] == {"calls": 3, "ok": 2, "denied": 1}
-    assert data["tools"]["retried"] == 1 and data["tools"]["confirmed"] == 2
+    assert data["tools"]["retried"] == 1 and data["tools"]["confirmed"] == 4
     assert data["human"] == {"confirmations_asked": 3, "denied_by_user": 1, "denial_rate": 0.3333,
-                             "proposals": {}, "review_revisions": 1}
+                             "proposals": {}, "review_revisions": 1, "policy_allowed": 1, "user_approved": 3,
+                             "approvals_by_tool": {"fetch_url": {"policy_allowed": 1, "user_approved": 1},
+                                                   "web_search": {"user_approved": 2}}}
+    assert "策略放行 1 次，用户批准 3 次" in metrics.render(data)
     assert data["guardrails"] == {"confirmation_denied": 1, "leak_check": 1}
     assert data["loops"]["end_reasons"] == {"max_rounds": 1}
     assert data["flows"] == {"turn:chat": {"done": 1}}

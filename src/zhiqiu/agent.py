@@ -19,18 +19,20 @@ import httpx
 
 from . import guardrails, tracing
 from . import history as history_search
+from .approvals import ApprovalPolicy
 from .context import ContextBudgetError, ContextTask
 from .conversations import Conversations
 from .files import read_root_file_spec
 from .flow import IllegalTransition
-from .flows import FlowInterrupted, FlowIO, resume_lesson, run_lesson, run_quiz, show_outcome, summarize_outcome
+from .flows import (FlowInterrupted, FlowIO, outbound_lines, preapproved, resume_lesson, run_lesson, run_quiz,
+                    show_outcome, summarize_outcome)
 from .materials import Material
 from .memory import MemoryService
 from .model import ModelContextOverflowError
 from .queries import status as status_query
 from .store import Store
 from .toolloop import LOOP_SECONDS, MAX_ROUNDS, LoopResult, ToolLoop, query_leak_check
-from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
+from .tools import Approval, ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec, summarize_args
 
 CHAT_PERMISSIONS = frozenset({"read", "network", "write_file", "external_mcp", "propose"})
 PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory"})
@@ -40,6 +42,8 @@ MEMORY_ITEM_CHARS = 300
 MEMORY_TOTAL_CHARS = 2000
 # Once the user allows one of these tools in a turn, its later calls in the same turn run without asking again.
 TURN_APPROVAL_PERMISSIONS = frozenset({"network"})
+# How the context describes network access under each approval decision for the network class.
+NETWORK_TEXT = {"allow": "可用，自动执行", "ask": "可用，每次需用户批准", "deny": "已被审批策略禁止"}
 # Unsummarized history beyond this count is summarized when no input budget is configured.
 HISTORY_MESSAGES = 40
 # With a budget, summarize once unsummarized history pushes the request past this share of it.
@@ -69,8 +73,17 @@ class ChatIO:
     def confirm(self, text: str) -> bool:
         return self.inner.confirm(text)
 
-    def confirm_tool(self, spec: Any, args: dict[str, Any]) -> bool:
+    def confirm_tool(self, spec: Any, args: dict[str, Any], request_id: str | None = None) -> bool:
+        # An IO that shows approvals as records of their own (the web workbench) gets the request id.
+        hook = getattr(self.inner, "confirm_request", None)
+        if request_id and callable(hook):
+            return hook(spec, args, request_id)
         return self.inner.confirm_tool(spec, args)
+
+    @property
+    def channel(self) -> str:
+        """Which interface answers prompts ("terminal" or "web"), recorded with each approval."""
+        return getattr(self.inner, "channel", "terminal")
 
     def stage(self, mode: str, active_kind: str, active_id: str) -> None:
         self.on_stage(mode, active_kind, active_id)
@@ -103,10 +116,21 @@ def _split_command(text: str) -> list[str]:
             for part in shlex.split(text, posix=False)]
 
 
+class _Runner:
+    """A flow to run once the user accepts a proposal; `notice` is shown with the proposal before asking."""
+
+    def __init__(self, run: Callable[[], Any], notice: Sequence[str] = ()):
+        self.run, self.notice = run, list(notice)
+
+    def __call__(self) -> Any:
+        return self.run()
+
+
 class ChatAgent:
     def __init__(self, store: Store, service: Any, io: FlowIO, *, read_roots: Sequence[Path] = (),
                  write_roots: Sequence[Path] = (), offline: bool = False,
-                 max_rounds: int = MAX_ROUNDS, deadline_s: float = LOOP_SECONDS):
+                 max_rounds: int = MAX_ROUNDS, deadline_s: float = LOOP_SECONDS,
+                 policy: ApprovalPolicy | None = None):
         self.store = store
         self.service = service
         self.chats = Conversations(store)
@@ -116,6 +140,8 @@ class ChatAgent:
         self.offline = offline
         self.max_rounds = max_rounds
         self.deadline_s = deadline_s
+        # Which governed tools run without asking, need the user's approval, or are withheld.
+        self.policy = policy or ApprovalPolicy()
         self.io = ChatIO(io, self._on_stage)
         # Private text read in this run; outgoing tool arguments may not copy it.
         self.private: list[Material] = []
@@ -128,7 +154,7 @@ class ChatAgent:
             if spec.name in ("read_file", "notion_page") or not spec.in_loops:
                 continue
             if spec.permission in ("network", "external_mcp"):
-                # Outside learn there is no up-front consent, so every outgoing call is confirmed.
+                # Every outgoing call passes the gate, where _confirm_tool applies the approval policy.
                 spec = replace(spec, requires_confirmation=True, describe=_describe_external(spec))
             self.registry.register(spec)
         self.registry.register(read_root_file_spec(self.read_roots, self.private.append))
@@ -137,7 +163,10 @@ class ChatAgent:
                 store, lambda: self.conversation["id"] if self.conversation else None))
         for spec in self._proposal_specs():
             self.registry.register(spec)
-        self.executor = ToolExecutor(self.registry, audit=store.record_tool_call)
+        # The approval request opened for the call being gated; its audit row links back to it.
+        self._asked: str | None = None
+        self.executor = ToolExecutor(self.registry, audit=self._audit)
+        self.policy_warnings = self.policy.check(self.registry.specs())
 
     # ----- conversation lifecycle -------------------------------------------------
 
@@ -153,10 +182,14 @@ class ChatAgent:
         self.conversation = (self.chats.reopen(resume_id) if resume_id
                              else self.chats.open_today(self._snapshot(), self._status()))
         self.chats.reconcile(self.conversation_id)
+        # Nobody is waiting on a request left pending by an earlier run of this conversation.
+        self.store.cancel_stale_approvals(self.conversation_id)
         # The status in the prompt is a snapshot; refreshing it only here and after flows keeps
         # the request prefix stable in between.
         self.chats.set_status_snapshot(self.conversation_id, self._status())
         self.conversation = self.chats.get(self.conversation_id)
+        for warning in self.policy_warnings:
+            self.io.say(warning)
         state = self.store.status()
         if state["open_attempts"] or self.store.pending_lessons():
             self.io.say("有未完成的自测或讲解：可以直接说“继续”，或输入 /resume。")
@@ -190,6 +223,7 @@ class ChatAgent:
                 self._command(text)
             return
         with tracing.span(self.store, "turn", "chat", conversation_id=self.conversation_id) as span:
+            span.set(approval_policy=self.policy.fingerprint())
             span.set(end_reason=self._turn(text))
 
     def _turn(self, text: str) -> str:
@@ -238,10 +272,12 @@ class ChatAgent:
         snapshot = json.loads(conversation["memory_snapshot_json"])
         memory = "\n".join(f"- {item['key']}: {item['content']}" for item in snapshot) or "（无）"
         readable = "；".join(str(root) for root in self.read_roots) or "（未配置，不能读文件）"
-        writable = "；".join(str(root) for root in self.write_roots) or "（未配置，不能写文件）"
+        writable = ("；".join(str(root) for root in self.write_roots) + f"（写入{self.policy.describe('write_file')}）"
+                    if self.write_roots else "（未配置，不能写文件）")
+        network = "已关闭（--offline）" if self.offline else NETWORK_TEXT[self.policy.permissions["network"]]
         return (f"今天：{today}\n学习状态（快照，最新状态请调用 zhiqiu_status）：{status}\n"
                 f"偏好与人设记忆（本段对话开始时的快照）：\n{memory}\n"
-                f"可读目录：{readable}\n可写目录：{writable}\n联网：{'已关闭（--offline）' if self.offline else '可用（由程序向用户确认）'}")
+                f"可读目录：{readable}\n可写目录：{writable}\n联网：{network}")
 
     def _history(self, summary: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Messages after the latest summary, without the current input; oldest first."""
@@ -259,17 +295,44 @@ class ChatAgent:
                 items.append({"id": message["id"], "seq": message["seq"], "role": "assistant", "content": note})
         return items
 
-    def _confirm_tool(self, spec: ToolSpec, args: dict[str, Any]) -> bool:
-        """One approval covers the same network tool for the rest of the turn; each call is still shown."""
+    def _confirm_tool(self, spec: ToolSpec, args: dict[str, Any]) -> Approval:
+        """Apply the approval policy. When asking, one approval covers the same network tool for the
+        rest of the turn. Each call is still shown, and the answer says who let it through."""
+        if self.policy.decide(spec) == "allow":
+            self.io.say((spec.describe(args) if spec.describe else f"工具 {spec.name}") + "（自动）")
+            return Approval(True, "policy")
         if spec.permission in TURN_APPROVAL_PERMISSIONS and spec.name in self._approved:
             self.io.say((spec.describe(args) if spec.describe else f"工具 {spec.name}") + "（本轮已允许）")
-            return True
-        approved = self.io.confirm_tool(spec, args) is True
+            return Approval(True, "turn")
+        title = (spec.describe(args) if spec.describe else f"工具 {spec.name}").splitlines()[0]
+        summary = summarize_args(args)
+        if isinstance(args.get("content"), str):
+            # What would be written is the user's content; the request keeps only its size.
+            summary["content"] = f"（{len(args['content'])} 字，不保存）"
+        request = self.store.open_approval(spec.name, spec.permission, title, summary, self.conversation_id)
+        self._asked = request
+        try:
+            approved = self.io.confirm_tool(spec, args, request) is True
+        except BaseException as exc:
+            self.store.cancel_approval(request)
+            if not isinstance(exc, Exception):
+                # Ctrl+C leaves the executor without an audit row to link this request to.
+                self._asked = None
+            raise
+        self.store.decide_approval(request, approved, self.io.channel)
         if approved and spec.permission in TURN_APPROVAL_PERMISSIONS:
             self._approved.add(spec.name)
-        return approved
+        return Approval(approved, "user")
+
+    def _audit(self, details: dict[str, Any]) -> None:
+        self.store.record_tool_call(details)
+        if self._asked:
+            self.store.link_approval(self._asked, details["id"])
+            self._asked = None
 
     def _check(self, spec: ToolSpec, args: dict[str, Any]) -> None:
+        if self.policy.decide(spec) == "deny":
+            raise ToolError("denied", f"审批策略禁止使用 {spec.name}", rule="policy_denied")
         if spec.permission in ("network", "external_mcp"):
             query_leak_check(list(self.private))(spec, args)
 
@@ -278,6 +341,8 @@ class ChatAgent:
         for name in self.registry.names():
             spec = self.registry.get(name)
             if self.offline and spec.permission in ("network", "external_mcp"):
+                continue
+            if self.policy.decide(spec) == "deny":
                 continue
             names.append(name)
         return names
@@ -290,6 +355,7 @@ class ChatAgent:
         summary, history = self._summary_and_history(context, text)
         request = self.service.context.build_chat(context, history, text, self.conversation_id, summary)
         self._approved = set()
+        self._asked = None
         scope = ToolScope(CHAT_PERMISSIONS, confirm=self._confirm_tool, check=self._check,
                           conversation_id=self.conversation_id)
         loop = ToolLoop(model, self.service.context, self.registry, self.executor, self.max_rounds, self.deadline_s)
@@ -431,8 +497,18 @@ class ChatAgent:
         source = self._learn_path(path, typed) if path else None
         where = "；".join(([str(source)] if source else []) + urls + notion)
         description = f"开始学习“{point}”，资料：{where}"
-        return description, lambda: run_lesson(self.io, self.store, self.service, point, source=source,
-                                               urls=urls, notion_pages=notion, offline=self.offline)
+        outbound = getattr(self.service, "outbound", None)
+        if typed or not callable(outbound):
+            # A typed /learn asks once, inside the flow, what may be sent.
+            return description, lambda: run_lesson(self.io, self.store, self.service, point, source=source,
+                                                   urls=urls, notion_pages=notion, offline=self.offline)
+        # A proposal is confirmed once: the send-out list is shown with it, and the flow asks again
+        # only if what it would send turns out different.
+        plan = outbound(source, self.offline, urls=urls, notion_pages=notion)
+        lines = outbound_lines(plan.materials, plan.endpoint, plan.remote)
+        return description, _Runner(lambda: run_lesson(self.io, self.store, self.service, point, source=source,
+                                                        urls=urls, notion_pages=notion, offline=self.offline,
+                                                        approve=preapproved(self.io, lines)), lines)
 
     def _learn_path(self, path: str, typed: bool = False) -> Path:
         target = Path(path).expanduser()
@@ -540,6 +616,11 @@ class ChatAgent:
                                          {"tool": name, "args": args, "status": "pending",
                                           "loop_id": loop.loop_id if loop else None})
         self.io.say(f"建议：{description}" + (f"（{reason}）" if reason else ""))
+        notice = getattr(runner, "notice", [])
+        for line in notice:
+            self.io.say(line)
+        if notice:
+            self.io.say("开始学习即同意发送上面的资料，进入后不再另行确认。")
         if not self.io.confirm("要开始吗？"):
             self.chats.update_payload(message["id"], status="rejected")
             guardrails.record(self.store, "proposal_rejected", "denied_by_user", description, tool=name)

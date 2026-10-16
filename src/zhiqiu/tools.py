@@ -22,6 +22,8 @@ from .redact import redact
 PERMISSIONS = ("read", "network", "write_file", "external_mcp", "propose")
 ERROR_KINDS = ("invalid_args", "denied", "timeout", "network", "rate_limited", "upstream", "not_found", "internal")
 RETRYABLE = frozenset({"network", "timeout", "rate_limited"})
+# Who let a gated call through: the approval policy, the user now, or the user earlier in this turn.
+APPROVAL_SOURCES = ("policy", "user", "turn")
 _SECRET_MARKERS = ("key", "token", "secret", "password", "authorization", "cookie")
 _SUMMARY_CHARS = 200
 
@@ -67,11 +69,23 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
+class Approval:
+    """A confirmation callback's answer with its source; a plain bool is read as the user's answer."""
+
+    approved: bool
+    source: str = "user"
+
+    def __post_init__(self) -> None:
+        if self.source not in APPROVAL_SOURCES:
+            raise ValueError(f"unknown approval source: {self.source}")
+
+
+@dataclass(frozen=True)
 class ToolScope:
     """What one program step allows: permissions, the confirmation callback and trace links."""
 
     allowed: frozenset[str]
-    confirm: Callable[[ToolSpec, dict[str, Any]], bool] | None = None
+    confirm: Callable[[ToolSpec, dict[str, Any]], bool | Approval] | None = None
     # Step-specific argument rule run after schema validation, e.g. the query leak check.
     check: Callable[[ToolSpec, dict[str, Any]], None] | None = None
     # When set, only these tool names may run in the step.
@@ -230,7 +244,8 @@ class ToolExecutor:
         self.sleep = sleep
         self.backoff_s = backoff_s
 
-    def _gate(self, spec: ToolSpec, args: dict[str, Any], scope: ToolScope) -> bool | None:
+    def _gate(self, spec: ToolSpec, args: dict[str, Any], scope: ToolScope) -> Approval | None:
+        """None when the call needs no confirmation; otherwise the answer, approved or not."""
         if scope.names is not None and spec.name not in scope.names:
             raise ToolError("denied", f"本步骤不能使用工具 {spec.name}", rule="name_not_allowed")
         if spec.permission not in scope.allowed:
@@ -240,14 +255,14 @@ class ToolExecutor:
         if scope.confirm is None:
             raise ToolError("denied", f"{spec.name} 需要用户确认，当前环境无法确认", rule="confirmation_unavailable")
         try:
-            approved = scope.confirm(spec, args) is True
+            answer = scope.confirm(spec, args)
         except Exception as exc:
             # A broken confirmation path must never let the call through.
             raise ToolError("denied", f"{spec.name} 的确认失败：{type(exc).__name__}",
                             rule="confirmation_unavailable") from exc
-        if not approved:
-            raise ToolError("denied", f"用户拒绝了 {spec.name}", rule="confirmation_denied")
-        return True
+        if isinstance(answer, Approval):
+            return answer
+        return Approval(answer is True)
 
     def run(self, name: str, args: Any, scope: ToolScope) -> ToolResult:
         call_id = str(uuid.uuid4())
@@ -255,6 +270,7 @@ class ToolExecutor:
         spec = self.registry.get(name)
         attempts = 0
         confirmed: bool | None = None
+        approval_source: str | None = None
         record: dict[str, Any] = {"id": call_id, "tool": name, "source": spec.source if spec else None,
                                   "permission": spec.permission if spec else None,
                                   "kp_id": scope.kp_id, "attempt_id": scope.attempt_id,
@@ -275,7 +291,11 @@ class ToolExecutor:
                     raise
                 except Exception as exc:
                     raise ToolError("denied", f"{spec.name} 的参数检查失败：{type(exc).__name__}") from exc
-            confirmed = self._gate(spec, args, scope)
+            approval = self._gate(spec, args, scope)
+            if approval is not None:
+                confirmed, approval_source = approval.approved, approval.source
+                if not approval.approved:
+                    raise ToolError("denied", f"用户拒绝了 {spec.name}", rule="confirmation_denied")
             while True:
                 attempts += 1
                 try:
@@ -290,11 +310,14 @@ class ToolExecutor:
             if exc.rule:
                 action = "denied_by_user" if exc.rule == "confirmation_denied" else "blocked"
                 record["guard"] = guardrails.payload(exc.rule, action, str(exc), tool=name)
+            record["approval_source"] = approval_source
             self._audit(record, status, exc.kind, attempts, confirmed, began, None, 0, False)
             raise
         except Exception as exc:
+            record["approval_source"] = approval_source
             self._audit(record, "error", "internal", attempts, confirmed, began, None, 0, False)
             raise ToolError("internal", f"{name} 执行失败：{type(exc).__name__}") from exc
+        record["approval_source"] = approval_source
         value, truncated, count, chars = _truncate(value, spec.max_output_chars)
         self._audit(record, "ok", None, attempts, confirmed, began, count, chars, truncated)
         return ToolResult(value, call_id, attempts, truncated, count, chars)

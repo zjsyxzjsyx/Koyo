@@ -41,7 +41,12 @@ def test_accepted_learn_proposal_runs_lesson_and_quiz_then_returns_to_chat(tmp_p
     assert messages[-1][1] == "flow_result" and "完整评阅" in messages[-1][2]
     assert conversation_moves(store, agent.conversation_id) == [
         (None, "chat"), ("chat", "lesson"), ("lesson", "self_test"), ("self_test", "chat")]
-    assert "允许本次学习发送这些内容吗？" in io.said  # the learn consent is still asked
+    # The send-out list is shown with the proposal, so accepting it is the one consent.
+    sending = io.said.index("要开始吗？")
+    assert any(line.startswith("将把以下资料发送到模型端点") for line in io.said[:sending])
+    assert any(line.endswith("rbtree.md") and line.startswith("  ") for line in io.said[:sending])
+    assert "允许本次学习发送这些内容吗？" not in io.said and "发送资料已在开始前确认。" in io.said
+    assert store.db.execute("SELECT COUNT(*) FROM consents").fetchone()[0] == 1
     assert store.db.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0] == 1
 
 

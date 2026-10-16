@@ -24,6 +24,8 @@ RULES = {
     "permission_denied": "本步骤不允许的权限类别",
     "confirmation_denied": "用户拒绝了需要确认的操作",
     "confirmation_unavailable": "需要确认但当前环境无法确认",
+    "policy_denied": "审批策略禁止的工具",
+    "web_request_refused": "工作台拒绝了不合规的网页请求",
     "proposal_rejected": "用户拒绝了模型的建议",
     "proposal_refused": "建议未通过执行前校验",
     "memory_limit": "记忆的前缀或字数超限",

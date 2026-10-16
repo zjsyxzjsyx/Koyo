@@ -11,6 +11,8 @@
 - **评分质量检查**：人工标注模板与一致率核对工具，用于验证模型评分与人工判断的一致性。
 - **对话与运行时**（V4）：默认自由对话（有界 ReAct 循环，可用全部工具）；模型只能“提议”进入流程或记住偏好，由用户确认、程序执行。业务状态和对话模式都有显式的状态转换表，每次迁移写事件，中断后读状态字段恢复。
 - **观测与治理**（V5）：每轮对话或每次命令一条 trace（span 树，开始时即落库）；`zhiqiu dashboard` 本地网页看板实时显示运行到哪一步，并有 trace 瀑布图、指标与花费、学习记录；`metrics` 汇总成功率、延迟、token、花费与人工确认；护栏每次触发写 `GuardrailTriggered`，密钥按值集中脱敏；`check` 对真实记录做运行契约检查，`failures` 分类失败并可导出为回归样例；`gate` 是发布门禁。见“观测与治理”。
+- **界面与审批**（V6）：对话中的联网、外部 MCP、写文件按审批策略自动执行、询问或不提供（默认联网自动、其余询问，`ZHIQIU_APPROVAL_CONFIG` 可改，写文件不能自动）；每次放行记下来源（策略、用户、本轮已允许），每次询问留一条审批记录。`zhiqiu web` 本地网页工作台：在浏览器里对话、走完学习与复习、在卡片上批准或拒绝动作，右侧状态面板显示当前目标、上下文范围、执行状态、风险动作与验证结果；写接口只接受本机页面带令牌的请求。见“审批策略”“网页工作台”。
+- **循序渐进的讲解**（6.1）：讲解分成 3–5 节逐节显示，每节一个小目标、结尾一个检查问题，说“继续”看下一节、说“学完了”开始自测；澄清只回答当前问题，不复述内部状态，也不宣布程序动作；对话中提议学习时一并列出要发送的资料，确认一次即可。见“讲解方式”。
 
 ## 项目结构与职责
 
@@ -19,8 +21,11 @@
 ├─ src/zhiqiu/
 │  ├─ cli.py          CLI 命令、终端输入输出与用户确认
 │  ├─ agent.py        `zhiqiu chat` 对话外壳：有界 ReAct 循环、提议与确认、斜杠命令
+│  ├─ approvals.py    对话审批策略：联网、外部 MCP、写文件按 allow／ask／deny 执行
+│  ├─ webio.py        网页工作台的 FlowIO（事件日志、等待网页回答的提示）与运行对话的工作线程
 │  ├─ conversations.py 对话与对话消息的保存、按天划分、模式切换与删除
 │  ├─ flows.py        讲解、自测与复习的输入循环（终端与对话模式共用）
+│  ├─ lessons.py      讲解分节：校验、渲染、进度标记与“继续／学完了”的识别
 │  ├─ flow.py         状态转换表与统一的状态转换入口
 │  ├─ runtime.py      学习／复习流程编排与模型输出校验
 │  ├─ context.py      分阶段上下文组装、预算检查与审计
@@ -54,6 +59,7 @@
 ├─ tests/             存储、流程、上下文、评分、检索与诊断测试；test_scenarios.py 为端到端场景套件，
 │                     regressions/ 为从真实失败沉淀的回归样例
 ├─ examples/          无密钥演示、真实服务联通与评分验收脚本
+├─ scripts/           Windows 桌面入口：zhiqiu-web.ps1 打开工作台，install-shortcut.ps1 生成桌面快捷方式
 └─ labels/            人工标注与检索校准用的公开合成样本；eval-runs.jsonl 为评分评测记录（随代码提交）
 ```
 
@@ -91,11 +97,11 @@ flowchart TD
     B -->|learn| C[读取本地资料，列出文件、要获取的网页与 Notion 页面、是否联网搜索与模型端点并请求确认]
     C -->|确认后获取指定网页与 Notion 页面| D[模型判断资料是否充分]
     D -->|不足且允许 Web| E[有界工具循环补充资料，再判断资料]
-    D -->|充分或用户选择本地来源| F[模型教学并展示来源]
+    D -->|充分或用户选择本地来源| F[模型分节讲解并展示来源，逐节显示]
     E -->|充分| F
     E -->|仍不足或搜索失败| X[停止学习，不创建自测任务]
     D -->|不足且离线| X
-    F -->|/done| G[创建首次自测，保存题目和原答]
+    F -->|/done，或说“学完了”并确认| G[创建首次自测，保存题目和原答]
     B -->|resume| G
     G -->|/pause 或异常退出| H[保留进度，稍后 resume]
     G -->|自然结束、/end 或达到上限| I{有可验证的回答证据？}
@@ -114,6 +120,18 @@ flowchart TD
     R -->|零回答| S[原任务未完成，次日再提醒]
     R -->|连续困难达到阈值| T[标记需补学；完整自测开启新 FSRS 周期]
 ```
+
+### 讲解方式
+
+讲解一次生成（只调用一次模型），分成 3–5 节逐节显示。每节只讲一个小目标，先讲直觉再讲细节，正文不超过 300 字，结尾是一个一两句话就能回答的检查问题（“想一想：……”）。事实以资料为准，但不按资料的顺序和措辞复述。讲解阶段可以：
+
+- 回答检查问题或直接提问：交给澄清，模型会拿到当前这一节和它的检查问题，简短指出答对的地方和缺少的地方；
+- 说“继续”“下一节”“接着讲”：显示下一节，不调用模型；最后一节之后显示可独立学习的建议（`/accept N`）；
+- 说“学完了”“讲完了”“开始自测”等：先确认“结束讲解，开始自测吗？”（还有没看的节时会注明），确认后等同 `/done`；输入 `/done` 不再确认。
+
+这些说法只在去掉空格和句末标点后完全一致时才识别，“懂了”“明白了”不算（它们也可能是在回答检查问题）。整篇讲解仍作为一条 `lesson` 消息保存，出题、评阅和澄清的上下文不变；各节内容记在 `LessonSections` 事件里，每显示一节写一条 `lesson_section` 标记，所以 `/resume` 会列出各节标题并从第一节没看过的继续。分节之前的旧讲解恢复时照旧整篇显示。
+
+澄清（讲解与自测中的提问）只回答当前这一个问题，先给结论，一般不超过 200 字；不提数据库字段或学习状态，不宣布、也不承诺程序动作（结束讲解、开始自测、安排复习、生成任务）。讲解中的澄清可以读资料、写笔记，但不提供对话用的状态查询工具。
 
 ### 状态机
 
@@ -147,16 +165,29 @@ flowchart TD
 | 工具 | 规则 |
 |---|---|
 | `read_file` | 只读 `ZHIQIU_READ_ROOTS` 白名单目录中的 `.md`/`.txt`，白名单外、`..`、符号链接一律拒绝；配置白名单即表示同意把其中的文件发送到模型端点，读取时不再逐次确认 |
-| `write_file` | 同 V3：只写 `ZHIQIU_WRITE_ROOTS`，每次确认，覆盖前备份 |
-| `web_search`、`fetch_url` | 调用前确认，显示查询或网址；同一轮对话中允许过一次后，该工具在本轮剩下的调用不再询问，但仍逐条显示（标注“本轮已允许”），拒绝不会被记住；参数不得包含本次运行中读到的笔记原文（连续 15 字）；`--offline` 时不提供 |
-| 外部 MCP 工具 | 每次调用前确认，显示参数；其余同上 |
+| `write_file` | 同 V3：只写 `ZHIQIU_WRITE_ROOTS`，每次确认，覆盖前备份；审批策略不能把它设为自动执行 |
+| `web_search`、`fetch_url` | 按审批策略（默认自动执行）：自动执行时仍逐条显示查询或网址（标注“自动”）；设为询问时调用前确认，同一轮对话中允许过一次后，该工具在本轮剩下的调用不再询问，但仍逐条显示（标注“本轮已允许”），拒绝不会被记住；参数不得包含本次运行中读到的笔记原文（连续 15 字），这条检查不受审批策略影响；`--offline` 时不提供 |
+| 外部 MCP 工具 | 按审批策略（默认每次调用前确认，显示参数）；其余同上 |
 | `zhiqiu_*` | 只读业务查询，直接执行 |
 | `search_history` | 按关键词搜索以前的讲解（含追问解答）与对话消息，返回知识点、日期和命中片段，直接执行；不含当前这段对话，只在对话中提供、不经 MCP 开放。见下方“历史检索” |
 | `propose_learn`、`propose_review`、`propose_resume`、`propose_memory` | 权限类别 `propose`：只提出建议，调用后工具循环立即结束，同一轮中排在它之后的调用不执行 |
 
+审批策略（`approvals.py`，V6）决定对话中联网、外部 MCP 与写文件这三类工具是自动执行（`allow`）、每次询问（`ask`）还是不提供（`deny`）。默认联网自动执行，外部 MCP 与写文件询问。用 `ZHIQIU_APPROVAL_CONFIG` 指向一个 JSON 文件即可修改，工具名的设置优先于权限类别：
+
+```json
+{
+  "permissions": {"network": "allow", "external_mcp": "ask", "write_file": "ask"},
+  "tools": {"fetch_url": "ask", "notion__search": "allow"}
+}
+```
+
+外部 MCP 工具按注册名 `服务__工具` 填写。配置有误（未知字段、非法值、把写文件设为 `allow`）时对话不会启动并说明原因；写了未注册的工具名只提示。`deny` 的工具不交给模型，模型仍调用时被拒并记护栏 `policy_denied`。审批策略只管对话；`learn` 开始前发送资料的确认不受影响。每轮对话的 trace 记有当时策略的指纹（`approval_policy`）。
+
+每次询问用户（策略为 `ask`，且不是“本轮已允许”）都在 `approval_requests` 写一条记录：询问时为 `pending`，回答后改为 `approved` 或 `denied`，并记下在哪个界面回答（`terminal`，以后还有 `web`）和对应的工具调用；询问中按 Ctrl+C 记为 `cancelled`。记录只保存描述的第一行（如“写入文件：路径”）和脱敏的参数摘要，写文件的正文只记字数。对话启动时，把这段对话遗留的、以及超过 30 分钟仍未回答的 `pending` 标为 `cancelled`。`chat forget` 一并删除该对话的审批记录，`export` 包含这张表。
+
 历史检索（`history.py`）用 SQLite 自带的 FTS5 全文索引，不用 embedding，也不调用模型：文本按旧讲解追问的同一规则切成中文二字词（去掉“什么”“为什么”等疑问词），以空格连接后建索引，用 BM25 排序，所以“旋转”这样的两字词也能命中。索引在每次检索前补上新增的讲解和对话、去掉已删除的；`forget` 与 `chat forget` 在同一事务里删掉对应索引项，并开启 FTS5 的 secure-delete。所用 SQLite 不含 FTS5 时不提供该工具。
 
-提议由程序先按业务规则检查（资料须在可读目录内、复习须已到期且当日不超过 3 次、要继续的尝试或讲解须存在），不可执行时直接说明原因；可执行时展示并请用户确认，确认后才切换对话模式、进入 `flows.py` 中的流程，`learn` 仍会再确认一次发送哪些资料。同一提议用 `receipts` 中的 `proposal:<消息ID>` 防止重复执行。流程结束、暂停或中断后回到对话，并写一条 `flow_result` 摘要。
+提议由程序先按业务规则检查（资料须在可读目录内、复习须已到期且当日不超过 3 次、要继续的尝试或讲解须存在），不可执行时直接说明原因；可执行时展示并请用户确认，确认后才切换对话模式、进入 `flows.py` 中的流程。学习提议会同时列出将发送到模型端点的本地文件、网页与是否联网补充（与 `learn` 的发送确认是同一份清单），回答“要开始吗？”即同意发送；进入流程后清单不变就不再询问（显示“发送资料已在开始前确认”），有变化才重新确认。自己输入的 `/learn` 和终端的 `zhiqiu learn` 照旧在流程里确认一次发送；讲解中用 `/sources web|local` 重新准备资料时也会再确认。同一提议用 `receipts` 中的 `proposal:<消息ID>` 防止重复执行。流程结束、暂停或中断后回到对话，并写一条 `flow_result` 摘要。
 
 斜杠命令由程序直接执行，不经过模型：`/status`、`/learn 知识点 [--from 路径] [--url 网址] [--notion 页面]`、`/review [知识点]`、`/resume [ID]`、`/memory`、`/new`、`/help`、`/exit`。用户自己输入的命令不需要再确认是否进入流程。
 
@@ -165,7 +196,7 @@ flowchart TD
 对话记录：
 
 - 按天划分：当天再次进入接着当天的对话，第二天自动开新对话；`/new` 随时开新对话，`zhiqiu chat --resume ID` 回到旧对话。
-- 永久保留，不自动清理。`zhiqiu chat list` 列出、`zhiqiu chat log ID` 查看（消息、摘要、模式切换事件、工具调用），`zhiqiu chat forget ID|--all` 删除；删除时一并删除该对话的摘要；工具审计保留，但不再关联到对话。`export` 包含对话与摘要表。
+- 永久保留，不自动清理。`zhiqiu chat list` 列出、`zhiqiu chat log ID` 查看（消息、摘要、模式切换事件、工具调用），`zhiqiu chat forget ID|--all` 删除；删除时一并删除该对话的摘要与审批记录；工具审计保留，但不再关联到对话。`export` 包含对话与摘要表。
 - 偏好与人设：模型可用 `propose_memory` 提议记住用户明确表达的长期偏好（key 以 `pref.` 或 `soul.` 开头，单条不超过 300 字，这两类合计不超过 2000 字）；用户确认后才写入语义记忆，来源记为 `chat:<消息ID>`。每段对话开始时冻结一份全局记忆快照，本段对话中新记住的内容从下一段对话开始生效；讲解、澄清照常使用全局记忆，评分不使用。
 
 ## 评分
@@ -182,7 +213,7 @@ flowchart TD
 
 所有调用经过 `ToolExecutor.run`，顺序为：查找 → 参数校验（只校验、不纠正，失败不执行）→ 闸门（本步骤未允许该权限类别时拒绝；需要确认的工具在缺少确认回调、回调出错或用户拒绝时一律拒绝）→ 执行 → 截断输出 → 审计。失败用固定的错误类型表示：`invalid_args`、`denied`、`timeout`、`network`、`rate_limited`、`upstream`、`not_found`、`internal`；只有 `network`、`timeout`、`rate_limited` 按指数退避重试。网络请求流式读取响应，每读一块检查一次总时限，超时即中断。
 
-每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
+每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认及由谁放行（`approval_source`：`policy` 审批策略、`user` 用户当场批准、`turn` 本轮已允许；V6 起记录，schema v19）、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
 
 目前注册的工具有 `notion_page`（只供程序调用，见“Notion 页面资料”）、业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 
@@ -242,7 +273,7 @@ flowchart TD
 
 ## 外部 MCP 工具（客户端）
 
-配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后，`learn` 会启动其中列出的本地 stdio MCP 服务，把白名单内的工具接入工具层，供资料准备的工具循环和对话模式使用（对话中每次调用前确认；学习阶段澄清、自测和复习不开放外部工具）。示例见 [examples/mcp.example.json](examples/mcp.example.json)（官方 `mcp-server-fetch`）：
+配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后，`learn` 会启动其中列出的本地 stdio MCP 服务，把白名单内的工具接入工具层，供资料准备的工具循环和对话模式使用（对话中按审批策略，默认每次调用前确认；学习阶段澄清、自测和复习不开放外部工具）。示例见 [examples/mcp.example.json](examples/mcp.example.json)（官方 `mcp-server-fetch`）：
 
 ```json
 {"servers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"],
@@ -277,17 +308,51 @@ flowchart TD
 `zhiqiu dashboard [--port 8765] [--open]` 启动只读网页看板。**聊天、学习时用的 `--db` 必须和看板相同**，否则看板看的是另一个数据库；看板启动时会打印它读取的文件，左下角也会显示。布局参考 waku（左侧导航带数量）与 Langfuse（trace 树加节点详情）：
 
 - **实时**：每 1.5 秒刷新。显示正在运行的任务：模型调用、token、缓存命中率、花费；学习流程有“准备资料 → 讲解 → 自测 → 评分”的步骤条，当前步骤高亮并显示进度（如“等待回答 · 第 3 题”）；下方是当前的运行链路。
-- **Trace**：最近的 trace 列表，可以按名称或知识点筛选、按状态过滤，每行带耗时条。点开后是带耗时条的调用树（可折叠，节点按类型用图标区分，出错的节点标红，状态迁移可以开关显示）；右侧是选中节点的详情：span 的耗时与 token 合计；模型调用的模板、纳入来源、预算，校验失败时的模型原文和导出回归样例的命令；工具调用的参数摘要与确认结果；护栏的规则与原因。
+- **Trace**：最近的 trace 列表，可以按名称或知识点筛选、按状态过滤，每行带耗时条。点开后是带耗时条的调用树（可折叠，节点按类型用图标区分，出错的节点标红，状态迁移可以开关显示）；右侧是选中节点的详情：span 的耗时与 token 合计；模型调用的模板、纳入来源、预算，校验失败时的模型原文和导出回归样例的命令；工具调用的参数摘要与审批结果（策略放行、用户批准、本轮已允许、被拒或无需确认）；护栏的规则与原因。
 - **指标与花费**、**失败**、**契约检查**：分别对应 `zhiqiu metrics`、`zhiqiu failures`、`zhiqiu check`。
+- **审批**（V6）：每次询问用户的记录（见“审批策略”），显示发起时间、工具、描述首行、结果（待审批、已批准、已拒绝、已取消）、在终端还是网页决定、等了多久，可跳到对应 trace；导航上的数字是当前待审批数。接口 `/api/approvals?days=&status=`。
 - **学习记录**：每次自测或复习的题目、回答、分维度评分与引文、复习排期、状态迁移，以及相关 trace。
 
 模型调用的详情默认只有元数据。想查看每次调用发了什么、回了什么，在 `.env` 设置 `ZHIQIU_TRACE_CONTENT=1`：之后的调用会把请求消息与回复正文存进 `llm_contents`（脱敏，请求最多 6 万字、回复最多 2 万字；`forget`、`chat forget` 一并删除）。这会把学习资料原文也存进库里，所以默认关闭。
 
 看板只绑定 `127.0.0.1`、只接受 GET、以只读方式打开数据库（终端里的知秋可以同时运行），所有输出经过脱敏；页面不加载任何外部资源。看板显示的内容与 `zhiqiu trace` 相同，**不要把端口转发或暴露到本机以外**。
 
+### 网页工作台（V6）
+
+`zhiqiu web [--port 8765] [--open] [--resume 对话ID]` 启动工作台：在看板的全部页面之外，可以在浏览器里与知秋对话、走完学习与复习流程、批准或拒绝需要审批的动作。打开页面默认进入“对话”：知秋的回答按简单 Markdown 显示（标题、列表、表格、代码块、粗体；先整体转义，回答里的 HTML 与脚本只显示为文字，链接只显示地址）；工具调用以灰色小字显示（如“联网搜索：…（自动）”）；讲解与自测中的提问显示在输入框上方，直接输入作答；“是／否”确认与审批卡片带按钮，审批卡片显示工具、权限与完整描述（写文件含路径、新建或覆盖、内容预览），回答后变灰并标出结果与时间。“停止”只在有等待中的提示时可用。刷新页面不会丢失对话：本次工作台的消息从内存事件补齐，工作台启动前已有的消息从数据库读取，显示在“之前的消息”下。对话运行在一个后台线程里，用它自己的数据库连接；一次只处理一条输入，上一轮没结束时新输入返回 409。`--offline` 与审批策略同 `zhiqiu chat`；审批策略有误时不启动。
+
+对话页右侧是状态面板（窄屏时折叠在对话上方），按 L6 准则分五块，随对话实时更新：**当前目标**（模式：对话、讲解、自测或复习，以及流程目标与步骤）；**上下文范围**（可读、可写目录，本段对话使用的偏好与人设记忆条数，较早的对话是否已摘要，联网是否可用）；**执行状态**（本轮运行链与进度、已用时间、模型调用次数，可跳到 trace）；**风险动作**（审批策略、待批准的动作、本段对话最近 5 条审批）；**验证结果**（最近一次学习或复习的得分与下次复习日期，以及本段对话的 trace 在最近 7 天的运行契约检查中是否有违反）。
+
+工作台的接口（只在 `zhiqiu web` 中存在）：
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/chat/events?after=N` | 序号大于 N 的事件（`say` 知秋说的话、`user` 用户输入、`ask`／`confirm`／`approval` 等待回答的提示、`resolved` 提示的结果、`status`、`error`、`idle` 本轮结束），以及 `busy`、等待中的提示 |
+| `GET /api/chat/state` | 状态面板：当前目标、上下文范围、执行状态、风险动作、验证结果 |
+| `GET /api/chat/history` | 工作台启动时这段对话已有的消息（之后的消息以事件给出） |
+| `POST /api/chat/input` | `{"text": "…"}` 发一条消息或斜杠命令，202 或 409 |
+| `POST /api/chat/respond` | `{"request_id": "…", "value": 文字或 true/false}` 回答一个提示；已回答或不存在时 409 |
+| `POST /api/chat/stop` | 停止等待中的提示：提问按中断处理（讲解、自测会暂停，可 `/resume`），“是／否”确认按“否”，审批卡片记为已取消 |
+
+桌面入口（Windows）：在项目目录运行一次
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
+```
+
+在桌面生成“知秋工作台”快捷方式，图标是一片枫叶（与网页图标相同，图标文件存放在 `%LOCALAPPDATA%\zhiqiu\zhiqiu-web-<指纹>.ico`，文件名随图标内容变化，避免资源管理器继续显示缓存的旧图标）。双击时，`scripts\zhiqiu-web.ps1` 先检查 8765 端口：
+
+- 工作台没在运行：在最小化的“知秋工作台服务”窗口里启动 `zhiqiu --db <项目目录>\state.sqlite web`，就绪后打开窗口。关掉这个服务窗口，工作台就停止。
+- 工作台已在运行：只再开一个窗口。
+- 端口被只读看板或别的程序占用，或者启动失败（例如审批策略有误）：弹窗说明；启动失败时，服务窗口会保留错误信息。
+
+窗口用 Edge 的独立应用窗口（`--app`）打开，没有地址栏；没装 Edge 时用默认浏览器。要换数据库，运行 `install-shortcut.ps1 -Db 路径` 重新生成快捷方式。
+
+安全：仍只绑定 `127.0.0.1` 并校验 Host。每次启动生成一个随机令牌，只嵌在工作台页面里（其他网站读不到）；`/api/chat/*` 的读写都要带请求头 `X-Zhiqiu-Token`。写请求还要求 `Origin`（如有）是本页、`Content-Type: application/json`、请求体不超过 64 KB；不合规的写请求被拒绝，并记护栏 `web_request_refused`。`zhiqiu dashboard` 不变：页面里没有令牌，仍然只接受 GET。
+
 ### 指标与花费
 
-`zhiqiu metrics [--days 7] [--json]` 在读取时汇总：按阶段的调用次数、错误率、无效输出率、p50／p95 延迟、输入／缓存命中／输出 token 与花费；工具按状态的分布与重试率；工具循环结束原因；命令、对话与流程的结果分布；人工确认次数与被拒率、提议结果、人工改分、评分延期；各护栏的触发次数。库里只存 token，金额按 `ZHIQIU_PRICE_*` 在读取时计算（价格会变）；只统计，不设上限。
+`zhiqiu metrics [--days 7] [--json]` 在读取时汇总：按阶段的调用次数、错误率、无效输出率、p50／p95 延迟、输入／缓存命中／输出 token 与花费；工具按状态的分布与重试率；工具循环结束原因；命令、对话与流程的结果分布；审批策略放行与用户批准次数（按工具）、人工确认次数（策略放行与本轮已允许不算询问）与被拒率、提议结果、人工改分、评分延期；各护栏的触发次数。库里只存 token，金额按 `ZHIQIU_PRICE_*` 在读取时计算（价格会变）；只统计，不设上限。
 
 ### 护栏留痕与脱敏
 
@@ -300,6 +365,8 @@ flowchart TD
 | `name_not_allowed`／`permission_denied` | 本步骤不允许的工具或权限类别（含 `--offline` 下的联网工具） | blocked |
 | `confirmation_denied` | 用户拒绝了确认（含拒绝发送学习资料） | denied_by_user |
 | `confirmation_unavailable` | 需要确认但当前环境无法确认 | blocked |
+| `policy_denied` | 调用了审批策略设为 `deny` 的工具 | blocked |
+| `web_request_refused` | 工作台写接口收到不合规的请求（缺令牌、外站 Origin、非 JSON、过大、非本机 Host） | blocked |
 | `proposal_rejected`／`proposal_refused` | 用户拒绝提议／提议未通过执行前校验 | denied_by_user／blocked |
 | `memory_limit` | 记忆 key 前缀或字数超限 | blocked |
 | `loop_limit` | 工具循环以轮数、时限或预算上限结束 | stopped |
@@ -311,8 +378,8 @@ flowchart TD
 
 ### Eval：场景套件、运行契约与失败沉淀
 
-- **运行契约检查**（`zhiqiu check [--days 7] [--json]`）：对已记录的运行逐项给出 PASS／FAIL／证据不足（没有可检查的数据时说“证据不足”，不当作通过），有 FAIL 时退出码为 1。检查项：工具循环轮数与结束原因（`loop_rounds`）、工具调用轮次在循环之内（`tool_round_bound`）、提议之后同一轮不再执行工具（`proposal_stops_round`）、写文件与对话中联网都经过确认（`confirmed_side_effects`）、状态迁移按转换表重放且首尾衔接（`state_replay`）、模型与工具调用都挂在存在的 span 上（`trace_linked`）、没有遗留的运行中 span（`spans_closed`）。全部通过只说明程序守住了规则，不代表讲解或评分质量。
-- **场景套件**（`tests/test_scenarios.py`）：用脚本化模型端到端运行学习→自测→评分、对话调用工具、提议→确认→流程→回到对话、自测中提问隔离、泄露拦截与确认被拒、中断与恢复；每个场景结束后契约检查必须没有 FAIL，trace 必须是一棵连通的树。`tests/test_contracts.py` 用人为构造的违规记录检验每个检查器确实会判 FAIL。
+- **运行契约检查**（`zhiqiu check [--days 7] [--json]`）：对已记录的运行逐项给出 PASS／FAIL／证据不足（没有可检查的数据时说“证据不足”，不当作通过），有 FAIL 时退出码为 1。检查项：工具循环轮数与结束原因（`loop_rounds`）、工具调用轮次在循环之内（`tool_round_bound`）、提议之后同一轮不再执行工具（`proposal_stops_round`）、写文件必须由用户批准、对话中的联网与外部 MCP 调用须经策略或用户批准（`confirmed_side_effects`；v19 之前没有来源的记录按用户批准计）、每次询问都有审批记录且结果与被决定的调用一致、没有超过 30 分钟仍未取消的待审批（`approvals_consistent`）、状态迁移按转换表重放且首尾衔接（`state_replay`）、模型与工具调用都挂在存在的 span 上（`trace_linked`）、没有遗留的运行中 span（`spans_closed`）。全部通过只说明程序守住了规则，不代表讲解或评分质量。
+- **场景套件**（`tests/test_scenarios.py`）：用脚本化模型端到端运行学习→自测→评分、对话调用工具、提议→确认→流程→回到对话、自测中提问隔离、泄露拦截与确认被拒、中断与恢复，以及 V6 的默认策略（联网放行、写文件询问）、`deny` 配置、网页工作台上拒绝写文件、网页工作台上完成讲解与自测；每个场景结束后契约检查必须没有 FAIL，trace 必须是一棵连通的树。`tests/test_contracts.py` 用人为构造的违规记录检验每个检查器确实会判 FAIL。
 - **失败分类**（`zhiqiu failures [--days 7] [--json]`）：模型错误、上下文溢出、无效输出（按阶段，不允许的追问单列 `invalid_followup`）、工具超时与错误、各护栏、工具循环上限、评分延期、流程中断与出错，每类附最近的样例 trace。
 - **失败沉淀**：输出未通过校验时，模型原文（脱敏、最多 2 万字）写入 `llm_failures`，`forget`／`chat forget` 一并删除。`zhiqiu failures export FAILURE_ID --to tests\regressions\NAME.json --expect rejected|recovered` 导出为回归样例，`tests/test_regressions.py` 把每个样例重放进同一套校验。第一条样例来自 V4 遗留的“不允许的追问”：V5 起出题校验失败会带着校验错误重试一次（`QUESTION_RETRIES=1`），重试给出合法题目即恢复。
 
@@ -355,6 +422,7 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 | `ZHIQIU_WRITE_ROOTS` | 学习中澄清和对话时允许写笔记的目录，多个用 `;` 分隔，例如 `D:\notes\zhiqiu` | 不注册 `write_file` |
 | `ZHIQIU_READ_ROOTS` | 对话中允许直接读取的笔记目录（白名单），多个用 `;` 分隔；也是对话中 `propose_learn` 可指定资料的范围 | 对话中不能读文件 |
 | `ZHIQIU_MCP_CONFIG` | 外部 MCP 工具配置文件，例如 `D:\code\知秋\知秋V1.0\examples\mcp.example.json` | 不启动外部 MCP 服务 |
+| `ZHIQIU_APPROVAL_CONFIG` | 对话审批策略文件（见“审批策略”） | 联网自动执行，外部 MCP 与写文件每次询问 |
 | `ZHIQIU_MODEL_BUDGETS` | 按模型配置窗口、输出预留与余量（见下文） | 沿用下面三个变量 |
 | `ZHIQIU_LLM_WINDOW`、`ZHIQIU_LLM_OUTPUT_RESERVE`、`ZHIQIU_LLM_MARGIN` | 未在 `ZHIQIU_MODEL_BUDGETS` 中匹配的模型的预算 | 不做超限判断 |
 | `ZHIQIU_LLM_WINDOW_VERIFIED` | 设为 `1` 表示窗口已实测（只记入审计） | 视为未实测 |
@@ -391,6 +459,7 @@ uv run zhiqiu --db .\state.sqlite chat --resume CONVERSATION_ID
 uv run zhiqiu --db .\state.sqlite chat list
 uv run zhiqiu --db .\state.sqlite chat log CONVERSATION_ID
 uv run zhiqiu --db .\state.sqlite chat forget CONVERSATION_ID
+uv run zhiqiu --db .\state.sqlite web --open
 uv run zhiqiu --db .\state.sqlite status
 uv run zhiqiu --db .\state.sqlite resume
 uv run zhiqiu --db .\state.sqlite review

@@ -38,7 +38,8 @@ app.add_typer(failures_app, name="failures")
 
 
 # Observation commands print only what was asked for (often JSON), never the status preamble.
-OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate")
+# Commands that print no due-review status first (the workbench page shows it itself).
+OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate", "web")
 
 
 def default_db() -> Path:
@@ -219,6 +220,8 @@ def memory_delete(ctx: typer.Context, key: str,
 
 class TerminalIO:
     """FlowIO for the terminal: line input, typer output and yes/no prompts."""
+
+    channel = "terminal"
 
     def ask(self, prompt: str) -> str:
         try:
@@ -430,13 +433,15 @@ def review(ctx: typer.Context, point: Annotated[str | None, typer.Argument()] = 
 
 def start_chat(store: Store, offline: bool, resume: str | None = None) -> None:
     from .agent import ChatAgent
+    from .approvals import ApprovalPolicy
     try:
+        policy = ApprovalPolicy.from_env()
         service = runtime(store, mcp=not offline)
+        agent = ChatAgent(store, service, TerminalIO(), read_roots=read_roots_from_env(),
+                          write_roots=write_roots_from_env(), offline=offline, policy=policy)
     except ValueError as exc:
         typer.echo(f"不能开始对话：{exc}", err=True)
         raise typer.Exit(1) from None
-    agent = ChatAgent(store, service, TerminalIO(), read_roots=read_roots_from_env(),
-                      write_roots=write_roots_from_env(), offline=offline)
     try:
         agent.start(resume)
     except ValueError as exc:
@@ -581,6 +586,52 @@ def dashboard_command(ctx: typer.Context,
     try:
         serve(path, port, ready)
     except OSError as exc:
+        raise typer.BadParameter(f"端口 {port} 无法使用：{exc}") from None
+
+
+@app.command("web")
+def web_command(ctx: typer.Context,
+                port: Annotated[int, typer.Option("--port", help="本机端口")] = 8765,
+                open_browser: Annotated[bool, typer.Option("--open", help="启动后用默认浏览器打开")] = False,
+                resume: Annotated[str | None, typer.Option("--resume", help="回到指定的旧对话")] = None) -> None:
+    """本地网页工作台：在浏览器里对话、学习、批准动作，并查看看板（只绑定 127.0.0.1）。"""
+    from .agent import ChatAgent
+    from .approvals import ApprovalPolicy
+    from .dashboard import serve
+    from .webio import Workbench
+
+    store = context_store(ctx)
+    path, offline = store.path, ctx.obj["offline"]
+    store.close()  # the agent opens its own connection on the workbench thread
+    try:
+        policy = ApprovalPolicy.from_env()
+    except ValueError as exc:
+        typer.echo(f"不能启动工作台：{exc}", err=True)
+        raise typer.Exit(1) from None
+
+    def make_agent(worker_store: Store, io: Any) -> ChatAgent:
+        return ChatAgent(worker_store, runtime(worker_store, mcp=not offline), io, read_roots=read_roots_from_env(),
+                         write_roots=write_roots_from_env(), offline=offline, policy=policy)
+
+    bench = Workbench(path, make_agent, resume=resume)
+    try:
+        bench.start()
+    except ValueError as exc:
+        bench.close()
+        typer.echo(f"不能启动工作台：{exc}", err=True)
+        raise typer.Exit(1) from None
+
+    def ready(url: str) -> None:
+        typer.echo(f"工作台已启动：{url}（只在本机可访问；Ctrl+C 停止）")
+        typer.echo(f"数据库：{path}；对话 {bench.conversation_id}；审批策略：{policy.text()}")
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+
+    try:
+        serve(path, port, ready, workbench=bench)
+    except OSError as exc:
+        bench.close()
         raise typer.BadParameter(f"端口 {port} 无法使用：{exc}") from None
 
 
