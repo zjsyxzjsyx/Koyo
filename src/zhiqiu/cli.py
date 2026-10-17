@@ -14,7 +14,7 @@ import typer
 
 from . import contracts, gate, metrics, regressions, traces, tracing
 from .conversations import Conversations
-from .flows import FlowInterrupted, resume_lesson, run_lesson, run_quiz, show_outcome
+from .flows import FlowInterrupted, resume_lesson, resume_target, run_lesson, run_quiz, short_id, show_outcome
 from .notion import NotionReader
 from .diagnostics import check_capacity, check_model
 from .files import read_roots_from_env, write_roots_from_env
@@ -35,11 +35,13 @@ chat_app = typer.Typer(help="与知秋自由对话；需要时再进入学习、
 app.add_typer(chat_app, name="chat")
 failures_app = typer.Typer(help="失败分类与沉淀为回归样例")
 app.add_typer(failures_app, name="failures")
+voice_app = typer.Typer(help="本地语音输入（SenseVoice + sherpa-onnx，可选依赖）的自检与评估")
+app.add_typer(voice_app, name="voice")
 
 
 # Observation commands print only what was asked for (often JSON), never the status preamble.
 # Commands that print no due-review status first (the workbench page shows it itself).
-OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate", "web")
+OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate", "web", "skills", "voice")
 
 
 def default_db() -> Path:
@@ -222,6 +224,8 @@ class TerminalIO:
     """FlowIO for the terminal: line input, typer output and yes/no prompts."""
 
     channel = "terminal"
+    # Every kind of output is printed the same way.
+    say_kinds = True
 
     def ask(self, prompt: str) -> str:
         try:
@@ -229,8 +233,10 @@ class TerminalIO:
         except (EOFError, KeyboardInterrupt):
             raise FlowInterrupted from None
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, kind: str = "text", **meta: Any) -> None:
         typer.echo(text)
+        if meta.get("diagram_text"):
+            typer.echo(meta["diagram_text"])
 
     def confirm(self, text: str) -> bool:
         # Ctrl+C or EOF at a yes/no prompt is a "no", not a crash of the whole session.
@@ -272,6 +278,12 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
                help="待评阅的长原答按段落分段评阅原答（需 ZHIQIU_LONG_ANSWER_SEGMENTS=1）")] = False) -> None:
     """继续未结案的讲解、自测或到期复习。"""
     store = context_store(ctx)
+    if attempt_id:
+        # A short id (a unique prefix of 6 or more characters) names the attempt or lesson as well.
+        try:
+            attempt_id = resume_target(store, attempt_id)[1]
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
     attempt = store.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone() if attempt_id else store.active_attempt()
     if attempt:
         if attempt["state"] == "awaiting_review":
@@ -290,9 +302,9 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
     if not pending:
         raise typer.BadParameter("没有可继续的尝试或讲解")
     if len(pending) > 1:
-        typer.echo("有多个待继续的讲解，请指定会话 ID：")
+        typer.echo("有多个待继续的讲解，请用 resume 短号 指定：")
         for row in pending:
-            typer.echo(f"  {row['title']}  {row['session_date']}  会话 {row['session_id']}")
+            typer.echo(f"  {row['title']}  {row['session_date']}  短号 {short_id(row['session_id'])}")
         return
     try:
         resume_lesson(TerminalIO(), store, pending[0]["session_id"], lambda: runtime(store))
@@ -446,6 +458,8 @@ def start_chat(store: Store, offline: bool, resume: str | None = None) -> None:
         agent.start(resume)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
+    # Only the terminal can be left with /exit; the web workbench's greeting does not mention it.
+    typer.echo("输入 /exit 退出。")
     agent.run()
 
 
@@ -523,6 +537,80 @@ def show_metrics(ctx: typer.Context,
     """成功率、延迟、token 与花费、重试、人工确认与护栏触发的汇总。"""
     data = metrics.collect(context_store(ctx).db, days)
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2) if as_json else metrics.render(data))
+
+
+@app.command("skills")
+def list_skills(ctx: typer.Context, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """列出可用的教学 Skill（内置与用户目录）和用户 Skill 的错误。"""
+    from .files import FileRoots
+    from .skills import Library, SkillError
+    store = context_store(ctx)
+    try:
+        library = Library(write_roots=FileRoots.from_env().current(store, "write"))
+    except SkillError as exc:
+        typer.echo(f"内置 Skill 无法加载：{exc}", err=True)
+        raise typer.Exit(1) from None
+    data = {"skills": [skill.summary() for skill in library.all()], **library.status()}
+    if as_json:
+        typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+    sources = {"builtin": "内置", "user": "用户"}
+    for item in data["skills"]:
+        low, high = item["sections"]
+        typer.echo(f"{item['name']} v{item['version']}（{item['sha']}）· {sources[item['source']]} · {item['title']}")
+        typer.echo(f"  {item['description']}")
+        typer.echo(f"  阶段 {'、'.join(item['stages'])}；{low}-{high} 节，每节 ≤{item['section_chars']} 字；"
+                   f"回答 ≤{item['answer_chars']} 字；配图最多 {item['diagrams']} 张")
+    typer.echo(f"用户 Skill 目录：{data['dir']}")
+    for error in data["errors"]:
+        typer.echo(f"错误：{error}")
+
+
+@voice_app.command("check")
+def voice_check() -> None:
+    """检查依赖与模型，用模型自带的示例音频转写一次，打印文字和实时率（RTF）。"""
+    from . import voice
+    state = voice.status()
+    typer.echo(f"依赖：{'已安装' if state['reason'] != 'not_installed' else '未安装（uv sync --extra voice）'}")
+    typer.echo(f"模型目录：{state['model']}")
+    typer.echo(f"识别语言：{state['language']}；线程：{voice.threads()}")
+    if not state["available"]:
+        typer.echo(f"语音输入不可用：{voice.REASONS[state['reason']]}。模型下载：{voice.MODEL_URL}", err=True)
+        raise typer.Exit(1)
+    sample = Path(state["model"]) / "test_wavs" / "zh.wav"
+    if not sample.is_file():
+        typer.echo(f"模型目录里没有示例音频 {sample}", err=True)
+        raise typer.Exit(1)
+    result = voice.Transcriber().transcribe(sample.read_bytes())
+    typer.echo(f"示例音频 {result['duration_ms'] / 1000:.1f} 秒，识别用时 {result['elapsed_ms'] / 1000:.2f} 秒"
+               f"（含加载模型），RTF {result['elapsed_ms'] / max(1, result['duration_ms']):.3f}")
+    typer.echo(f"识别结果：{result['raw']}")
+
+
+@voice_app.command("eval")
+def voice_eval(ctx: typer.Context, folder: Annotated[Path, typer.Argument(help="放 x.wav 和同名 x.txt 的目录")],
+               as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """对照参考文字计算字错率、术语正确率（修正前后）与实时率；不调用大模型，不写数据库。"""
+    from . import voice
+    state = voice.status()
+    if not state["available"]:
+        typer.echo(f"语音输入不可用：{voice.REASONS[state['reason']]}", err=True)
+        raise typer.Exit(1)
+    data = voice.evaluate(folder, voice.Transcriber(), voice.terms(context_store(ctx).db))
+    if as_json:
+        typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+    for item in data["items"]:
+        typer.echo(f"{item['file']}  字错率 {item['cer_raw']:.1%} → {item['cer']:.1%}  "
+                   f"术语 {item['terms_raw']}/{item['terms']} → {item['terms_corrected']}/{item['terms']}")
+        typer.echo(f"  参考：{item['reference']}")
+        typer.echo(f"  识别：{item['corrected']}")
+    if not data["files"]:
+        typer.echo("目录里没有成对的 .wav 和 .txt")
+        return
+    accuracy = lambda value: "—" if value is None else f"{value:.1%}"  # noqa: E731
+    typer.echo(f"共 {data['files']} 条（{data['language']}）：平均字错率 {data['cer_raw']:.1%} → {data['cer']:.1%}；"
+               f"术语正确率 {accuracy(data['term_accuracy_raw'])} → {accuracy(data['term_accuracy'])}；RTF {data['rtf']}")
 
 
 @app.command("check")

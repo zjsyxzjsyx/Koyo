@@ -6,7 +6,7 @@ import pytest
 
 from zhiqiu import lessons
 from zhiqiu.clock import FixedClock
-from zhiqiu.context import TEMPLATES
+from zhiqiu.context import system_message
 from zhiqiu.flows import outbound_lines, preapproved, resume_lesson, run_lesson
 from zhiqiu.materials import Material
 from zhiqiu.quality import prompt_fingerprint
@@ -62,11 +62,13 @@ def test_intent_matches_only_exact_phrases():
 
 
 def test_teach_and_clarify_prompts_ask_for_small_steps_without_touching_grading():
-    assert "sections" in TEMPLATES["teach"] and "检查问题" in TEMPLATES["teach"]
-    assert "200 字" in TEMPLATES["clarify"] and "current_section" in TEMPLATES["clarify"]
-    assert "不要宣布或承诺程序动作" in TEMPLATES["clarify"]
-    # teach and clarify are not grading stages: the recorded grading fingerprint still applies.
-    assert prompt_fingerprint()["fingerprint"].startswith("c5820b23016b")
+    teach, clarify = system_message("teach")["content"], system_message("clarify")["content"]
+    assert "sections" in teach and "检查问题" in teach
+    assert "200 字" in clarify and "current_section" in clarify
+    assert "不要宣布或承诺程序动作" in clarify
+    # teach and clarify are not grading stages: context-v15 left the fingerprint alone (7.2 moved it only
+    # for the review-focus sentence in FOLLOWUP_RULES).
+    assert prompt_fingerprint()["fingerprint"].startswith("4a7d7e1fac39")
 
 
 def test_a_lesson_is_shown_one_section_at_a_time(tmp_path):
@@ -223,3 +225,55 @@ def test_typed_learn_still_asks_for_consent_once(tmp_path):
     agent.handle(f"/learn 红黑树 --from {note}")
     assert io.said.count("允许本次学习发送这些内容吗？") == 1
     assert "要开始吗？" not in io.said
+
+
+LEGACY = (__import__("pathlib").Path(__file__).parent / "data" / "legacy_lesson_b0c1f00b.md").read_text(encoding="utf-8")
+
+
+def test_split_legacy_cuts_an_old_lesson_at_its_numbered_headings():
+    sections = lessons.split_legacy(LEGACY)
+    assert [section["title"] for section in sections] == [
+        "概述", "层序遍历（广度优先遍历，BFS）", "前序、中序、后序遍历（深度优先遍历，DFS）", "同一棵树的遍历示例", "典型应用"]
+    assert sections[0]["content"].startswith("二叉树遍历是从根节点出发")
+    assert sections[-1]["content"].endswith("中序遍历可输出升序序列。") and "补充：二叉搜索树" in sections[-1]["content"]
+    assert all(section["check"] == "" for section in sections)
+
+
+def test_split_legacy_edge_cases():
+    assert lessons.split_legacy("一、只有一节\n内容") is None
+    assert lessons.split_legacy("没有标题的讲解。") is None
+    no_preface = lessons.split_legacy("一、甲\n甲的内容\n二、乙\n乙的内容\n补充：最后一句")
+    assert [section["title"] for section in no_preface] == ["甲", "乙"]
+    assert no_preface[1]["content"] == "乙的内容\n补充：最后一句"
+    # 一、 inside a line is not a heading.
+    assert lessons.split_legacy("说明：一、二、三都可以\n一、甲\n内容") is None
+
+
+class LegacyModel(FakeModel):
+    def teach(self, point, sources):
+        return {"lesson": LEGACY}
+
+
+def legacy_lesson(tmp_path):
+    """A lesson stored the way 6.0 stored it: one message and no LessonSections event."""
+    store, service, path = prepare_service(tmp_path, LegacyModel())
+    run_lesson(ScriptedIO("/pause"), store, service, "二叉树遍历", source=path)
+    store.db.execute("DELETE FROM events WHERE type='LessonSections'")
+    store.db.execute("DELETE FROM messages WHERE kind='lesson_section'")
+    return store, service, store.pending_lessons()[0]["session_id"]
+
+
+def test_an_old_lesson_with_numbered_headings_resumes_section_by_section(tmp_path):
+    import re
+    store, service, session_id = legacy_lesson(tmp_path)
+    io = ScriptedIO("继续", "/pause")
+    resume_lesson(io, store, session_id, lambda: service)
+    assert io.said[0] == "继续讲解：二叉树遍历" and not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}", io.said[0])
+    assert io.said[1].startswith("本讲共 5 节：1. 概述；2. 层序遍历（广度优先遍历，BFS）")
+    assert io.said[2].startswith("第 1/5 节：概述") and "一、层序遍历" not in io.said[2]
+    assert any(text.startswith("第 2/5 节：层序遍历") for text in io.said)
+    assert not any(text.startswith("第 3/5 节") for text in io.said)
+    io = ScriptedIO("/pause")
+    later = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 3)))
+    resume_lesson(io, later, session_id, lambda: LearningRuntime(later, LegacyModel()))
+    assert "上次看到第 2 节。" in io.said and any(text.startswith("第 3/5 节：前序、中序、后序遍历") for text in io.said)

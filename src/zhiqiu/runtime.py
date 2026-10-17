@@ -13,14 +13,19 @@ from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_V
 from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError
-from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate
-from .files import read_file_spec, write_file_spec
+from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate, question_shape
+from .files import FileRoots, read_file_spec, write_file_spec
 from .notion import NotionReader, notion_page_spec
 from .queries import query_tool_specs
 from .search import Fetcher, Search, fetch_url_spec, web_search_spec
+from .skills import GENERAL, Library, Skill
 from .store import Store, new_id
 from .toolloop import LOOP_SECONDS, LoopResult, ToolLoop, query_leak_check
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
+
+
+# A lesson whose answer could not be parsed is asked for once more before preparation fails.
+TEACH_ATTEMPTS = 2
 
 
 def _supplement(grade: dict[str, Any]) -> str:
@@ -30,6 +35,19 @@ def _supplement(grade: dict[str, Any]) -> str:
     if not isinstance(value, str):
         raise ValueError("模型返回了无效的补充说明")
     return value.strip()
+
+
+# A learner-facing feedback line longer than this (the prompt asks for 60) is dropped, not refused:
+# a display field must never decide whether a grading stands.
+FEEDBACK_MAX_CHARS = 80
+
+
+def _feedback(grade: dict[str, Any]) -> str:
+    value = grade.get("feedback")
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if len(value) <= FEEDBACK_MAX_CHARS else ""
 
 
 @dataclass(frozen=True)
@@ -53,11 +71,30 @@ def _segment_cuts(text: str, start: int) -> list[list[int]]:
     return [sorted(set(cuts) | {len(text)}) for cuts in (paragraphs, sentences, fixed)]
 
 
+# Stripped from the ends of a mixed-input fragment: spaces, sentence punctuation and quotes. Brackets
+# stay, so "O(n)" keeps its closing parenthesis (V7 real-model check).
+_FRAGMENT_EDGES = " \t\r\n，。、；：！？,.;:!?…“”‘’\"'"
+
+
+def _trim_fragment(value: Any) -> str:
+    """A mixed-input fragment without surrounding spaces and punctuation; "" for anything but text."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip(_FRAGMENT_EDGES).strip()
+
+
 QUESTION_RETRIES = 1
 
 
 class _RejectedQuestion(ValueError):
-    """A proposed question failed validation because of the model's output."""
+    """A proposed question failed validation because of the model's output.
+
+    shape: only the question's shape (question marks, length) was wrong; after the retry such a
+    question is kept with a warning instead of stopping the quiz."""
+
+    def __init__(self, message: str, *, shape: bool = False):
+        super().__init__(message)
+        self.shape = shape
 
 
 def _followup_target(qa: list[dict[str, Any]], dimension: str, given: str) -> str:
@@ -79,7 +116,7 @@ def _followup_target(qa: list[dict[str, Any]], dimension: str, given: str) -> st
 class LearningRuntime:
     def __init__(self, store: Store, model: Model, search: Search | None = None, fetcher: Fetcher | None = None,
                  write_roots: Sequence[Path] = (), extra_tools: Sequence[ToolSpec] = (),
-                 notion: NotionReader | None = None):
+                 notion: NotionReader | None = None, skills: Library | None = None):
         self.store = store
         self.model = model
         self.search = search
@@ -93,8 +130,13 @@ class LearningRuntime:
         # read_file only reaches files already approved for the current step.
         self._readable: list[str] = []
         self.tools.register(read_file_spec(lambda: self._readable))
-        if write_roots:
-            self.tools.register(write_file_spec(list(write_roots)))
+        # write_file is always registered; it is offered to the model only while a write root exists.
+        self.file_roots = FileRoots((), write_roots)
+        self.write_roots: list[Path] = []
+        # Teaching Skills: built-in and the user's; a user directory under a writable root is switched off.
+        self.skills = skills or Library()
+        self.refresh_roots()
+        self.tools.register(write_file_spec(lambda: self.write_roots))
         for spec in query_tool_specs(lambda query: query(store.db), lambda: store.clock.today().isoformat()):
             self.tools.register(spec)
         # e.g. whitelisted MCP client tools; a clashing name is refused with both sources.
@@ -117,10 +159,41 @@ class LearningRuntime:
     def _model_version(self) -> str:
         return f"{getattr(self.model, 'endpoint', '')}|{getattr(self.model, 'model', type(self.model).__name__)}"
 
-    def _invoke(self, task: ContextTask, legacy: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    def _invoke(self, task: ContextTask, legacy: Callable[[], dict[str, Any]],
+                inspect: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
+        """One stage call in its span; `inspect` turns the answer into span attributes (e.g. the Skill chosen)."""
         with tracing.span(self.store, "stage", task.stage, kp_id=task.kp_id, attempt_id=task.attempt_id,
-                          point=task.point or None):
-            return self._invoke_stage(task, legacy)
+                          point=task.point or None) as span:
+            if task.skill is not None:
+                span.set(skill=task.skill.label, skill_source=task.skill.source, skill_by=task.skill_by)
+            result = self._invoke_stage(task, legacy)
+            if inspect is not None:
+                span.set(**inspect(result))
+            return result
+
+    def _skill_choice(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Check the Skill the model picked while assessing; anything unusable falls back to general.
+
+        The checked choice is kept on the result as `skill_choice`; the span gets what was chosen and why."""
+        raw, reason = result.get("skill"), result.get("skill_reason")
+        skill = self.skills.get(raw) if isinstance(raw, str) else None
+        invalid = skill is None or "teach" not in skill.stages
+        reason = reason.strip()[:60] if isinstance(reason, str) else ""
+        name = GENERAL if invalid else skill.name
+        result["skill_choice"] = {"name": name, "reason": reason, "invalid": invalid}
+        attrs: dict[str, Any] = {"skill_choice": name, "skill_reason": reason, "skill_invalid": invalid}
+        if invalid and raw is not None:
+            attrs["skill_raw"] = (raw if isinstance(raw, str) else repr(raw))[:60]
+        return attrs
+
+    def skill_for(self, point: Any, stage: str = "clarify") -> tuple[Skill, str]:
+        """The Skill a stage of this knowledge point uses and who settled it: the recorded one, or general."""
+        self.skills.refresh()
+        skill = self.skills.get(point["skill"]) if point is not None and point["skill"] else None
+        by = point["skill_source"] if skill is not None else "fallback"
+        skill = skill or self.skills.general()
+        used, _ = self.skills.body(skill, stage)
+        return used, (by if used is skill else "fallback")
 
     def mark_invalid_output(self, build_id: str | None) -> None:
         """The model answered but its output failed validation: say so on the call, not just the build."""
@@ -217,8 +290,9 @@ class LearningRuntime:
     def _assess_materials(self, point: str, materials: list[Material]) -> tuple[dict[str, Any], list[dict[str, str]]]:
         sources = self._sources(materials)
         try:
-            assessment = self._invoke(ContextTask("assess", point, sources=tuple(sources)),
-                                      lambda: self.model.assess(point, sources))
+            assessment = self._invoke(ContextTask("assess", point, sources=tuple(sources),
+                                                  catalog=tuple(self.skills.catalog())),
+                                      lambda: self.model.assess(point, sources), self._skill_choice)
             if not isinstance(assessment.get("sufficient"), bool):
                 raise ValueError("模型未给出有效资料判断")
             return assessment, sources
@@ -292,8 +366,9 @@ class LearningRuntime:
                       "content": f"[{item['start_char']}:{item['end_char']}] "
                                  f"相关={item['relevant']}；摘要={item['summary']}；缺口={item['gap']}"}
                      for item in checked]
-        result = self._invoke(ContextTask("assess_combine", point, sources=tuple(summaries)),
-                              lambda: self.model.assess(point, summaries))
+        result = self._invoke(ContextTask("assess_combine", point, sources=tuple(summaries),
+                                          catalog=tuple(self.skills.catalog())),
+                              lambda: self.model.assess(point, summaries), self._skill_choice)
         if not isinstance(result.get("sufficient"), bool):
             raise ValueError("模型未给出有效的资料综合判断")
         return result, summaries
@@ -347,6 +422,7 @@ class LearningRuntime:
             materials.extend(self.executor.run("notion_page", {"page": page}, fetch_scope).value)
         if sum(len(item.content) for item in materials) > 100_000:
             raise ValueError("本地、网页与 Notion 资料总文本超过 100,000 字符；请指定更小的范围")
+        self.skills.refresh()
         assessment, teaching_sources = self._assess_materials(point, materials)
         if force_web or (not assessment["sufficient"] and not force_local):
             if offline:
@@ -368,17 +444,59 @@ class LearningRuntime:
             # An explicit user correction can override the model's adequacy judgment.
             # Teaching still receives only the selected local sources.
             pass
-        lesson = self._invoke(ContextTask("teach", point, sources=tuple(teaching_sources)),
-                              lambda: self.model.teach(point, teaching_sources))
-        sections = lessons.normalize(lesson)
-        lesson = {**lesson, "sections": sections, "lesson": lessons.render(sections)}
+        skill, by, missing = self._teaching_skill(point, assessment.get("skill_choice"))
+        dropped: list[dict[str, Any]] = []
+
+        def diagrams(result: dict[str, Any]) -> dict[str, Any]:
+            # Checked inside the teach span so the trace shows how many pictures were dropped.
+            try:
+                lessons.normalize(result, skill.diagrams, dropped)
+            except ValueError:
+                return {}
+            return {"diagram_invalid": len(dropped)} if dropped else {}
+        task = ContextTask("teach", point, sources=tuple(teaching_sources), skill=skill, skill_by=by)
+        for attempt in range(TEACH_ATTEMPTS):
+            try:
+                lesson = self._invoke(task, lambda: self.model.teach(point, teaching_sources), diagrams)
+                break
+            except ValueError as exc:
+                # A lesson with pictures is a long JSON answer; an unparsable one (already kept in llm_failures)
+                # is asked for once more. Budget errors and the like are subclasses and are not retried.
+                if type(exc) is not ValueError or attempt + 1 == TEACH_ATTEMPTS:
+                    raise
+                dropped.clear()
+        dropped.clear()
+        sections = lessons.normalize(lesson, skill.diagrams, dropped)
+        lesson = {**lesson, "sections": sections, "lesson": lessons.render(sections), "dropped_diagrams": dropped,
+                  "skill": {"name": skill.name, "title": skill.title, "label": skill.label, "by": by,
+                            "missing": missing}}
         kp_id = self.store.ensure_knowledge_point(point)
+        if by != "user" and not missing:
+            choice = assessment.get("skill_choice") or {}
+            self.store.set_skill(kp_id, skill.name, "model", choice.get("reason")
+                                 or ("模型没有选出可用的 Skill，用通用讲解" if by == "fallback" else None))
         self.store.add_materials(kp_id, self._sources(materials))
         self.store.record_consent(kp_id, consent_hash(materials), self.model.endpoint)
         lesson["message_id"] = self.store.record_message(kp_id, "assistant", "lesson", lesson["lesson"])
         self.store.record_event(kp_id, None, "LessonSections",
-                                {"message_id": lesson["message_id"], "sections": sections})
+                                {"message_id": lesson["message_id"], "sections": sections,
+                                 **({"dropped_diagrams": dropped} if dropped else {})})
         return kp_id, lesson, materials
+
+    def _teaching_skill(self, point: str, choice: dict[str, Any] | None) -> tuple[Skill, str, str | None]:
+        """(Skill, settled by, missing user Skill): the user's setting wins while it still exists, else the
+        model's checked choice; a user Skill that is gone teaches with general this time."""
+        existing = self.store.get_knowledge_point(point)
+        if existing is not None and existing["skill_source"] == "user" and existing["skill"]:
+            chosen = self.skills.get(existing["skill"])
+            if chosen is not None and "teach" in chosen.stages:
+                return chosen, "user", None
+            return self.skills.general(), "fallback", existing["skill"]
+        if choice and not choice.get("invalid"):
+            chosen = self.skills.get(choice.get("name"))
+            if chosen is not None:
+                return chosen, "model", None
+        return self.skills.general(), "fallback", None
 
     def _gather(self, point: str, gap: str, materials: list[Material]) -> tuple[list[Material], str]:
         """Fill a material gap with tools; the program still judges sufficiency afterwards."""
@@ -432,12 +550,30 @@ class LearningRuntime:
             raise ValueError("当前资料或模型端点未获发送授权；请用 learn 重新确认")
         return sources
 
-    def classify_turn(self, attempt_id: str, question: str, text: str) -> str | None:
-        """Is a quiz input an answer or a question? None: the model cannot classify; "failed": it tried and failed."""
+    def classify_turn(self, attempt_id: str, question: str, text: str) -> dict[str, Any] | None:
+        """Is a quiz input an answer, a question, or both (mixed)? None: the model cannot classify.
+
+        Returns kind (answer / question / mixed / failed), the model's own kind and reason, and for a
+        mixed input the answer and question parts. A mixed split whose parts are not both non-empty
+        pieces of the input falls back to failed, so the user chooses."""
+        kind, reason, answer_text, question_text = self._classify(attempt_id, question, text)
+        if kind is None:
+            return None
+        result = {"kind": kind, "model_kind": kind, "reason": reason, "answer_text": "", "question_text": "",
+                  "split_valid": None}
+        if kind == "mixed":
+            parts = (_trim_fragment(answer_text), _trim_fragment(question_text))
+            valid = all(part and part in text for part in parts)
+            result.update(split_valid=valid, kind="mixed" if valid else "failed")
+            if valid:
+                result["answer_text"], result["question_text"] = parts
+        return result
+
+    def _classify(self, attempt_id: str, question: str, text: str) -> tuple[str | None, str, Any, Any]:
         sender = getattr(self.model, "request", None)
         legacy = getattr(self.model, "classify_turn", None)
         if not callable(sender) and not callable(legacy):
-            return None
+            return None, "", "", ""
         attempt = self.store.db.execute("""SELECT a.kp_id,k.title FROM attempts a
             JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=?""", (attempt_id,)).fetchone()
         if hasattr(self.model, "set_trace_context"):
@@ -447,9 +583,11 @@ class LearningRuntime:
         try:
             result = self._invoke(task, lambda: legacy(question, text))
         except Exception:
-            return "failed"
+            return "failed", "", "", ""
         kind = result.get("kind")
-        return kind if kind in ("answer", "question") else "failed"
+        reason = result.get("reason") if isinstance(result.get("reason"), str) else ""
+        return (kind if kind in ("answer", "question", "mixed") else "failed", reason,
+                result.get("answer_text"), result.get("question_text"))
 
     def clarify(self, kp_id: str, question: str, attempt_id: str | None = None,
                 source_message_id: str | None = None,
@@ -466,9 +604,10 @@ class LearningRuntime:
         if hasattr(self.model, "set_trace_context"):
             self.model.set_trace_context(kp_id, attempt_id)
         sources = self.sources_for(kp_id)
+        skill, by = self.skill_for(point, "clarify")
         task = ContextTask("clarify", point["title"], kp_id, attempt_id, current_input=question,
                            sources=tuple(sources), focus=(section,) if section else (),
-                           source_message_id=source_message_id, current_note_id=note_id)
+                           source_message_id=source_message_id, current_note_id=note_id, skill=skill, skill_by=by)
         try:
             result = None
             # Tools are open only while learning; self-tests and reviews never get a loop.
@@ -486,6 +625,11 @@ class LearningRuntime:
         self.store.explain_note(note_id, explanation)
         return {"explanation": explanation.strip(), "followup": followup.strip()}
 
+    def refresh_roots(self) -> None:
+        """Take the writable directories for the next turn: the environment's and those added on the page."""
+        self.write_roots = self.file_roots.current(self.store, "write")
+        self.skills.set_write_roots(self.write_roots)
+
     def _clarify_with_tools(self, task: ContextTask, kp_id: str, sources: list[dict[str, Any]],
                             confirm: Callable[[Any, dict[str, Any]], bool] | None) -> dict[str, Any] | None:
         """Clarify while learning with read tools and confirmed note writes; None falls back to a plain call.
@@ -495,7 +639,8 @@ class LearningRuntime:
         """
         names = [name for name in self.tools.names() if self.tools.get(name).in_loops
                  and self.tools.get(name).permission in ("read", "write_file")
-                 and self.tools.get(name).source != "zhiqiu.queries"]
+                 and self.tools.get(name).source != "zhiqiu.queries"
+                 and (name != "write_file" or self.write_roots)]
         self._readable = [str(item["source"]) for item in sources if item.get("kind") == "local"]
         request = self.context.build(task)
         scope = ToolScope(frozenset({"read", "write_file"}), confirm=confirm, kp_id=kp_id, point=task.point)
@@ -590,8 +735,10 @@ class LearningRuntime:
                 position = end
             if position != len(content):
                 raise ValueError("追问来源片段覆盖不完整")
+        skill, by = self.skill_for(self.store.get_knowledge_point(kp_id), "clarify_combine")
         return self._invoke(ContextTask("clarify_combine", point, kp_id, attempt_id,
-                                        current_input=question, sources=tuple(findings)), lambda: {})
+                                        current_input=question, sources=tuple(findings), skill=skill, skill_by=by),
+                            lambda: {})
 
     def next_question(self, attempt_id: str) -> dict[str, Any]:
         attempt = self.store.db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
@@ -619,7 +766,8 @@ class LearningRuntime:
                                                 question_history=tuple(qa), focus=tuple(focus)),
                                     lambda: self.model.next_question(point, qa, sources, focus))
             try:
-                return self._accept_question(attempt, attempt_id, point, qa, proposal)
+                return self._accept_question(attempt, attempt_id, point, qa, proposal,
+                                             keep_shape=retry == QUESTION_RETRIES)
             except _RejectedQuestion as rejected:
                 self._output_invalid("next_question", str(rejected), proposal, kp_id=attempt["kp_id"],
                                      attempt_id=attempt_id, point=point)
@@ -628,8 +776,11 @@ class LearningRuntime:
                 feedback = f"上一次输出未通过校验：{rejected}。请修正后重新输出完整 JSON。"
 
     def _accept_question(self, attempt: Any, attempt_id: str, point: str, qa: list[dict[str, Any]],
-                         proposal: dict[str, Any]) -> dict[str, Any]:
-        """Validate a proposed question and save it; a model-caused problem raises _RejectedQuestion."""
+                         proposal: dict[str, Any], keep_shape: bool = False) -> dict[str, Any]:
+        """Validate a proposed question and save it; a model-caused problem raises _RejectedQuestion.
+
+        keep_shape: on the last try a question that is only too long or asks too much is saved with a
+        warning; stopping the whole quiz for it would be worse."""
         if proposal.get("done") is True:
             answered_dimensions = {row["dimension"] for row in qa if row["answer_id"]}
             if answered_dimensions != {"concept", "mechanism", "application"}:
@@ -650,6 +801,9 @@ class LearningRuntime:
             raise _RejectedQuestion("模型返回了无效追问目标；问答保持可恢复")
         if followup_of:
             followup_of = _followup_target(qa, dimension, followup_of)
+        shape = question_shape(question)
+        if shape and not keep_shape:
+            raise _RejectedQuestion(shape, shape=True)
         try:
             question_id, seq = self.store.add_question(attempt_id, dimension, question, difficulty, basis,
                                                        followup_of or None)
@@ -657,6 +811,9 @@ class LearningRuntime:
             if str(exc) != "invalid follow-up question":
                 raise
             raise _RejectedQuestion("模型返回了不允许的追问；问答保持可恢复") from exc
+        if shape:
+            guardrails.record(self.store, "question_shape", "warned", shape, kp_id=attempt["kp_id"],
+                              attempt_id=attempt_id, question_id=question_id)
         return {"done": False, "question_id": question_id, "question": question, "dimension": dimension,
                 "seq": seq, "followup": bool(followup_of)}
 
@@ -702,7 +859,7 @@ class LearningRuntime:
                         tuple(item.get("evidence", []))) for item in g.get("assessments", []))
                     grades.append(DimensionGrade(g["dimension"], g["score"], g.get("question_id", ""),
                                                  g.get("answer_id", ""), g.get("evidence", ""),
-                                                 g["rationale"], assessments, _supplement(g)))
+                                                 g["rationale"], assessments, _supplement(g), _feedback(g)))
                 answers = {row["answer_id"]: (row["question_id"], row["answer"]) for row in qa if row["answer_id"]}
                 questions = {row["question_id"]: (row["dimension"], row["answer_id"]) for row in qa}
                 verified = calculate(grades, answers, questions)
@@ -744,7 +901,8 @@ class LearningRuntime:
                                                 question_history=tuple(extracted)),
                                     lambda: self.model.grade_combine(point, dimension, extracted))
             grade = DimensionGrade(dimension, response["score"], "", "", "",
-                                   response["rationale"], tuple(assessments), _supplement(response))
+                                   response["rationale"], tuple(assessments), _supplement(response),
+                                   _feedback(response))
             answers = {row["answer_id"]: (row["question_id"], row["answer"])
                        for row in group if row["answer_id"]}
             questions = {row["question_id"]: (dimension, row["answer_id"]) for row in group}

@@ -72,6 +72,13 @@ def test_the_page_and_every_endpoint_answer(served):
     assert len(detail["questions"]) == 3 and len(detail["dimension_scores"]) == 3
     assert detail["trace_ids"] == [traces[0]["trace_id"]]
     assert {event["payload"]["entity"] for event in detail["state_events"]} >= {"attempt", "review_task"}
+    assert detail["classifications"] == []  # this model does not classify inputs
+    store.record_event(None, result.attempt_id, "TurnClassified",
+                       {"question_id": detail["questions"][0]["question_id"], "model_kind": "mixed",
+                        "reason": "既答又问", "split_valid": True, "final": "split", "decided_by": "user",
+                        "input_chars": 13})
+    classified = get_json(server, f"/api/attempt/{result.attempt_id}")["classifications"]
+    assert [(c["model_kind"], c["final"], c["decided_by"]) for c in classified] == [("mixed", "split", "user")]
     live = get_json(server, "/api/live")
     assert live["latest"]["trace_id"] == traces[0]["trace_id"] and live["db"] == "state.sqlite"
 

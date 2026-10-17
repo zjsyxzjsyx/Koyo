@@ -116,3 +116,31 @@ def test_cli_lists_logs_and_forgets_conversations(tmp_path, monkeypatch):
     assert refused.exit_code != 0
     forgot = CliRunner().invoke(app, db + ["chat", "forget", "--all"], input="y\n")
     assert "已删除 1 段对话" in forgot.output
+
+
+def test_titles_are_cleaned_and_fall_back_to_the_first_message(tmp_path):
+    from zhiqiu.conversations import EMPTY_TITLE, clean_title
+    assert clean_title("「BST 中序遍历有序性」。") == "BST 中序遍历有序性"
+    assert clean_title("  学习：C#\n") == "学习：C#" and clean_title("C++？") == "C++"
+    assert clean_title("a\u200bb\n\tc\x07") == "ab c"
+    assert clean_title("“”。") == ""
+    assert clean_title("继续：二叉树遍历（老讲解）") == "继续：二叉树遍历（老讲解）"
+    assert clean_title("（空对话）") == "空对话" and clean_title("《算法导论》（第三版）") == "《算法导论》（第三版）"
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    chats = Conversations(store)
+    conversation = chats.open_today()
+    assert chats.display_title(chats.get(conversation["id"])) == EMPTY_TITLE
+    first = "请问二叉树的中序遍历为什么总能输出有序序列呢？"
+    chats.add_message(conversation["id"], "user", "chat", first)
+    assert chats.fallback_title(conversation["id"]) == first[:20] + "…"
+    assert chats.get(conversation["id"])["title"] == ""  # computed when shown, not written back
+    assert chats.set_title(conversation["id"], chats.fallback_title(conversation["id"]), "fallback").endswith("…")
+    assert chats.set_title(conversation["id"], "  “红黑树”  ", "user") == "红黑树"
+    row = chats.get(conversation["id"])
+    assert (row["title"], row["title_source"]) == ("红黑树", "user")
+    assert chats.recent()[0]["title"] == "红黑树"
+    for source in ("", "auto"):
+        with pytest.raises(ValueError):
+            chats.set_title(conversation["id"], "x", source)
+    with pytest.raises(ValueError):
+        chats.set_title(conversation["id"], "。。", "user")

@@ -127,3 +127,30 @@ def test_without_prices_metrics_show_tokens_only(tmp_path, monkeypatch):
     assert result.exit_code == 0 and data["priced"] is False and data["model"]["cost"] is None
     text = CliRunner().invoke(app, ["--db", str(db), "metrics"]).output
     assert "只显示 token" in text
+
+
+
+def test_the_title_stage_is_counted_on_its_own(tmp_path):
+    from test_agent import ChatModel, say
+    from test_flows import ScriptedIO
+    from zhiqiu.agent import ChatAgent
+    from zhiqiu.conversations import Conversations
+    from zhiqiu.runtime import LearningRuntime
+
+    class RequestTitleModel(ChatModel):
+        def request(self, request):
+            store.record_llm_call({"point": "", "model": "m", "prompt_hash": "h", "latency_ms": 1, "status": "ok",
+                                   "stage": request.stage, "tokens_in": 30, "tokens_out": 5,
+                                   "started_at_ns": tracing.now_ns()})
+            assert request.stage == "conversation_title"
+            return {"title": "杭州天气"}
+
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    agent = ChatAgent(store, LearningRuntime(store, RequestTitleModel([say("晴。")])), ScriptedIO())
+    agent.start()
+    agent.handle("明天杭州天气怎么样")
+    assert Conversations(store).get(agent.conversation_id)["title"] == "杭州天气"
+    stages = metrics.collect(store.db, 1)["model"]["by_stage"]
+    assert stages["conversation_title"]["calls"] == 1
+    build = store.db.execute("SELECT stage,template_version FROM context_builds WHERE stage='conversation_title'").fetchone()
+    assert build is not None

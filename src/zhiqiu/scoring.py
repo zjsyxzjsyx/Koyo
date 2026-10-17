@@ -25,16 +25,41 @@ RUBRIC = ("0=回答不会，或完全错误、没有任何正确点；只要答�
           "同一维度有未答题时，未答题覆盖的要求视为未被证明，该维度不给 4：只答了基础题且答对时最高给 2，"
           "已答题中有答对的进阶或迁移题时最高给 3；须在理由中标明证据范围。")
 FOLLOWUP_RULES = ("进行费曼问答，返回 JSON。先覆盖尚无回答的 concept、mechanism、application 维度。"
+                  "本次问答已有的题和回答只看 current_attempt；focus 是以前学习中得分低的旧题、旧回答和评分理由，"
+                  "只用来决定复习重点：focus 里的题不算本次已作答，也不能被追问。"
+                  "复习时优先针对 focus 中的错点出新题，不要原样重复旧题。"
                   "三个维度都已作答后，结束前必须逐题检查已答题：若某题回答含糊到无法判断是否理解"
                   "（只有结论或口语化概括，缺少区分正确理解与常见误解的关键条件），且该题尚未被追问，"
                   "则 done=false，在同一维度追问一次，followup_of 填该题 question_id。"
                   "明确答对或明确答错（包括表述清楚的误解）的回答不追问。"
-                  "追问只能请学习者用自己的话展开、举例或说明理由；不得在问题中给出正确结论、关键词或正确做法，"
-                  "也不得指出原答哪里错。不得追问追问题或重复追问同一题。"
+                  "追问只针对原答里最含糊的一句：可以用引号引用学习者的原话，问一个比原题更小的问题，"
+                  "请学习者说明理由或举一个例子；不得重复或改写原题，不得要求“展开讲”“完整讲一遍”。"
+                  "追问不得在问题中给出正确结论、关键词或正确做法，也不得指出原答哪里错。不得追问追问题或重复追问同一题。"
                   "没有需要追问的题时 done=true；非追问的题 followup_of=null。"
                   "字段：done 布尔值；未结束时 dimension 为 concept/mechanism/application 之一，"
                   "question 与 difficulty_basis 非空，difficulty 为 basic/advanced/transfer 之一。"
-                  "难度只根据题目要求确定，不能在看到答案后修改。")
+                  "难度只根据题目要求确定，不能在看到答案后修改。"
+                  "每题只问一件事：只含一个问号，题干不超过 60 字，学习者用 2 到 4 句话能答完；"
+                  "不要用“并且”“同时”“另外请”把多个要求串在一起。"
+                  "需要手推执行过程的题，题目自己给一个最小例子（例如三个节点的树），只问其中一步。")
+
+
+# A quiz question asks one thing: at most one question mark and this many characters (spaces not counted).
+# The prompt asks for 60; the check allows 80. Not part of the prompt fingerprint, so a change here must be
+# written down in the PRD's implementation record.
+QUESTION_MAX_CHARS = 80
+QUESTION_MAX_MARKS = 1
+
+
+def question_shape(question: str) -> str | None:
+    """Why a proposed question is not "one question, one thing", or None when it is."""
+    marks = question.count("？") + question.count("?")
+    if marks > QUESTION_MAX_MARKS:
+        return f"一题只能问一件事：题目里有 {marks} 个问号"
+    length = len("".join(question.split()))
+    if length > QUESTION_MAX_CHARS:
+        return f"题目过长：{length} 字，上限 {QUESTION_MAX_CHARS}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -55,6 +80,8 @@ class DimensionGrade:
     rationale: str
     assessments: tuple[QuestionAssessment, ...] = ()
     supplement: str = ""
+    # One sentence for the learner (shown in the grading summary); never part of the score.
+    feedback: str = ""
 
 
 @dataclass(frozen=True)

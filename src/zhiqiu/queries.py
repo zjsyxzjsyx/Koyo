@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from contextlib import closing
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from .tools import ToolError, ToolSpec
@@ -54,6 +54,14 @@ def qa_for(db: sqlite3.Connection, attempt_id: str) -> list[sqlite3.Row]:
         WHERE q.attempt_id=? ORDER BY q.seq""", (attempt_id,)).fetchall()
 
 
+def _without_empty_skill(build: dict[str, Any]) -> dict[str, Any]:
+    """Only teach and clarify builds name a Skill; elsewhere the four empty columns are left out."""
+    if build.get("skill_name") is None:
+        for key in ("skill_name", "skill_version", "skill_sha", "skill_source"):
+            build.pop(key, None)
+    return build
+
+
 def trace(db: sqlite3.Connection, attempt_id: str) -> dict[str, Any]:
     attempt = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
     if not attempt:
@@ -82,7 +90,8 @@ def trace(db: sqlite3.Connection, attempt_id: str) -> dict[str, Any]:
             "tool_calls": [dict(r) for r in db.execute("""SELECT c.* FROM tool_calls c, attempts a
                 JOIN knowledge_points k ON k.id=a.kp_id WHERE a.id=? AND (c.attempt_id=a.id
                 OR (c.attempt_id IS NULL AND (c.kp_id=a.kp_id OR c.point=k.title))) ORDER BY c.rowid""", (attempt_id,))],
-            "context_builds": [dict(r) for r in db.execute("SELECT * FROM context_builds WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
+            "context_builds": [_without_empty_skill(dict(r)) for r in db.execute(
+                "SELECT * FROM context_builds WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
             "clarification_chunks": [dict(r) for r in db.execute("""SELECT c.* FROM clarification_chunks c
                 JOIN attempts a ON a.kp_id=c.kp_id WHERE a.id=? ORDER BY c.rowid""", (attempt_id,))],
             "episodic_memories": [dict(r) for r in db.execute("SELECT * FROM episodic_memories WHERE attempt_id=? ORDER BY rowid", (attempt_id,))],
@@ -97,6 +106,60 @@ def upcoming_tasks(db: sqlite3.Connection, until: str) -> list[dict[str, Any]]:
         FROM review_tasks t JOIN knowledge_points k ON k.id=t.kp_id
         WHERE k.state='active' AND t.state IN ('pending','started') AND t.next_remind_date<=?
         ORDER BY t.next_remind_date,t.original_due_date,t.kp_id""", (until,))]
+
+
+FORECAST_DAYS = 14
+_RULES = {"partial-next-day-v1": "次日补测"}
+
+
+def _rule(version: str) -> str:
+    return "FSRS" if version.startswith("fsrs-") else _RULES.get(version, version)
+
+
+def schedule(db: sqlite3.Connection, today: str, start: str, end: str) -> dict[str, Any]:
+    """Open review tasks by the day they will be reminded, reviews done on past days in [start, end],
+    a 14-day load forecast and the points that need relearning. Only each point's next review is
+    known (FSRS schedules one at a time), and no task id leaves here: a review is started by title."""
+    from .store import DAILY_REVIEW_LIMIT
+
+    items = []
+    for row in db.execute("""SELECT t.kp_id,k.title,t.next_remind_date,t.due_date,t.original_due_date,t.state,
+            t.deferrals,t.rule_version,r.total FROM review_tasks t JOIN knowledge_points k ON k.id=t.kp_id
+            LEFT JOIN reviews r ON r.id=t.review_id
+            WHERE k.state='active' AND t.state IN ('pending','started')
+            ORDER BY t.next_remind_date,t.original_due_date,k.title"""):
+        items.append({"kp_id": row["kp_id"], "title": row["title"], "date": row["next_remind_date"],
+                      "due_date": row["due_date"], "original_due_date": row["original_due_date"],
+                      "deferrals": row["deferrals"], "state": row["state"], "rule": _rule(row["rule_version"]),
+                      "last_total": row["total"], "due": row["next_remind_date"] <= today})
+    done: dict[str, list[dict[str, Any]]] = {}
+    for row in db.execute("""SELECT a.start_date,k.title,r.total FROM attempts a
+            JOIN knowledge_points k ON k.id=a.kp_id LEFT JOIN reviews r ON r.attempt_id=a.id
+            WHERE a.kind='review' AND a.ended_at IS NOT NULL AND a.start_date BETWEEN ? AND ?
+            ORDER BY a.started_at""", (start, end)):
+        done.setdefault(row["start_date"], []).append({"title": row["title"], "total": row["total"]})
+    first, last = date.fromisoformat(start), date.fromisoformat(end)
+    days = []
+    for offset in range((last - first).days + 1):
+        day = (first + timedelta(days=offset)).isoformat()
+        days.append({"date": day, "items": [item for item in items if item["date"] == day and day >= today],
+                     "done": done.get(day, [])})
+    now = date.fromisoformat(today)
+    forecast = []
+    for offset in range(FORECAST_DAYS):
+        day = (now + timedelta(days=offset)).isoformat()
+        count = len({item["kp_id"] for item in items if item["date"] == day})
+        forecast.append({"date": day, "count": count, "over_limit": count > DAILY_REVIEW_LIMIT})
+    overdue = [item for item in items if item["date"] < today]
+    week_end = (now + timedelta(days=7)).isoformat()
+    relearn = [row["title"] for row in db.execute(
+        "SELECT title FROM knowledge_points WHERE state='needs_relearn' ORDER BY title")]
+    return {"today": today, "start": start, "end": end, "limit": DAILY_REVIEW_LIMIT,
+            "done_today": db.execute("SELECT COUNT(*) FROM attempts WHERE kind='review' AND start_date=?",
+                                     (today,)).fetchone()[0],
+            "summary": {"overdue": len(overdue), "today": sum(item["date"] == today for item in items),
+                        "next7": sum(today < item["date"] <= week_end for item in items), "relearn": len(relearn)},
+            "overdue": overdue, "days": days, "forecast": forecast, "backlog": len(overdue), "relearn": relearn}
 
 
 def knowledge_point(db: sqlite3.Connection, title_or_id: str) -> dict[str, Any]:

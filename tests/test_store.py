@@ -119,3 +119,144 @@ def test_grade_evidence_and_rounding(tmp_path):
     with pytest.raises(ValueError, match="evidence"):
         calculate([DimensionGrade("concept", 4, grades[0].question_id, grades[0].answer_id,
                                   "invented", "wrong")], pairs)
+
+
+def test_v19_database_gains_title_and_feedback_columns_with_backup(tmp_path):
+    from zhiqiu.conversations import Conversations
+    from zhiqiu.store import SCHEMA_VERSION
+    store = store_at(tmp_path)
+    kp, attempt, grades = answered_attempt(store)
+    store.finalize(attempt, grades)
+    chats = Conversations(store)
+    conversation = chats.open_today()
+    chats.add_message(conversation["id"], "user", "chat", "你好")
+    for table, column in (("conversations", "title"), ("conversations", "title_source"),
+                          ("dimension_scores", "feedback")):
+        store.db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    store.db.execute("PRAGMA user_version=19")
+    before = store.db.execute("SELECT review_id,dimension,score,rationale FROM dimension_scores ORDER BY dimension").fetchall()
+    before = [tuple(row) for row in before]
+    store.close()
+
+    reopened = store_at(tmp_path)
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert (tmp_path / "state.sqlite.pre-v20.bak").exists()
+    after = reopened.db.execute("""SELECT review_id,dimension,score,rationale FROM dimension_scores
+        ORDER BY dimension""").fetchall()
+    assert [tuple(row) for row in after] == before
+    assert {row["feedback"] for row in reopened.db.execute("SELECT feedback FROM dimension_scores")} == {""}
+    row = reopened.db.execute("SELECT title,title_source FROM conversations WHERE id=?", (conversation["id"],)).fetchone()
+    assert tuple(row) == ("", "")
+    exported = reopened.export_json()
+    assert "title" in exported["conversations"][0] and "feedback" in exported["dimension_scores"][0]
+
+
+def test_new_database_has_v20_columns_defaulting_to_empty(tmp_path):
+    from zhiqiu.conversations import Conversations
+    store = store_at(tmp_path)
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 22
+    columns = {table: {row["name"]: row for row in store.db.execute(f"PRAGMA table_info({table})")}
+               for table in ("conversations", "dimension_scores")}
+    for table, column in (("conversations", "title"), ("conversations", "title_source"),
+                          ("dimension_scores", "feedback")):
+        assert columns[table][column]["notnull"] == 1 and columns[table][column]["dflt_value"] == "''"
+    chats = Conversations(store)
+    conversation = chats.open_today()
+    store.db.execute("UPDATE conversations SET title='红黑树',title_source='user' WHERE id=?", (conversation["id"],))
+    chats.forget(conversation["id"])
+    assert store.db.execute("SELECT COUNT(*) FROM conversations WHERE title='红黑树'").fetchone()[0] == 0
+
+
+def test_v20_database_gains_file_roots_with_backup(tmp_path):
+    from zhiqiu.store import SCHEMA_VERSION
+    store = store_at(tmp_path)
+    kp, attempt, grades = answered_attempt(store)
+    store.finalize(attempt, grades)
+    store.db.execute("DROP TABLE file_roots")
+    store.db.execute("PRAGMA user_version=20")
+    store.close()
+
+    reopened = store_at(tmp_path)
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert (tmp_path / "state.sqlite.pre-v21.bak").exists()
+    assert reopened.roots("read") == [] and "file_roots" in reopened.export_json()
+    assert reopened.db.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 1
+
+
+def test_roots_are_added_and_removed_with_an_audit_event(tmp_path):
+    import json
+    store = store_at(tmp_path)
+    store.add_root("read", "D:/notes/算法", 37, False)
+    store.add_root("write", "D:/notes/out", 0, False)
+    with pytest.raises(ValueError, match="已在白名单中"):
+        store.add_root("read", "D:/notes/算法", 37, False)
+    with pytest.raises(ValueError):
+        store.add_root("exec", "D:/x", 0, False)
+    assert [row["path"] for row in store.roots("read")] == ["D:/notes/算法"]
+    store.remove_root("read", "D:/notes/算法")
+    with pytest.raises(LookupError):
+        store.remove_root("read", "D:/notes/算法")
+    assert store.roots("read") == [] and len(store.roots("write")) == 1
+    events = [json.loads(row[0]) for row in store.db.execute(
+        "SELECT payload_json FROM events WHERE type='RootsChanged' ORDER BY id")]
+    assert [(e["action"], e["kind"]) for e in events] == [("add", "read"), ("add", "write"), ("remove", "read")]
+    assert set(events[0]) == {"action", "kind", "path", "files", "truncated", "via"} and events[2]["files"] == 37
+
+
+def test_v21_database_gains_skill_and_input_source_columns_with_backup(tmp_path):
+    from zhiqiu.store import SCHEMA_VERSION
+    store = store_at(tmp_path)
+    kp, attempt, grades = answered_attempt(store)
+    store.finalize(attempt, grades)
+    for table, column in (("knowledge_points", "skill"), ("knowledge_points", "skill_source"),
+                          ("knowledge_points", "skill_at"), ("context_builds", "skill_name"),
+                          ("context_builds", "skill_version"), ("context_builds", "skill_sha"),
+                          ("context_builds", "skill_source"), ("answers", "input_source")):
+        store.db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    store.db.execute("PRAGMA user_version=21")
+    store.close()
+
+    reopened = store_at(tmp_path)
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert (tmp_path / "state.sqlite.pre-v22.bak").exists()
+    assert {row["input_source"] for row in reopened.db.execute("SELECT input_source FROM answers")} == {"text"}
+    row = reopened.db.execute("SELECT skill,skill_source,skill_at FROM knowledge_points WHERE id=?", (kp,)).fetchone()
+    assert tuple(row) == (None, None, None)
+    exported = reopened.export_json()
+    assert "skill" in exported["knowledge_points"][0] and "input_source" in exported["answers"][0]
+
+
+def test_set_skill_records_a_change_only_when_the_value_changes(tmp_path):
+    import json
+    store = store_at(tmp_path)
+    kp = store.ensure_knowledge_point("二叉树遍历")
+    assert store.set_skill(kp, "feynman", "model", "适合先用白话讲清") is True
+    assert store.set_skill(kp, "feynman", "model") is False
+    assert store.set_skill(kp, "general", "user") is True
+    with pytest.raises(ValueError):
+        store.set_skill(kp, "general", "agent")
+    with pytest.raises(LookupError):
+        store.set_skill("missing", "general", "user")
+    assert store.set_skill(kp, None, None) is True
+    row = store.db.execute("SELECT skill,skill_source,skill_at FROM knowledge_points WHERE id=?", (kp,)).fetchone()
+    assert tuple(row) == (None, None, None)
+    events = [json.loads(r[0]) for r in store.db.execute(
+        "SELECT payload_json FROM events WHERE type='SkillChanged' ORDER BY id")]
+    assert events == [{"from": None, "to": "feynman", "source": "model", "reason": "适合先用白话讲清"},
+                      {"from": "feynman", "to": "general", "source": "user"},
+                      {"from": "general", "to": None, "source": "user"}]
+
+
+def test_answers_record_how_they_were_entered(tmp_path):
+    store = store_at(tmp_path)
+    kp = store.ensure_knowledge_point("二叉树遍历")
+    attempt = store.start_attempt(kp, "first")
+    typed, _ = store.add_question(attempt, "concept", "解释前序")
+    spoken, _ = store.add_question(attempt, "mechanism", "解释中序")
+    store.add_answer(typed, "根左右")
+    store.add_answer(spoken, "左根右", input_source="voice")
+    other, _ = store.add_question(attempt, "application", "举例")
+    with pytest.raises(ValueError):
+        store.add_answer(other, "x", input_source="keyboard")
+    rows = dict(store.db.execute("SELECT question_id,input_source FROM answers").fetchall())
+    assert rows == {typed: "text", spoken: "voice"}

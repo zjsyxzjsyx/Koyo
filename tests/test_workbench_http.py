@@ -256,7 +256,9 @@ def test_the_state_panel_follows_approvals_and_learning_results(served):
     after = call(server, "/api/chat/input", "POST", {"text": "写下来"})[1]["next"]
     event, _ = wait_event(server, ("approval",), after=after)
     risk = call(server, "/api/chat/state")[1]["risk"]
-    assert risk["pending"] == [{"kind": "approval", "tool": "write_file", "text": risk["pending"][0]["text"]}]
+    [pending] = risk["pending"]
+    assert (pending["kind"], pending["tool"], pending["request_id"]) == ("approval", "write_file", event["request_id"])
+    assert pending["approval_request_id"] == event["approval_request_id"] and pending["full_text"].startswith(pending["text"])
     assert risk["pending"][0]["text"].startswith("写入文件") and risk["recent"][0]["status"] == "pending"
     call(server, "/api/chat/respond", "POST", {"request_id": event["request_id"], "value": False})
     wait_event(server, ("idle",), after=event["seq"])
@@ -282,3 +284,177 @@ def test_the_state_panel_follows_approvals_and_learning_results(served):
     assert result["total"] is not None and result["review_kind"] == "complete" and result["next_review"]
     assert "完整评阅" in result["summary"] and result["attempt_id"]
     assert data["verification"]["traces"] >= 2 and data["verification"]["passed"] is True
+
+def test_the_page_renders_by_output_kind_not_by_text_patterns(served):
+    server, bench, model = served
+    status, page = call(server, "/", token=False)
+    assert status == 200 and "TOOL_NOTE" not in page and "say_kind" in page
+    greeting = call(server, "/api/chat/events")[1]["events"][0]
+    assert greeting["say_kind"] == "note" and "/exit" not in greeting["text"]
+
+
+def test_the_grading_card_carries_its_attempt_and_its_detail_reads_while_busy(served, tmp_path):
+    server, bench, model = served
+    note = tmp_path / "notes" / "rbtree.md"
+    after = call(server, "/api/chat/input", "POST", {"text": f"/learn 红黑树 --from {note}"})[1]["next"]
+    answers = iter(["/done", "根左右", "递归栈", "表达式树"])
+    attempt_seen = False
+    while True:
+        event, data = wait_event(server, ("ask", "confirm", "idle"), after=after)
+        after = event["seq"]
+        if event["kind"] == "idle":
+            break
+        if event["kind"] == "ask" and event["prompt"].startswith("回答（"):
+            # Mid-quiz the worker is busy; the read-only attempt endpoint still answers.
+            attempt = sqlite3.connect(server.db_path).execute("SELECT id FROM attempts").fetchone()[0]
+            assert data["busy"] is True and call(server, f"/api/attempt/{attempt}")[0] == 200
+            attempt_seen = True
+        value = next(answers) if event["kind"] == "ask" else True
+        call(server, "/api/chat/respond", "POST", {"request_id": event["request_id"], "value": value})
+    assert attempt_seen
+    events = call(server, "/api/chat/events")[1]["events"]
+    card = next(item for item in events if item["kind"] == "say" and item.get("say_kind") == "outcome")
+    assert card["meta"]["attempt_id"] == attempt and card["text"].startswith("完整评阅 78 分")
+    status, detail = call(server, f"/api/attempt/{attempt}")
+    assert status == 200 and len(detail["dimension_scores"]) == 3
+
+
+
+def seeded(tmp_path, *conversations):
+    """Conversations written before the workbench starts: [(title or "", [messages...]), ...]."""
+    from zhiqiu.conversations import Conversations
+    from zhiqiu.store import Store
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 14)))
+    chats = Conversations(store)
+    ids = []
+    for title, messages in conversations:
+        conversation = chats.start_new([], {})
+        for index, text in enumerate(messages):
+            chats.add_message(conversation["id"], "user" if index % 2 == 0 else "assistant", "chat", text)
+        if title:
+            chats.set_title(conversation["id"], title, "model")
+        ids.append(conversation["id"])
+    store.close()
+    return ids
+
+
+@pytest.fixture()
+def switching(tmp_path):
+    """Two older conversations and an empty one, then a workbench on today's (new) conversation."""
+    ids = seeded(tmp_path, ("明天杭州天气", ["明天杭州天气怎么样", "多云"]),
+                 ("", ["二叉树的中序遍历为什么能输出有序序列", "因为左小右大", "那后序呢", "左右根"]),
+                 ("", []))
+    model = ChatModel([])
+    bench = Workbench(tmp_path / "state.sqlite", lambda s, io: ChatAgent(s, LearningRuntime(s, model), io),
+                      clock=FixedClock(date(2026, 10, 15)))
+    bench.start()
+    server = DashboardServer(tmp_path / "state.sqlite", port=0, workbench=bench)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    yield server, bench, model, ids
+    server.shutdown()
+    server.server_close()
+    assert bench.close()
+
+
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def test_the_sidebar_lists_conversations_with_messages_and_the_current_one(switching):
+    server, bench, model, (weather, tree, empty) = switching
+    status, data = call(server, "/api/chat/conversations")
+    assert status == 200 and data["current"] == bench.conversation_id
+    rows = {row["id"]: row for row in data["conversations"]}
+    assert set(rows) == {weather, tree, bench.conversation_id} and empty not in rows
+    assert rows[weather]["title"] == "明天杭州天气" and rows[weather]["messages"] == 2
+    assert rows[tree]["title"] == "二叉树的中序遍历为什么能输出有序序列" and rows[tree]["title_source"] == ""
+    assert rows[tree]["short_id"] == tree[:8] and rows[tree]["chat_date"] == "2026-10-14"
+    assert rows[bench.conversation_id]["current"] and rows[bench.conversation_id]["title"] == "（空对话）"
+    assert all(row["resumable"] is False for row in rows.values())
+    assert call(server, "/api/chat/conversations", token=False)[0] == 403
+
+
+def test_switching_shows_that_conversation_and_writes_the_next_input_there(switching):
+    server, bench, model, (weather, tree, empty) = switching
+    status, data = call(server, "/api/chat/switch", "POST", {"conversation_id": tree})
+    assert status == 202
+    event, _ = wait_event(server, ("switched",), after=data["next"])
+    assert event["conversation_id"] == tree and event["history_upto"] == 4
+    wait_event(server, ("idle",), after=event["seq"])
+    assert bench.conversation_id == tree
+    history = call(server, "/api/chat/history")[1]
+    assert history["conversation_id"] == tree and len(history["messages"]) == 4
+    other = call(server, f"/api/chat/history?conversation_id={weather}")[1]
+    assert [m["content"] for m in other["messages"]] == ["明天杭州天气怎么样", "多云"]
+    assert call(server, "/api/chat/history?conversation_id=nope")[0] == 404
+    model.rounds = [say("中序是左根右。")]
+    after = call(server, "/api/chat/input", "POST", {"text": "再讲讲中序"})[1]["next"]
+    wait_event(server, ("idle",), after=after)
+    db = sqlite3.connect(server.db_path)
+    try:
+        messages = db.execute("SELECT content FROM conversation_messages WHERE conversation_id=? ORDER BY seq",
+                              (tree,)).fetchall()
+    finally:
+        db.close()
+    assert [row[0] for row in messages][-2:] == ["再讲讲中序", "中序是左根右。"]
+    # After a reload the page sees the switch and what followed, nothing from the conversation before.
+    events = call(server, "/api/chat/events")[1]["events"]
+    assert events[0]["kind"] == "switched" and events[0]["conversation_id"] == tree
+    assert any(item.get("text") == "已切换到「二叉树的中序遍历为什么能输出有序序列」（4 条消息）。" for item in events)
+    assert not any(UUID.search(item.get("text") or "") for item in events)
+
+
+def test_new_from_the_button_and_from_a_typed_command_both_switch(switching):
+    server, bench, model, ids = switching
+    first = bench.conversation_id
+    data = call(server, "/api/chat/new", "POST", {})[1]
+    event, _ = wait_event(server, ("switched",), after=data["next"])
+    assert event["conversation_id"] != first and event["history_upto"] == 0
+    wait_event(server, ("idle",), after=event["seq"])
+    second = bench.conversation_id
+    data = call(server, "/api/chat/input", "POST", {"text": "/new"})[1]
+    event, _ = wait_event(server, ("switched",), after=data["next"])
+    assert event["conversation_id"] not in (first, second)
+    note, _ = wait_event(server, ("say",), after=event["seq"])
+    assert note["text"] == "已开始新对话。" and note["say_kind"] == "note"
+
+
+def test_renaming_from_the_sidebar_keeps_the_users_title(switching):
+    server, bench, model, (weather, tree, empty) = switching
+    data = call(server, "/api/chat/rename", "POST", {"conversation_id": tree, "title": "  「二叉树遍历」 "})[1]
+    wait_event(server, ("idle",), after=data["next"])
+    rows = {row["id"]: row for row in call(server, "/api/chat/conversations")[1]["conversations"]}
+    assert (rows[tree]["title"], rows[tree]["title_source"]) == ("二叉树遍历", "user")
+    assert bench.conversation_id != tree  # renaming does not switch
+    assert call(server, "/api/chat/rename", "POST", {"conversation_id": tree, "title": "。。"})[0] == 400
+    assert call(server, "/api/chat/rename", "POST", {"conversation_id": tree, "title": "长" * 31})[0] == 400
+    assert call(server, "/api/chat/rename", "POST", {"conversation_id": tree})[0] == 400
+    assert call(server, "/api/chat/rename", "POST", {"conversation_id": "nope", "title": "x"})[0] == 404
+    assert call(server, "/api/chat/switch", "POST", {"conversation_id": "nope"})[0] == 404
+    assert call(server, "/api/chat/switch", "POST", {})[0] == 400
+
+
+def test_switching_is_refused_while_a_prompt_waits(served):
+    server, bench, model = served
+    model.rounds = [tool("write_file", {"path": "a.md", "content": "笔记"}, "a"), say("好")]
+    after = call(server, "/api/chat/input", "POST", {"text": "写下来"})[1]["next"]
+    event, data = wait_event(server, ("approval",), after=after)
+    other = bench.conversation_id
+    for path, body in (("/api/chat/switch", {"conversation_id": other}), ("/api/chat/new", {}),
+                       ("/api/chat/rename", {"conversation_id": other, "title": "改名"})):
+        assert call(server, path, "POST", body)[0] == 409
+    call(server, "/api/chat/respond", "POST", {"request_id": event["request_id"], "value": False})
+    wait_event(server, ("idle",), after=event["seq"])
+    assert call(server, "/api/chat/new", "POST", {})[0] == 202
+
+
+@pytest.mark.parametrize("path, body", [("/api/chat/switch", {"conversation_id": "x"}), ("/api/chat/new", {}),
+                                        ("/api/chat/rename", {"conversation_id": "x", "title": "x"})])
+@pytest.mark.parametrize("kwargs, status", [
+    ({"token": False}, 403), ({"origin": "https://evil.example"}, 403), ({"host": "evil.example:80"}, 403),
+    ({"content_type": "text/plain"}, 415), ({"raw": b"{" + b" " * (MAX_BODY + 1) + b"}"}, 413), ({"raw": b"[1]"}, 400)])
+def test_conversation_writes_pass_the_same_checks_as_input(served, path, body, kwargs, status):
+    server, bench, _ = served
+    first = bench.conversation_id
+    assert call(server, path, "POST", body, **kwargs)[0] == status
+    assert not bench.busy and bench.conversation_id == first

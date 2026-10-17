@@ -19,7 +19,9 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 22
+# Review attempts a day may start; the schedule shows the days that would go over it.
+DAILY_REVIEW_LIMIT = 3
 LLM_FAILURE_CHARS = 20_000
 # Caps for the optional prompt/reply text of one model call (ZHIQIU_TRACE_CONTENT=1).
 TRACE_REQUEST_CHARS = 60_000
@@ -28,6 +30,12 @@ TRACE_RESPONSE_CHARS = 20_000
 APPROVAL_TITLE_CHARS = 200
 # No prompt waits longer than this (the web workbench gives up after 30 minutes); older pending rows are stale.
 APPROVAL_STALE_NS = 30 * 60 * 10**9
+# Directories the user allowed on the workbench page: readable (sent to the model in chat) or writable.
+ROOT_KINDS = ("read", "write")
+# Who settled the Skill a knowledge point is taught with: the model while assessing, or the user (/skill).
+SKILL_SOURCES = ("model", "user")
+# How an answer was entered; voice means a transcript the user confirmed before sending.
+INPUT_SOURCES = ("text", "voice")
 
 
 def new_id() -> str:
@@ -68,7 +76,7 @@ class Store:
             "materials": "SELECT * FROM materials",
             "attempts": "SELECT * FROM attempts",
             "questions": "SELECT id,attempt_id,seq,dimension,text,asked_at FROM questions",
-            "answers": "SELECT * FROM answers",
+            "answers": "SELECT id,question_id,text,answered_at FROM answers",
             "reviews": "SELECT * FROM reviews",
             "dimension_scores": "SELECT review_id,dimension,score,rationale FROM dimension_scores",
             "review_revisions": "SELECT * FROM review_revisions",
@@ -567,6 +575,38 @@ class Store:
                                       ("approval_requests_created", "created_at_ns")):
                     self.db.execute(f"CREATE INDEX IF NOT EXISTS {index} ON approval_requests({column})")
                 self.db.execute("PRAGMA user_version=19")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 20:
+            with self.transaction():
+                # A readable conversation title (rule / model / fallback / user) and a one-line
+                # learner-facing feedback per graded dimension; rationale stays for the audit.
+                for table, column in (("conversations", "title"), ("conversations", "title_source"),
+                                      ("dimension_scores", "feedback")):
+                    if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                self.db.execute("PRAGMA user_version=20")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 21:
+            with self.transaction():
+                # Read and write roots added on the workbench page, merged with ZHIQIU_READ_ROOTS /
+                # ZHIQIU_WRITE_ROOTS at the start of every turn. Only the page writes here.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS file_roots (
+                    kind TEXT NOT NULL CHECK(kind IN ('read','write')), path TEXT NOT NULL,
+                    files INTEGER NOT NULL, truncated INTEGER NOT NULL, added_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, path))""")
+                self.db.execute("PRAGMA user_version=21")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 22:
+            with self.transaction():
+                # The teaching Skill of a knowledge point, the Skill each context build used, and how an
+                # answer was entered.
+                for table, column, kind in (
+                        ("knowledge_points", "skill", "TEXT"), ("knowledge_points", "skill_source", "TEXT"),
+                        ("knowledge_points", "skill_at", "TEXT"),
+                        ("context_builds", "skill_name", "TEXT"), ("context_builds", "skill_version", "INTEGER"),
+                        ("context_builds", "skill_sha", "TEXT"), ("context_builds", "skill_source", "TEXT"),
+                        ("answers", "input_source",
+                         "TEXT NOT NULL DEFAULT 'text' CHECK(input_source IN ('text','voice'))")):
+                    if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+                self.db.execute("PRAGMA user_version=22")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -691,18 +731,23 @@ class Store:
             WHERE s.attempt_id IS NULL AND s.lesson_state='teaching'
             ORDER BY s.rowid DESC""").fetchall()
 
-    def lesson_sections(self, message_id: str) -> tuple[str, list[dict[str, str]]] | None:
-        """The original lesson message and its sections; None for a lesson taught before sections existed."""
+    def lesson_origin(self, message_id: str) -> str | None:
+        """The original lesson message: a lesson continued on a later day is a lesson_resume copy that
+        points at it."""
         row = self.db.execute("SELECT id,kind,source_message_id FROM messages WHERE id=?", (message_id,)).fetchone()
-        # A lesson continued on a later day is a lesson_resume copy that points at the original.
         while row and row["kind"] == "lesson_resume" and row["source_message_id"]:
             row = self.db.execute("SELECT id,kind,source_message_id FROM messages WHERE id=?",
                                   (row["source_message_id"],)).fetchone()
-        if not row:
+        return row["id"] if row else None
+
+    def lesson_sections(self, message_id: str) -> tuple[str, list[dict[str, str]]] | None:
+        """The original lesson message and its sections; None for a lesson taught before sections existed."""
+        origin = self.lesson_origin(message_id)
+        if not origin:
             return None
         event = self.db.execute("""SELECT payload_json FROM events WHERE type='LessonSections'
-            AND json_extract(payload_json,'$.message_id')=? ORDER BY id DESC LIMIT 1""", (row["id"],)).fetchone()
-        return (row["id"], json.loads(event["payload_json"])["sections"]) if event else None
+            AND json_extract(payload_json,'$.message_id')=? ORDER BY id DESC LIMIT 1""", (origin,)).fetchone()
+        return (origin, json.loads(event["payload_json"])["sections"]) if event else None
 
     def lesson_markers(self, lesson_id: str) -> list[str]:
         """The section markers left while showing a lesson, across the days it was continued."""
@@ -944,6 +989,53 @@ class Store:
                 WHERE status='pending' AND (conversation_id IS ? OR created_at_ns<?)""",
                 (tracing.now_ns(), conversation_id, cutoff)).rowcount
 
+    # ----- file roots: added and removed only through the workbench page, never by the agent -----
+
+    def roots(self, kind: str) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM file_roots WHERE kind=? ORDER BY added_at,rowid", (kind,)).fetchall()
+
+    def add_root(self, kind: str, path: str, files: int, truncated: bool) -> None:
+        if kind not in ROOT_KINDS:
+            raise ValueError(f"unknown root kind: {kind}")
+        with self.transaction():
+            if self.db.execute("SELECT 1 FROM file_roots WHERE kind=? AND path=?", (kind, path)).fetchone():
+                raise ValueError(f"已在白名单中：{path}")
+            self.db.execute("INSERT INTO file_roots VALUES(?,?,?,?,?)", (kind, path, files, int(truncated), self._ts()))
+            # Only the path and a file count: never the names or contents of what it holds.
+            self._event(None, None, "RootsChanged", {"action": "add", "kind": kind, "path": path, "files": files,
+                                                     "truncated": bool(truncated), "via": "web"})
+
+    def remove_root(self, kind: str, path: str) -> None:
+        with self.transaction():
+            row = self.db.execute("SELECT * FROM file_roots WHERE kind=? AND path=?", (kind, path)).fetchone()
+            if not row:
+                raise LookupError(f"白名单里没有这个目录：{path}")
+            self.db.execute("DELETE FROM file_roots WHERE kind=? AND path=?", (kind, path))
+            self._event(None, None, "RootsChanged", {"action": "remove", "kind": kind, "path": path,
+                                                     "files": row["files"], "truncated": bool(row["truncated"]),
+                                                     "via": "web"})
+
+    def set_skill(self, kp_id: str, name: str | None, source: str | None, reason: str | None = None) -> bool:
+        """Record which Skill teaches this knowledge point; None clears it (the model chooses again).
+
+        Returns whether anything changed; only a change leaves a SkillChanged event."""
+        if name is not None and source not in SKILL_SOURCES:
+            raise ValueError(f"unknown skill source: {source}")
+        with self.transaction():
+            row = self.db.execute("SELECT skill,skill_source FROM knowledge_points WHERE id=?", (kp_id,)).fetchone()
+            if not row:
+                raise LookupError("unknown knowledge point")
+            source = source if name is not None else None
+            if (row["skill"], row["skill_source"]) == (name, source):
+                return False
+            self.db.execute("UPDATE knowledge_points SET skill=?,skill_source=?,skill_at=? WHERE id=?",
+                            (name, source, self._ts() if name is not None else None, kp_id))
+            payload: dict[str, Any] = {"from": row["skill"], "to": name, "source": source or "user"}
+            if reason:
+                payload["reason"] = reason
+            self._event(kp_id, None, "SkillChanged", payload)
+            return True
+
     def get_knowledge_point(self, title_or_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
 
@@ -1013,8 +1105,8 @@ class Store:
                     raise ValueError("knowledge point requires relearning before review")
                 count = self.db.execute("SELECT COUNT(*) FROM attempts WHERE kind='review' AND start_date=?",
                                         (self.clock.today().isoformat(),)).fetchone()[0]
-                if count >= 3:
-                    raise ValueError("daily review limit of three reached")
+                if count >= DAILY_REVIEW_LIMIT:
+                    raise ValueError(f"daily review limit of {DAILY_REVIEW_LIMIT} reached")
                 if not task_ids:
                     raise ValueError("review requires a due task")
                 for task_id in task_ids:
@@ -1091,9 +1183,11 @@ class Store:
             self._event(attempt["kp_id"], attempt_id, "QuestionAsked", {"question_id": question_id, "seq": seq})
             return question_id, seq
 
-    def add_answer(self, question_id: str, answer: str) -> str:
+    def add_answer(self, question_id: str, answer: str, input_source: str = "text") -> str:
         if not answer.strip():
             raise ValueError("empty answer is not a scored response")
+        if input_source not in INPUT_SOURCES:
+            raise ValueError(f"unknown input source: {input_source}")
         with self.transaction():
             question = self.db.execute("""SELECT q.*,a.kp_id,a.state FROM questions q
                 JOIN attempts a ON a.id=q.attempt_id WHERE q.id=?""", (question_id,)).fetchone()
@@ -1105,7 +1199,8 @@ class Store:
                     raise ValueError("answer already recorded with different text")
                 return prior["id"]
             answer_id = new_id()
-            self.db.execute("INSERT INTO answers VALUES(?,?,?,?)", (answer_id, question_id, answer, self._ts()))
+            self.db.execute("INSERT INTO answers(id,question_id,text,answered_at,input_source) VALUES(?,?,?,?,?)",
+                            (answer_id, question_id, answer, self._ts(), input_source))
             self._append_message(question["kp_id"], "user", "answer", answer,
                                  question["attempt_id"], answer_id=answer_id)
             self._event(question["kp_id"], question["attempt_id"], "AnswerRecorded", {"answer_id": answer_id})
@@ -1145,9 +1240,12 @@ class Store:
             return submission_id
 
     def wrong_points_for(self, kp_id: str) -> list[dict[str, Any]]:
-        """Read recent low scores with their original question and answer as review focus."""
-        return [dict(row) for row in self.db.execute("""SELECT d.review_id,d.dimension,d.score,
-            qa.question_id,q.text question,qa.answer_id,COALESCE(s.text,a.text) answer,
+        """Read recent low scores with their original question and answer as review focus.
+
+        No ids: with a question_id and answer_id each old question looked like one already answered in the
+        new attempt, and the model ended the review before asking anything (V7 real reviews)."""
+        return [dict(row) for row in self.db.execute("""SELECT d.dimension,d.score,
+            q.text question,COALESCE(s.text,a.text) answer,
             COALESCE((SELECT quote FROM review_evidence e WHERE e.review_id=qa.review_id
                 AND e.dimension=qa.dimension AND e.question_id=qa.question_id LIMIT 1),'') evidence,
             d.rationale
@@ -1216,9 +1314,9 @@ class Store:
                             (review_id, attempt_id, kind, result.total, rating, now, None))
             for grade in result.dimensions:
                 self.db.execute("""INSERT INTO dimension_scores
-                    (review_id,dimension,score,rationale,rubric_version,supplement) VALUES(?,?,?,?,?,?)""",
+                    (review_id,dimension,score,rationale,rubric_version,supplement,feedback) VALUES(?,?,?,?,?,?,?)""",
                     (review_id, grade.dimension, grade.score, grade.rationale, RUBRIC_VERSION,
-                     grade.supplement))
+                     grade.supplement, grade.feedback))
                 for item in assessments_for(grade):
                     self.db.execute("INSERT INTO review_question_assessments VALUES(?,?,?,?,?,?)",
                                     (review_id, grade.dimension, item.question_id, item.answer_id,
@@ -1480,7 +1578,7 @@ class Store:
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
                   "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries",
-                  "spans", "llm_failures", "llm_contents", "approval_requests")
+                  "spans", "llm_failures", "llm_contents", "approval_requests", "file_roots")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:

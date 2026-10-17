@@ -69,7 +69,7 @@ def test_lesson_done_runs_quiz_to_a_saved_review(tmp_path):
     io = ScriptedIO("/done", "根左右", "递归栈", "表达式树")
     result = run_lesson(io, store, service, "二叉树遍历", source=path)
     assert result.kind == "outcome" and result.outcome["kind"] == "complete"
-    assert result.outcome["task_id"] and "完整评阅已保存" in io.text
+    assert result.outcome["task_id"] and "完整评阅 78 分 · 下次复习 10-04（后天）" in io.text
     assert lesson_state(store, result.kp_id) == ["tested"]
     assert "允许本次学习发送这些内容吗？" in io.text
 
@@ -140,3 +140,64 @@ def test_quiz_time_limit_finishes_with_limit(tmp_path):
     result = run_quiz(ScriptedIO("第一答"), store, service, attempt, clock=lambda: next(ticks))
     assert result.kind == "outcome"
     assert store.db.execute("SELECT finish_reason FROM attempts WHERE id=?", (attempt,)).fetchone()[0] == "limit"
+
+
+UUID = __import__("re").compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def graded(tmp_path):
+    from zhiqiu.scoring import DimensionGrade
+    store = Store(tmp_path / "graded.sqlite", FixedClock(date(2026, 10, 16)))
+    kp = store.ensure_knowledge_point("二叉树遍历")
+    attempt = store.start_attempt(kp, "first")
+    grades = []
+    for dimension, score, rationale, supplement in (
+            ("concept", 1, "只说了“链表只有 next”，没讲遍历是什么。其余部分没有涉及。", "遍历是按规则访问每个节点一次。再补一句。"),
+            ("mechanism", 3, "说清了递归调用的顺序，但是没有说明记录当前节点相对于两次递归的位置，这一点很关键，需要补上", "")):
+        question, _ = store.add_question(attempt, dimension, f"{dimension} 的题目？")
+        answer = store.add_answer(question, f"{dimension} 的原答")
+        grades.append(DimensionGrade(dimension, score, question, answer, f"{dimension} 的原答", rationale,
+                                     supplement=supplement))
+    return store, store.finalize(attempt, grades)
+
+
+def test_grading_summary_is_one_line_per_dimension_without_ids(tmp_path):
+    from zhiqiu.flows import show_outcome
+    store, outcome = graded(tmp_path)
+    io = ScriptedIO()
+    show_outcome(io, store, outcome)
+    lines = io.text.splitlines()
+    assert lines[0] == f"阶段性评阅 {outcome['total']} 分 · 下次复习 {outcome['due_date'][5:]}（明天）"
+    assert lines[1] == "  概念准确 1/4：只说了“链表只有 next”，没讲遍历是什么"
+    assert lines[2] == "    要点：遍历是按规则访问每个节点一次"
+    # The rationale has no full stop within 40 characters, so it is cut there.
+    assert lines[3].startswith("  机制解释 3/4：说清了递归调用的顺序") and lines[3].endswith("…")
+    assert len(lines[3].split("：", 1)[1]) == 41
+    assert lines[4:] == ["  应用辨析：未评", "输入 /detail 查看原题、原答和完整理由"]
+    assert not UUID.search(io.text)
+
+
+def test_grading_detail_keeps_the_full_report(tmp_path):
+    from zhiqiu.flows import show_outcome_detail
+    store, outcome = graded(tmp_path)
+    io = ScriptedIO()
+    show_outcome_detail(io, store, outcome)
+    assert io.said == [
+        f"阶段性评阅已保存：{outcome['total']} 分；下次复习 {outcome['due_date']}；任务 {outcome['task_id']}",
+        "  概念准确：1/4；依据“concept 的原答”；只说了“链表只有 next”，没讲遍历是什么。其余部分没有涉及。",
+        "    补充：遍历是按规则访问每个节点一次。再补一句。",
+        "    原题：concept 的题目？（basic）",
+        "    原答：concept 的原答",
+        "  机制解释：3/4；依据“mechanism 的原答”；说清了递归调用的顺序，但是没有说明记录当前节点相对于两次递归的位置，这一点很关键，需要补上",
+        "    原题：mechanism 的题目？（basic）",
+        "    原答：mechanism 的原答",
+        "  应用辨析：未评"]
+
+
+def test_detail_inside_a_quiz_says_to_wait(tmp_path):
+    store, service, path = prepare_service(tmp_path)
+    kp, _, _ = service.prepare("二叉树遍历", path, lambda *_: True)
+    attempt = store.start_attempt(kp, "first")
+    io = ScriptedIO("/detail", "/pause")
+    run_quiz(io, store, service, attempt)
+    assert "自测结束后可以查看评阅详情。" in io.text and "未知命令" not in io.text

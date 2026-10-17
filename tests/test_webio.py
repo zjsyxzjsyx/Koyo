@@ -252,3 +252,61 @@ def test_close_ends_the_worker_even_while_a_prompt_waits(tmp_path):
     assert db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
     assert db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 1
     db.close()
+
+
+def test_say_events_carry_their_kind_and_the_greeting_does_not_mention_exit(tmp_path):
+    work, model, built = bench(tmp_path, [tool("web_search", {"query": "x"}, "a"), say("没搜到")],
+                               policy=ApprovalPolicy({"network": "allow"}))
+    greeting = work.io.events(0)[0]
+    assert greeting["kind"] == "say" and greeting["say_kind"] == "note" and "/exit" not in greeting["text"]
+    events = drive(work, "搜一下")
+    kinds = {event["text"]: event["say_kind"] for event in events if event["kind"] == "say"}
+    assert any(kind == "tool" and "（自动）" in text for text, kind in kinds.items())
+    assert kinds["没搜到"] == "text"
+    io = WebIO()
+    io.say("评阅", kind="outcome", attempt_id="A1")
+    assert io.events(0)[0]["say_kind"] == "outcome" and io.events(0)[0]["meta"] == {"attempt_id": "A1"}
+
+
+
+def test_controls_run_on_the_worker_between_turns(tmp_path):
+    work, model, built = bench(tmp_path, [say("你好")])
+    first = work.conversation_id
+    drive(work, "在吗")
+    with pytest.raises(ValueError):
+        work.control(("drop",))
+    with pytest.raises(ValueError):
+        work.control(("switch",))
+    after = work.io.last_seq
+    assert work.control(("new",))
+    switched = next_event(work.io, after, ("switched",))
+    next_event(work.io, switched["seq"], ("idle",))
+    assert switched["conversation_id"] == work.conversation_id != first and switched["history_upto"] == 0
+    after = work.io.last_seq
+    assert work.control(("switch", first))
+    switched = next_event(work.io, after, ("switched",))
+    idle = next_event(work.io, switched["seq"], ("idle",))
+    assert switched["history_upto"] == 2 and work.conversation_id == first and work.started_conversation == first
+    assert work.history_upto == 2
+    assert work.control(("rename", first, "问候"))
+    next_event(work.io, idle["seq"], ("idle",))
+    db = sqlite3.connect(tmp_path / "state.sqlite")
+    try:
+        assert db.execute("SELECT title FROM conversations WHERE id=?", (first,)).fetchone()[0] == "问候"
+    finally:
+        db.close()
+    # Only the events since the last switch come back to a page that starts over.
+    assert work.io.since_switch(0)[0]["seq"] == switched["seq"]
+    assert work.io.since_switch(idle["seq"]) == work.io.events(idle["seq"])
+
+
+def test_controls_are_refused_while_busy_or_waiting(tmp_path):
+    work, model, built = bench(tmp_path, [tool("write_file", {"path": "a.md", "content": "笔记"}, "a"), say("好")],
+                               write=True)
+    after = work.io.last_seq
+    assert work.submit("写下来")
+    prompt = next_event(work.io, after, ("approval",))
+    assert work.control(("new",)) is False and work.control(("switch", work.conversation_id)) is False
+    work.io.respond(prompt["request_id"], False)
+    next_event(work.io, prompt["seq"], ("idle",))
+    assert work.control(("new",)) is True

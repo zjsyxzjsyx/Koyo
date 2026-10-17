@@ -191,9 +191,21 @@ def approvals_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) 
                    "每次询问都有审批记录，记录的结果与被决定的工具调用一致，没有遗留的待审批")
 
 
+def skills_recorded(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
+    """Every teach and clarify prompt built since Skills exist (context-v15) names the Skill it used."""
+    from .context import SKILL_STAGES
+    marks = ",".join("?" * len(SKILL_STAGES))
+    rows = db.execute(f"""SELECT id,stage,trace_id,skill_name,skill_version,skill_sha FROM context_builds
+        WHERE stage IN ({marks}) AND template_version>='context-v15' AND created_at>=?""",
+                      (*SKILL_STAGES, since_iso)).fetchall()
+    problems = [{"trace_id": row["trace_id"], "context_build": row["id"], "stage": row["stage"]}
+                for row in rows if not (row["skill_name"] and row["skill_version"] and row["skill_sha"])]
+    return _result("skills_recorded", len(rows), problems, "讲解和澄清的每次上下文都记下了所用 Skill 的名称、版本和摘要")
+
+
 CHECKS: tuple[Callable[[sqlite3.Connection, int, str], dict[str, Any]], ...] = (
     loop_rounds, tool_round_bound, proposal_stops_round, confirmed_side_effects, approvals_consistent,
-    state_replay, trace_linked, spans_closed)
+    state_replay, trace_linked, spans_closed, skills_recorded)
 
 
 def check(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
@@ -222,6 +234,7 @@ def _at(ns: int | None, iso: str | None) -> str:
 def failures(db: sqlite3.Connection, days: float = 7, samples: int = 5) -> dict[str, Any]:
     since_ns, since_iso = _window(days)
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    denied: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def add(category: str, trace_id: str | None, ns: int | None, iso: str | None, detail: str, **extra: Any) -> None:
         found[category].append({"trace_id": trace_id, "at": _at(ns, iso), "at_ns": ns or 0, "detail": detail, **extra})
@@ -244,6 +257,11 @@ def failures(db: sqlite3.Connection, days: float = 7, samples: int = 5) -> dict[
         payload = json.loads(row["payload_json"])
         if row["type"] == "ReviewDeferred":
             add("grade_deferred", row["trace_id"], row["at_ns"], row["created_at"], str(payload.get("detail", ""))[:200])
+        elif payload.get("action") == "denied_by_user":
+            # The user saying no (to a send-out, a tool call or a proposal) is a decision, not a failure.
+            denied[f"guard:{payload.get('rule')}"].append(
+                {"trace_id": row["trace_id"], "at": _at(row["at_ns"], row["created_at"]), "at_ns": row["at_ns"] or 0,
+                 "detail": f"{payload.get('tool') or ''} {payload.get('reason', '')}".strip()[:200]})
         elif payload.get("rule") not in ("output_invalid", "loop_limit"):  # counted from their own records
             add(f"guard:{payload.get('rule')}", row["trace_id"], row["at_ns"], row["created_at"],
                 f"{payload.get('tool') or ''} {payload.get('reason', '')}".strip()[:200])
@@ -256,6 +274,13 @@ def failures(db: sqlite3.Connection, days: float = 7, samples: int = 5) -> dict[
         elif row["kind"] in ("command", "turn", "flow") and status == "error":
             add(f"flow_error:{row['error_kind']}", row["trace_id"], row["started_at_ns"], None,
                 f"{row['kind']}:{row['name']}")
+    categories, intentional = _grouped(found, samples), _grouped(denied, samples)
+    # Being unable to ask (confirmation_unavailable) still counts as a failure; a "no" does not.
+    return {"days": days, "total": sum(item["count"] for item in categories), "categories": categories,
+            "intentional": intentional, "intentional_total": sum(item["count"] for item in intentional)}
+
+
+def _grouped(found: dict[str, list[dict[str, Any]]], samples: int) -> list[dict[str, Any]]:
     categories = []
     for category, items in found.items():
         items.sort(key=lambda item: item["at_ns"], reverse=True)
@@ -263,16 +288,20 @@ def failures(db: sqlite3.Connection, days: float = 7, samples: int = 5) -> dict[
                            "samples": [{key: value for key, value in item.items() if key != "at_ns"}
                                        for item in items[:samples]]})
     categories.sort(key=lambda item: (-item["count"], item["category"]))
-    return {"days": days, "total": sum(item["count"] for item in categories), "categories": categories}
+    return categories
 
 
 def render_failures(data: dict[str, Any]) -> str:
-    if not data["categories"]:
-        return f"最近 {data['days']:g} 天没有失败记录。"
-    lines = [f"最近 {data['days']:g} 天共 {data['total']} 条失败："]
-    for item in data["categories"]:
-        lines.append(f"  {item['category']:<36} {item['count']}")
-        for sample in item["samples"]:
-            extra = f"  failure {sample['failure_id']}" if sample.get("failure_id") else ""
-            lines.append(f"      {sample['at']}  {sample['detail']}  trace {sample['trace_id'] or '-'}{extra}")
+    def rows(categories: list[dict[str, Any]]) -> list[str]:
+        lines = []
+        for item in categories:
+            lines.append(f"  {item['category']:<36} {item['count']}")
+            for sample in item["samples"]:
+                extra = f"  failure {sample['failure_id']}" if sample.get("failure_id") else ""
+                lines.append(f"      {sample['at']}  {sample['detail']}  trace {sample['trace_id'] or '-'}{extra}")
+        return lines
+    lines = ([f"最近 {data['days']:g} 天共 {data['total']} 条失败："] + rows(data["categories"])
+             if data["categories"] else [f"最近 {data['days']:g} 天没有失败记录。"])
+    if data.get("intentional"):
+        lines += [f"用户有意拒绝 {data['intentional_total']} 次（不计入失败）："] + rows(data["intentional"])
     return "\n".join(lines)

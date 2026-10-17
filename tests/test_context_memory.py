@@ -193,9 +193,10 @@ def test_long_material_checks_cover_every_character_and_resume_after_combine_fai
     model = ChunkModel()
     runtime = LearningRuntime(store, model)
     # Every checked summary carries the absolute source path, so scale the window with it
-    # to keep the combine request within budget regardless of where tmp_path lives.
+    # to keep the combine request within budget regardless of where tmp_path lives. 2900 (was 2800) fits the
+    # longer question rules of 7.2 and still forces the material into several checked chunks.
     path_bytes = len(str(source.resolve()).encode("utf-8"))
-    runtime.context = ContextManager(store, model, window=2800 + 4 * path_bytes,
+    runtime.context = ContextManager(store, model, window=2900 + 4 * path_bytes,
                                      output_reserve=250, margin=150)
     with pytest.raises(ValueError, match="temporary combine failure"):
         runtime.prepare("遍历", source, lambda *_: True, offline=True)

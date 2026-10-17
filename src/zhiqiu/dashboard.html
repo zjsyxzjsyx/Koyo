@@ -145,18 +145,117 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .acard .head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
 .acard .acts { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 .acard .result { font-size: 12.5px; color: var(--ink2); margin-top: 8px; }
+.ocard { align-self: flex-start; width: min(760px, 100%); background: var(--panel); border: 1px solid var(--line2); border-left: 3px solid var(--accent); border-radius: 10px; padding: 12px 14px; }
+.ocard .head { font-weight: 600; margin-bottom: 6px; }
+.ocard .dim { padding: 2px 0; }
+.ocard .tip { color: var(--ink2); font-size: 12.5px; padding-left: 1.2em; }
+.ocard .more { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.ocard .more .q { padding: 6px 0; border-top: 1px dashed var(--line); }
+.ocard .more .q:first-child { border-top: 0; }
 .btn { font: inherit; font-size: 13px; padding: 5px 14px; border-radius: 7px; border: 1px solid var(--line2); background: var(--panel); color: var(--ink); cursor: pointer; }
 .btn:hover:not(:disabled) { border-color: var(--ink3); }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.danger { color: var(--bad); }
+.roots .rrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.roots .rrow:first-of-type { border-top: 0; }
+.roots .rp { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.roots .rm { grid-column: 1; color: var(--ink3); font-size: 11.5px; }
+.roots .rrow .btn { grid-row: 1 / span 2; grid-column: 2; }
+.roots .src { display: inline-block; font-size: 10.5px; border: 1px solid var(--line2); color: var(--ink2); border-radius: 4px; padding: 0 5px; margin-right: 6px; }
+.roots .src.wb { border-color: var(--accent); color: var(--accent); }
+.roots .addline { display: flex; gap: 8px; margin-top: 10px; }
+.roots .addline input { flex: 1; min-width: 0; font: inherit; font-family: var(--mono); font-size: 12.5px; color: var(--ink); background: var(--panel); border: 1px solid var(--line2); border-radius: 7px; padding: 5px 9px; }
+.roots .addline input:focus { outline: none; border-color: var(--accent); }
+.roots .pv { margin-top: 10px; border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; background: var(--accent-soft); font-size: 12.5px; }
+.roots .pv .w { color: var(--warn); }
+.warnc { color: var(--warn); }
+.dg { margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); max-width: 100%; }
+.dgscroll { overflow-x: auto; padding: 6px; }
+.dgsvg { display: block; margin: 0 auto; max-width: none; font: 12.5px/1 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.dgsvg .nd rect { fill: var(--panel); stroke: var(--accent); stroke-width: 1.3; }
+.dgsvg .nd text { fill: var(--ink); }
+.dgsvg .eg { fill: none; stroke: var(--ink2); stroke-width: 1.3; }
+.dgsvg .eg.back { stroke-dasharray: 4 3; }
+.dgsvg marker path { fill: var(--ink2); }
+.dgsvg .el { fill: var(--ink2); font-size: 11px; paint-order: stroke; stroke: var(--soft); stroke-width: 4px; stroke-linejoin: round; }
+.dg figcaption { display: flex; justify-content: space-between; gap: 8px; padding: 4px 10px 6px; font-size: 12px; color: var(--ink2); }
+.dg .dgtext { margin: 0 8px 8px; }
+.roots .pv .acts { display: flex; gap: 8px; margin-top: 8px; }
+.roots .err { color: var(--bad); font-size: 12.5px; margin-top: 8px; }
+.roots .err:empty { display: none; }
+.sch-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.sch-bar .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 7px; overflow: hidden; }
+.sch-bar .seg button { font: inherit; font-size: 12.5px; border: 0; background: var(--panel); color: var(--ink2); padding: 4px 12px; cursor: pointer; }
+.sch-bar .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sch-bar .range { font-weight: 600; margin: 0 4px; }
+.sch-note { font-size: 12.5px; color: var(--bad); margin-bottom: 10px; }
+.sch-note:empty { display: none; }
+.week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.sday { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 8px; min-height: 96px; }
+.sday.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sday.past { background: var(--soft); }
+.sday h5 { font-size: 11.5px; font-weight: 600; color: var(--ink2); margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 0 6px; }
+.sday h5 .rel { color: var(--accent); font-weight: 600; margin-left: auto; }
+.sitem { border: 1px solid var(--line); border-radius: 7px; padding: 5px 7px; margin-bottom: 5px; font-size: 12px; background: var(--panel); }
+.sitem b { display: block; font-weight: 600; font-size: 12.5px; overflow-wrap: anywhere; }
+.sitem .m { color: var(--ink3); font-size: 11px; }
+.sitem.go { cursor: pointer; border-color: var(--accent); }
+.sitem.go:hover { background: var(--accent-soft); }
+.sitem.go b::after { content: " 开始复习 →"; color: var(--accent); font-weight: 500; font-size: 11px; }
+.sdone { font-size: 11.5px; color: var(--good); margin-top: 4px; overflow-wrap: anywhere; }
+.overdue { border-color: var(--bad); }
+.overdue h5 { color: var(--bad); }
+.month { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.month .wd { font-size: 11px; color: var(--ink3); text-align: center; padding-bottom: 2px; }
+.mcell { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 5px 6px; min-height: 72px; font-size: 11.5px; cursor: pointer; overflow: hidden; }
+.mcell.out { opacity: .45; }
+.mcell.past { background: var(--soft); }
+.mcell.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.mcell.sel { background: var(--accent-soft); }
+.mcell .d { font-weight: 600; color: var(--ink2); display: flex; justify-content: space-between; }
+.mcell .c { color: var(--accent); font-weight: 650; }
+.mcell .c.over { color: var(--bad); }
+.mcell .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink2); }
+.fc { display: flex; align-items: flex-end; gap: 4px; height: 92px; padding-top: 14px; }
+.fc .col { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; font-size: 10.5px; color: var(--ink3); }
+.fc .bar { width: 100%; max-width: 26px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 1px; }
+.fc .bar.zero { background: var(--line); }
+.fc .bar.over { background: var(--bad); }
+.fc .bar.late { background: var(--warn); }
+.fc .v { color: var(--ink2); font-weight: 600; }
+.fc .col.today .lbl { color: var(--accent); font-weight: 600; }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 16px; border-top: 1px solid var(--line); margin-top: 8px; }
 .composer .askbar { font-size: 12.5px; color: var(--accent); margin-bottom: 6px; white-space: pre-wrap; }
 .composer .line { display: flex; gap: 8px; align-items: flex-end; }
+.composer .mic { padding: 5px 9px; touch-action: none; user-select: none; -webkit-user-select: none; }
+.composer .mic.rec { background: var(--bad); border-color: var(--bad); color: #fff; }
+.vhint { font-size: 12px; color: var(--ink2); margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.vhint.err { color: var(--bad); }
+.vhint .vfix { display: inline-flex; gap: 4px; align-items: center; }
+.vlevel { display: inline-block; width: 70px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.vlevel i { display: block; height: 100%; background: var(--good); }
+.vmark { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; color: var(--ink2); margin-left: 6px; vertical-align: 1px; }
+.vmark svg.i { width: 12px; height: 12px; }
 .composer textarea { flex: 1; min-height: 42px; max-height: 200px; resize: vertical; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 9px 12px; }
 .composer textarea:focus { outline: none; border-color: var(--accent); }
 .composer .state { font-size: 11.5px; color: var(--ink3); margin-top: 6px; display: flex; gap: 8px; align-items: center; min-height: 16px; }
-.chatgrid { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 20px; align-items: start; }
+.chatgrid { display: grid; grid-template-columns: 210px minmax(0, 1fr) 270px; gap: 20px; align-items: start; }
+.convs { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; font-size: 12.5px; }
+.convs > summary { display: none; }
+.convs .new { width: 100%; margin-bottom: 8px; }
+.convs .crow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; padding: 7px 9px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.convs .crow:hover { background: var(--soft); }
+.convs .crow.on { background: var(--accent-soft); border-color: var(--line2); cursor: default; }
+.convs .ct { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convs .cm { grid-column: 1; color: var(--ink3); font-size: 11.5px; }
+.convs .rn { grid-row: 1 / span 2; grid-column: 2; align-self: center; border: 0; background: none; color: var(--ink3); cursor: pointer; padding: 2px 4px; border-radius: 5px; visibility: hidden; }
+.convs .crow:hover .rn, .convs .crow.on .rn { visibility: visible; }
+.convs .rn:hover { background: var(--line); color: var(--ink); }
+.convs input { width: 100%; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--accent); border-radius: 6px; padding: 2px 6px; }
+.convs .tag { display: inline-block; font-size: 10.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+.convs.off .cbody { opacity: .5; pointer-events: none; }
+.convs .offnote { color: var(--ink3); font-size: 11.5px; margin: 0 0 6px; }
 .chatmain { min-width: 0; }
 .spanel { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; font-size: 12.5px; }
 .spanel > summary { display: none; }
@@ -174,6 +273,13 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .md code { font-family: var(--mono); font-size: 12px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
 .md pre.code code { background: none; padding: 0; }
 .md table { margin: 6px 0; font-size: 12.5px; } .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
+@media (min-width: 861px) and (max-width: 1180px) {
+  /* Mid widths: conversations and the status panel share the left rail; the chat keeps the room. */
+  .chatgrid { grid-template-columns: 220px minmax(0, 1fr); }
+  .convs { grid-column: 1; grid-row: 1; position: static; max-height: none; }
+  .spanel { grid-column: 1; grid-row: 2; position: static; max-height: none; }
+  .chatmain { grid-column: 2; grid-row: 1 / span 2; }
+}
 @media (max-width: 860px) {
   body { flex-direction: column; height: auto; overflow: visible; }
   nav { width: 100%; flex-direction: row; flex-wrap: wrap; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -182,6 +288,11 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   .split { grid-template-columns: 1fr; } .detail { position: static; max-height: none; }
   .row, .axis { grid-template-columns: minmax(0, 1fr) 30% 52px; }
   .chatgrid { grid-template-columns: 1fr; gap: 0; }
+  .week { grid-template-columns: 1fr; }
+  .sday { min-height: 0; }
+  .mcell { min-height: 44px; padding: 3px 4px; } .mcell .t { display: none; }
+  .convs { position: static; max-height: none; order: -2; margin-bottom: 6px; }
+  .convs > summary { display: block; cursor: pointer; font-size: 12.5px; color: var(--ink2); padding: 4px 0 8px; }
   .spanel { position: static; max-height: none; order: -1; margin-bottom: 10px; }
   .spanel > summary { display: block; cursor: pointer; font-size: 12.5px; color: var(--ink2); padding: 4px 0 8px; }
 }
@@ -198,6 +309,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   <a data-view="checks"><span data-icon="shield"></span>契约检查</a>
   <a data-view="approvals"><span data-icon="guard"></span>审批<span class="n" id="n-approvals"></span></a>
   <div class="grp">学习</div>
+  <a data-view="schedule"><span data-icon="calendar"></span>复习日程<span class="n" id="n-schedule"></span></a>
   <a data-view="learn"><span data-icon="book"></span>学习记录<span class="n" id="n-learn"></span></a>
   <div class="navfoot">
     <label>范围 <select id="days"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="365">1 年</option></select></label>
@@ -212,11 +324,13 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 <script>
 "use strict";
 const ICONS = {
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11 A7 7 0 0 0 19 11"/><line x1="12" y1="18" x2="12" y2="21"/>',
   activity: '<polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/>',
   list: '<line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
   chart: '<line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="11" width="3" height="7"/><rect x="11" y="6" width="3" height="12"/><rect x="16" y="13" width="3" height="5"/>',
   alert: '<path d="M12 4 L21 19 H3 Z"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="16.6" r=".6"/>',
   shield: '<path d="M12 3 L19 6 V11 C19 15.5 16 19 12 21 C8 19 5 15.5 5 11 V6 Z"/>',
+  calendar: '<rect x="4" y="5" width="16" height="15" rx="2"/><line x1="4" y1="10" x2="20" y2="10"/><line x1="9" y1="3" x2="9" y2="7"/><line x1="15" y1="3" x2="15" y2="7"/>',
   book: '<path d="M4 5 C7 4 10 4 12 6 C14 4 17 4 20 5 V19 C17 18 14 18 12 20 C10 18 7 18 4 19 Z"/><line x1="12" y1="6" x2="12" y2="20"/>',
   turn: '<path d="M4 5 H20 V16 H11 L7 20 V16 H4 Z"/>',
   command: '<polyline points="5 8 9 12 5 16"/><line x1="11" y1="16" x2="19" y2="16"/>',
@@ -243,9 +357,9 @@ const END = {done: "完成", outcome: "已评阅", proposal: "提出建议", can
 const KIND = {first: "首次自测", review: "复习"};
 const RULE = {leak_check: "泄露检查", read_root: "读取白名单", write_root: "写入白名单", name_not_allowed: "工具不在本步骤",
   permission_denied: "权限类别不允许", confirmation_denied: "用户拒绝确认", confirmation_unavailable: "无法确认", policy_denied: "审批策略禁止", web_request_refused: "网页请求被拒",
-  proposal_rejected: "拒绝提议", proposal_refused: "提议未通过校验", memory_limit: "记忆超限", loop_limit: "循环上限",
+  proposal_rejected: "拒绝提议", proposal_refused: "提议未通过校验", memory_limit: "记忆超限", loop_limit: "循环上限", question_shape: "题目形状超限",
   output_invalid: "模型输出无效", illegal_transition: "非法状态转换", consent_missing: "未获发送授权"};
-const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", approvals: "审批", learn: "学习记录"};
+const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", approvals: "审批", schedule: "复习日程", learn: "学习记录", roots: "目录白名单"};
 // Served by `zhiqiu web`, the page carries a per-start token for /api/chat/*; the read-only dashboard has none.
 const meta = (name) => document.querySelector(`meta[name="${name}"]`)?.content || "";
 const WB = {on: meta("zhiqiu-mode") === "workbench", token: meta("zhiqiu-token")};
@@ -269,7 +383,8 @@ const pill = (status, text) => `<span class="pill ${esc(status)}">${esc(text ?? 
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
 async function api(path) {
-  const headers = path.startsWith("/api/chat/") ? {"X-Zhiqiu-Token": WB.token} : {};
+  // Chat content and the root settings exist only in the workbench, and only answer our page's token.
+  const headers = /^\/api\/(chat|roots)(\/|$)/.test(path.split("?")[0]) ? {"X-Zhiqiu-Token": WB.token} : {};
   const response = await fetch(path, {cache: "no-store", headers});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
@@ -322,6 +437,27 @@ function setHead(title, sub = "", act = "") {
 document.addEventListener("click", (event) => {
   const respond = event.target.closest("[data-respond]");
   if (respond) { chatRespond(respond); return; }
+  const vundo = event.target.closest("[data-vundo],[data-vraw]");
+  if (vundo) { voiceUndo(vundo); return; }
+  const dgtext = event.target.closest("[data-dgtext]");
+  if (dgtext) {
+    const pre = dgtext.closest("figure").querySelector(".dgtext");
+    pre.hidden = !pre.hidden;
+    dgtext.textContent = pre.hidden ? "文字版" : "收起文字版";
+    return;
+  }
+  const detail = event.target.closest("[data-detail]");
+  if (detail) { outcomeDetail(detail); return; }
+  const approve = event.target.closest("[data-approve]");
+  if (approve) { approvalRespond(approve); return; }
+  const rootButton = event.target.closest("[data-root-preview],[data-root-add],[data-root-cancel],[data-root-remove]");
+  if (rootButton) { rootsAction(rootButton); return; }
+  const review = event.target.closest("[data-review]");
+  if (review) { schReview(review.dataset.review); return; }
+  const sch = event.target.closest("[data-sch]");
+  if (sch) { schNav(sch.dataset.sch); return; }
+  const cell = event.target.closest("[data-day]");
+  if (cell) { SCH.open = SCH.open === cell.dataset.day ? "" : cell.dataset.day; viewSchedule().catch((e) => pulse(e.message)); return; }
   const nav = event.target.closest("[data-view]");
   if (nav) { go(`#${nav.dataset.view}`); return; }
   const trace = event.target.closest("[data-trace]");
@@ -502,6 +638,17 @@ function findNode(id) {
   return null;
 }
 
+const SKILL_SOURCE = {builtin: "内置", user: "用户"};
+const SKILL_BY = {model: "由模型选择", user: "用户指定", fallback: "通用兜底"};
+function skillUsed(a) {
+  if (!a.skill) return "";
+  return `<span class="mono">${esc(a.skill)}</span> · ${SKILL_SOURCE[a.skill_source] || esc(a.skill_source || "")} · ${SKILL_BY[a.skill_by] || esc(a.skill_by || "")}`;
+}
+function skillChoice(a) {
+  if (!a.skill_choice) return "";
+  const raw = a.skill_invalid ? `<span class="warnc">（模型给的 ${esc(a.skill_raw ?? "空值")} 不可用，改用通用）</span>` : "";
+  return `<span class="mono">${esc(a.skill_choice)}</span>${a.skill_reason ? `（理由：${esc(a.skill_reason)}）` : ""}${raw}`;
+}
 const kv = (pairs) => `<dl class="kv">${pairs.filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
 
 function renderNode() {
@@ -517,6 +664,7 @@ function renderNode() {
       ${kv([["开始", clock(n.started_at_ns)], ["耗时", ms(n.duration_ms)], ["模型调用", num(t.llm_calls)], ["输入 token", `${num(t.tokens_in)}${t.tokens_cached ? `（缓存 ${num(t.tokens_cached)}）` : ""}`],
         ["输出 token", num(t.tokens_out)], ["花费", money(t.cost)], ["工具调用", num(t.tool_calls)], ["进度", esc(progressText(n.progress))],
         ["知识点", esc(n.point)], ["尝试", n.attempt_id ? `<a class="lnk" data-attempt="${esc(n.attempt_id)}">${esc(n.attempt_id.slice(0, 8))} →</a>` : ""],
+        ["Skill", skillUsed(n.attrs || {})], ["选择 Skill", skillChoice(n.attrs || {})],
         ["对话", esc((n.conversation_id || "").slice(0, 8))], ["loop_id", esc((n.attrs || {}).loop_id || "")], ["span", `<span class="mono">${esc(n.span_id)}</span>`]])}`;
     return;
   }
@@ -549,7 +697,9 @@ function renderNode() {
   }
   let extra = "";
   if (cached.build) {
-    extra += kv([["模板", `<span class="mono">${esc(cached.build.template_version)}</span>`], ["构建状态", esc(cached.build.status)],
+    const sk = cached.build.skill;
+    extra += kv([["模板", `<span class="mono">${esc(cached.build.template_version)}</span>`],
+      ["Skill", sk ? `<span class="mono">${esc(sk.name)} v${esc(sk.version)}（${esc(sk.sha)}）</span> · ${SKILL_SOURCE[sk.source] || esc(sk.source)}` : ""], ["构建状态", esc(cached.build.status)],
       ["纳入来源", num(cached.build.sources)], ["排除", num(cached.build.excluded)]]);
   }
   if (cached.failure) {
@@ -652,12 +802,15 @@ async function viewMetrics() {
 async function viewFailures() {
   const d = await api(`/api/failures?days=${S.days}`);
   setHead("失败", `最近 ${S.days} 天 · 共 ${d.total} 条`);
-  $("#view").innerHTML = d.categories.length ? d.categories.map((c) => `<div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+  const cards = (list, cls) => list.map((c) => `<div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
       ${icon(c.category.startsWith("guard:") ? "guard" : "alert", "k-guard")}<b class="mono" style="font-size:13px">${esc(c.category)}</b>
-      <span class="pill error" style="margin-left:auto">${num(c.count)}</span></div>
+      <span class="pill ${cls}" style="margin-left:auto">${num(c.count)}</span></div>
       ${c.samples.map((s) => `<div style="display:flex;gap:10px;font-size:12.5px;padding:4px 0;border-top:1px solid var(--line)"><span class="faint" style="white-space:nowrap">${esc((s.at || "").replace("T", " ").slice(5, 19))}</span>
-        <span class="muted" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.detail)}</span>${s.trace_id ? `<a class="lnk" data-trace="${esc(s.trace_id)}">trace →</a>` : ""}</div>`).join("")}</div>`).join("")
-    : `<div class="card empty">这段时间没有失败。</div>`;
+        <span class="muted" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.detail)}</span>${s.trace_id ? `<a class="lnk" data-trace="${esc(s.trace_id)}">trace →</a>` : ""}</div>`).join("")}</div>`).join("");
+  const intentional = d.intentional || [];
+  // A "no" from the user is a decision, listed apart and left out of the count.
+  $("#view").innerHTML = (d.categories.length ? cards(d.categories, "error") : `<div class="card empty">这段时间没有失败。</div>`) +
+    (intentional.length ? `<h2>用户有意拒绝 <span class="faint" style="font-weight:400">${num(d.intentional_total)} 次，不计入失败</span></h2>` + cards(intentional, "") : "");
 }
 
 async function viewChecks() {
@@ -672,6 +825,9 @@ async function viewChecks() {
 
 async function viewApprovals() {
   const d = await api(`/api/approvals?days=${S.days}`);
+  // In the workbench, an approval this page's chat is waiting on can be answered right here.
+  const waiting = WB.on ? (await api("/api/chat/state")).risk.pending.filter((p) => p.kind === "approval" && p.approval_request_id) : [];
+  const here = Object.fromEntries(waiting.map((p) => [p.approval_request_id, p]));
   const counts = Object.entries(APPROVAL).map(([k, [, label]]) => `${label} ${num(d.counts[k] || 0)}`).join(" · ");
   setHead("审批", `最近 ${S.days} 天 · ${counts}`, d.pending ? pill("running", `${d.pending} 项待审批`) : "");
   // The content column takes the remaining width and truncates (max-width:0 lets a table cell shrink).
@@ -681,9 +837,31 @@ async function viewApprovals() {
       return `<tr><td class="faint" ${nw}>${clock(a.created_at_ns)}</td><td class="mono" ${nw}>${esc(a.tool)}<div class="faint" style="font-size:11px">${esc(a.permission || "")}</div></td>
       <td style="max-width:0;width:100%"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.title)}">${esc(a.title)}</div></td>
       <td ${nw}>${pill(cls, label)}</td><td ${nw}>${esc(VIA[a.decided_via] || "—")}</td><td class="num" ${nw}>${a.wait_ms == null ? "—" : ms(a.wait_ms)}</td>
-      <td ${nw}>${a.trace_id ? `<a class="lnk" data-trace="${esc(a.trace_id)}">trace →</a>` : ""}</td></tr>`; }).join("") +
+      <td ${nw}>${a.trace_id ? `<a class="lnk" data-trace="${esc(a.trace_id)}">trace →</a>` : ""}</td></tr>` + approvalAnswer(a, here[a.id]); }).join("") +
     "</tbody></table>" : `<div class="empty">这段时间没有需要审批的动作。策略自动放行的调用不在这里，见 Trace 中的“策略放行”。</div>`}</div>
-    <div class="hint">每次询问都记一条，终端与网页共用；只保存描述的第一行和参数摘要，不保存写入的内容。</div>`;
+    <div class="err" id="apperr" style="color:var(--bad);font-size:12.5px;margin-top:6px"></div>
+    <div class="hint">每次询问都记一条，终端与网页共用；只保存描述的第一行和参数摘要，不保存写入的内容。${WB.on ? "本工作台正在等待的审批可以直接在这里批准或拒绝，与对话里的卡片是同一个提示。" : "在工作台（zhiqiu web）中可以直接批准。"}</div>`;
+  // Refresh quickly while something here waits for the user.
+  return waiting.length ? 1500 : undefined;
+}
+
+function approvalAnswer(a, prompt) {
+  if (a.status !== "pending") return "";
+  const cell = (html) => `<tr class="apanswer"><td></td><td colspan="6">${html}</td></tr>`;
+  if (!prompt) return cell(`<span class="faint">${WB.on ? "在发起的界面回答（终端里发起，或者已经没有程序在等）" : "在工作台中可以直接批准"}</span>`);
+  return cell(`<pre class="code" style="white-space:pre-wrap;margin:4px 0 8px">${esc(prompt.full_text)}</pre>
+    <div class="acts" style="display:flex;gap:8px;margin-bottom:6px"><button class="btn primary" data-approve="${esc(prompt.request_id)}" data-value="true">批准</button>
+    <button class="btn" data-approve="${esc(prompt.request_id)}" data-value="false">拒绝</button></div>`);
+}
+
+async function approvalRespond(button) {
+  document.querySelectorAll(`[data-approve="${CSS.escape(button.dataset.approve)}"]`).forEach((b) => { b.disabled = true; });
+  try {
+    await post("/api/chat/respond", {request_id: button.dataset.approve, value: button.dataset.value === "true", origin: "approvals"});
+  } catch (e) {
+    $("#apperr").textContent = /已经回答|已停止/.test(e.message) ? "已经在别处回答或已停止。" : `没有回答成功：${e.message}`;
+  }
+  await viewApprovals().catch((e) => pulse(e.message));
 }
 
 async function viewLearn() {
@@ -695,6 +873,198 @@ async function viewLearn() {
     "</tbody></table>" : `<div class="empty">还没有自测或复习。</div>`}</div>`;
 }
 
+// The schedule's own state: which view, the date it is anchored on and the month day opened below the grid.
+const SCH = {view: "week", date: "", open: ""};
+const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function isoAdd(iso, days) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+function relDay(iso, today) {
+  const diff = Math.round((Date.parse(iso) - Date.parse(today)) / 86400000);
+  return {0: "今天", 1: "明天", 2: "后天", "-1": "昨天"}[diff] || (diff > 0 ? `${diff} 天后` : `${-diff} 天前`);
+}
+
+function schItem(item) {
+  const meta = [item.last_total == null ? "" : `上次 ${item.last_total} 分`, item.rule].filter(Boolean).join(" · ");
+  const late = item.deferrals ? `<div class="m">原定 ${esc(item.original_due_date.slice(5))}，推迟 ${num(item.deferrals)} 次</div>` : "";
+  const started = item.state === "started" ? ` ${pill("running", "进行中")}` : "";
+  // Only due items start a review, and only in the workbench (the read-only dashboard has no chat).
+  const go = item.due && WB.on;
+  const tip = !item.due ? `${item.date.slice(5)} 到期，到期后才能复习` : WB.on ? "在对话里开始复习" : "在工作台中可以直接开始复习";
+  return `<div class="sitem${go ? " go" : ""}" ${go ? `data-review="${esc(item.title)}"` : ""} title="${esc(tip)}">
+    <b>${esc(item.title)}${started}</b><div class="m">${esc(meta)}</div>${late}</div>`;
+}
+
+function schDone(done) {
+  return done.length ? `<div class="sdone">完成 ${num(done.length)} 次：${done.map((x) => esc(x.title) + (x.total == null ? "" : ` ${x.total} 分`)).join("、")}</div>` : "";
+}
+
+function schForecast(d) {
+  const top = Math.max(d.limit + 1, d.backlog, ...d.forecast.map((f) => f.count));
+  const bar = (count, cls, label, title, today) => `<div class="col${today ? " today" : ""}" title="${esc(title)}">
+      <span class="v">${count || ""}</span><div class="bar ${count ? cls : "zero"}" style="height:${Math.round(count / top * 60)}px"></div>
+      <span class="lbl">${esc(label)}</span></div>`;
+  return `<div class="fc">${bar(d.backlog, "late", "逾期", `逾期 ${d.backlog} 个`, false)}` +
+    d.forecast.map((f) => bar(f.count, f.over_limit ? "over" : "", f.date.slice(8),
+      `${f.date}（${relDay(f.date, d.today)}）：${f.count} 个${f.over_limit ? `，超过每日上限 ${d.limit} 次` : ""}`, f.date === d.today)).join("") +
+    `</div><div class="hint">未来 14 天的复习负载。只统计每个知识点已排定的下一次复习；每天最多 ${num(d.limit)} 次，超出的会顺延到之后几天。今天已开始 ${num(d.done_today)} 次。</div>`;
+}
+
+async function viewSchedule() {
+  const d = await api(`/api/schedule?view=${SCH.view}${SCH.date ? `&date=${SCH.date}` : ""}`);
+  SCH.date = d.anchor;
+  const s = d.summary;
+  setHead("复习日程", `${d.start.slice(5)} 至 ${d.end.slice(5)}`);
+  const step = SCH.view === "week" ? "周" : "月";
+  const label = SCH.view === "week" ? `${d.start.slice(5)} – ${d.end.slice(5)}` : `${d.anchor.slice(0, 4)} 年 ${Number(d.anchor.slice(5, 7))} 月`;
+  let body = "";
+  if (SCH.view === "week") {
+    body = `<div class="week">${d.days.map((day, i) => {
+      const cls = day.date === d.today ? " today" : day.date < d.today ? " past" : "";
+      const rel = day.date >= d.today && day.date <= isoAdd(d.today, 2) ? `<span class="rel">${relDay(day.date, d.today)}</span>` : "";
+      return `<div class="sday${cls}"><h5><span>${WEEKDAYS[i]}</span><span>${esc(day.date.slice(5))}</span>${rel}</h5>${day.items.map(schItem).join("")}${schDone(day.done)}</div>`;
+    }).join("")}</div>`;
+  } else {
+    const month = d.anchor.slice(0, 7);
+    body = `<div class="month">${WEEKDAYS.map((w) => `<div class="wd">${w}</div>`).join("")}${d.days.map((day) => {
+      const cls = [day.date.slice(0, 7) !== month ? "out" : "", day.date === d.today ? "today" : "", day.date < d.today ? "past" : "", day.date === SCH.open ? "sel" : ""].filter(Boolean).join(" ");
+      const over = day.items.length > d.limit;
+      const count = day.items.length ? `<span class="c${over ? " over" : ""}">${day.items.length}</span>` : day.done.length ? `<span class="faint">完成 ${day.done.length}</span>` : "";
+      const titles = day.items.slice(0, 2).map((item) => `<div class="t">${esc(item.title)}</div>`).join("") + (day.items.length > 2 ? `<div class="t">+${day.items.length - 2}</div>` : "");
+      return `<div class="mcell ${cls}" data-day="${esc(day.date)}"><div class="d"><span>${Number(day.date.slice(8))}</span>${count}</div>${titles}</div>`;
+    }).join("")}</div>`;
+    const open = d.days.find((day) => day.date === SCH.open);
+    if (open) body += `<div class="card" style="margin-top:10px"><h5 style="margin-bottom:6px">${esc(open.date)}（${relDay(open.date, d.today)}）</h5>${open.items.map(schItem).join("") || (open.done.length ? "" : `<div class="faint">这天没有复习安排。</div>`)}${schDone(open.done)}</div>`;
+  }
+  $("#view").innerHTML = tiles([["逾期", num(s.overdue)], ["今天", num(s.today)], ["未来 7 天", num(s.next7)], ["需要重学", num(s.relearn)]]) +
+    `<div class="sch-bar" style="margin-top:14px"><span class="seg"><button data-sch="week" class="${SCH.view === "week" ? "on" : ""}">周</button><button data-sch="month" class="${SCH.view === "month" ? "on" : ""}">月</button></span>
+      <button class="btn" data-sch="prev">上一${step}</button><span class="range">${esc(label)}</span><button class="btn" data-sch="next">下一${step}</button><button class="btn" data-sch="today">回到今天</button></div>
+    <div class="sch-note" id="schnote"></div>` +
+    (d.overdue.length ? `<div class="sday overdue" style="margin-bottom:10px;min-height:0"><h5>逾期 ${num(d.overdue.length)} 个</h5>${d.overdue.map(schItem).join("")}</div>` : "") +
+    body + `<h2>负载预测</h2>` + schForecast(d) +
+    (d.relearn.length ? `<h2>需要重学</h2><div class="card">${d.relearn.map((t) => `<div>${esc(t)} <span class="faint">· 先用 /learn 重学，之后才会排复习</span></div>`).join("")}</div>` : "");
+}
+
+function schNav(action) {
+  const anchor = SCH.date || new Date().toISOString().slice(0, 10);
+  if (action === "week" || action === "month") { SCH.view = action; SCH.open = ""; }
+  else if (action === "today") { SCH.date = ""; SCH.open = ""; }
+  else {
+    const sign = action === "next" ? 1 : -1;
+    if (SCH.view === "week") SCH.date = isoAdd(anchor, 7 * sign);
+    else { const [y, m] = anchor.split("-").map(Number); SCH.date = new Date(Date.UTC(y, m - 1 + sign, 1)).toISOString().slice(0, 10); }
+    SCH.open = "";
+  }
+  route();
+}
+
+async function schReview(title) {
+  try {
+    await post("/api/chat/input", {text: `/review ${title}`});
+    go("#chat");
+  } catch (e) {
+    const note = $("#schnote");
+    if (note) note.textContent = /上一轮/.test(e.message) ? "上一轮还没结束，先回到对话回答或停止当前提示。" : `没有开始复习：${e.message}`;
+  }
+}
+
+// ----- the workbench's root settings: only this page (with the token) changes them, never the agent -----
+const ROOTS = {preview: {}, msg: {}};
+const ROOT_NAME = {read: "可读目录", write: "可写目录"};
+
+function rootRows(kind, items) {
+  if (!items.length) return `<div class="faint" style="padding:6px 0">还没有${ROOT_NAME[kind]}。</div>`;
+  return items.map((r) => {
+    const src = r.source === "env" ? `<span class="src" title="在 .env 中修改">环境变量</span>`
+      : `<span class="src wb">工作台添加 · ${esc((r.added_at || "").slice(5, 10))}</span>`;
+    const count = r.files == null ? "" : `添加时 ${r.truncated ? "至少 " : ""}${num(r.files)} 个 .md/.txt 文件`;
+    const gone = r.exists ? "" : `<span style="color:var(--bad)">目录不存在</span>`;
+    const remove = r.source === "workbench" ? `<button class="btn danger" data-root-remove="${esc(kind)}" data-path="${esc(r.path)}">移除</button>` : "";
+    return `<div class="rrow"><div class="rp">${esc(r.path)}</div>${remove}<div class="rm">${src}${[count, gone].filter(Boolean).join(" · ")}</div></div>`;
+  }).join("");
+}
+
+function rootPreview(kind) {
+  const p = ROOTS.preview[kind];
+  if (!p) return "";
+  const resolved = p.path !== p.input ? `<div class="faint">已解析为 <span class="mono">${esc(p.path)}</span></div>` : "";
+  const samples = p.samples.length ? `<div class="faint">例如：${p.samples.map(esc).join("、")}</div>` : "";
+  return `<div class="pv"><div class="mono">${esc(p.path)}</div>${resolved}<div style="margin-top:4px">${esc(p.notice)}</div>${samples}
+    ${p.warnings.map((w) => `<div class="w">${esc(w)}</div>`).join("")}
+    <div class="acts"><button class="btn primary" data-root-add="${esc(kind)}">确认添加</button><button class="btn" data-root-cancel="${esc(kind)}">取消</button></div></div>`;
+}
+
+async function viewRoots() {
+  const d = await api("/api/roots");
+  setHead("目录白名单", "知秋在对话中能读、能写的目录", d.busy || d.pending ? pill("running", "本轮进行中") : "");
+  const section = (kind, intro) => `<div class="card roots" id="roots-${kind}"><h4 style="margin-bottom:4px">${ROOT_NAME[kind]}</h4><div class="faint" style="font-size:12px;margin-bottom:6px">${intro}</div>
+    <div class="rlist">${rootRows(kind, d[kind])}</div>
+    <div class="addline"><input id="root-in-${kind}" placeholder="粘贴绝对路径，例如 D:\\notes\\算法" autocomplete="off" spellcheck="false"><button class="btn" data-root-preview="${kind}">预览</button></div>
+    <div class="pvbox">${rootPreview(kind)}</div><div class="err">${esc(ROOTS.msg[kind] || "")}</div></div>`;
+  $("#view").innerHTML = section("read", "对话中知秋可以读取这些目录里的 .md/.txt 文件，读到的内容会发送到模型端点。") +
+    section("write", "知秋可以在这些目录里新建或覆盖 .md/.txt 笔记。每次写入仍需你批准；审批策略不能把写文件设为自动。") +
+    `<div class="hint">改动在两轮对话之间生效，不用重启。环境变量（ZHIQIU_READ_ROOTS / ZHIQIU_WRITE_ROOTS）里的目录只能在 .env 中修改。每次改动都记一条审计事件（只记路径和文件数）。知秋自己没有任何办法改动这份名单。工作台最多添加 ${num(d.limits.max)} 个可读目录和 ${num(d.limits.max)} 个可写目录。</div>`;
+}
+
+function rootMsg(kind, text) {
+  ROOTS.msg[kind] = text;
+  const node = document.querySelector(`#roots-${kind} .err`);
+  if (node) node.textContent = text;
+}
+
+// A preview belongs to the path it was made for: editing the path drops it.
+document.addEventListener("input", (event) => {
+  const kind = event.target.id?.startsWith("root-in-") && event.target.id.slice(8);
+  if (kind && ROOTS.preview[kind]) {
+    ROOTS.preview[kind] = null;
+    document.querySelector(`#roots-${kind} .pvbox`).innerHTML = "";
+  }
+});
+
+async function rootsAction(button) {
+  const kind = button.dataset.rootPreview || button.dataset.rootAdd || button.dataset.rootCancel || button.dataset.rootRemove;
+  rootMsg(kind, "");
+  if (button.dataset.rootCancel) { ROOTS.preview[kind] = null; document.querySelector(`#roots-${kind} .pvbox`).innerHTML = ""; return; }
+  button.disabled = true;
+  try {
+    if (button.dataset.rootPreview) {
+      const path = $(`#root-in-${kind}`).value;
+      ROOTS.preview[kind] = await post("/api/roots/preview", {kind, path});
+      document.querySelector(`#roots-${kind} .pvbox`).innerHTML = rootPreview(kind);
+      return;
+    }
+    let path, before;
+    if (button.dataset.rootAdd) {
+      await post("/api/roots/add", {kind, path: ROOTS.preview[kind].input});
+      path = ROOTS.preview[kind].path;
+      ROOTS.preview[kind] = null;
+      before = false;
+    } else {
+      path = button.dataset.path;
+      if (!confirm(`移除后，知秋不能再${kind === "read" ? "读取" : "写入"}这个目录；已经读进对话的内容不受影响。\n\n${path}`)) return;
+      await post("/api/roots/remove", {kind, path});
+      before = true;
+    }
+    // The worker applies it between turns; wait briefly until the list shows the change.
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const d = await api("/api/roots");
+      if (d[kind].some((r) => r.source === "workbench" && r.path === path) !== before || i === 19) break;
+    }
+    await viewRoots();
+    if (button.dataset.rootAdd) $(`#root-in-${kind}`).value = "";
+  } catch (e) {
+    rootMsg(kind, e.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+const TURN = {answer: "回答", question: "提问", mixed: "半答半问", failed: "拿不准", split: "分开处理"};
+
 async function viewAttempt(id) {
   const d = await api(`/api/attempt/${encodeURIComponent(id)}`);
   const review = d.review[0];
@@ -704,15 +1074,23 @@ async function viewAttempt(id) {
   const ev = {};
   d.review_evidence.forEach((x) => { (ev[x.dimension] ||= []).push(x); });
   $("#view").innerHTML = tiles([["状态", pill(d.attempt.state === "completed" ? "ok" : "running", d.attempt.state)], ["总分", review ? `${review.total ?? "—"}<span class="faint" style="font-size:12px"> / 100</span>` : "—"],
-    ["评阅", review ? (review.kind === "complete" ? "完整" : review.kind) : "尚未评阅"], ["下次复习", task ? esc(task.due_date) : "—"], ["题数", num(d.questions.length)]]) +
+    ["评阅", review ? (review.kind === "complete" ? "完整" : review.kind) : "尚未评阅"], ["下次复习", task ? esc(task.due_date) : "—"], ["题数", num(d.questions.length)],
+    ["讲法", d.knowledge_point?.skill ? `${esc(d.knowledge_point.skill)}<span class="faint" style="font-size:12px"> · ${d.knowledge_point.skill_source === "user" ? "用户指定" : "模型选择"}</span>` : `<span class="faint">通用</span>`]]) +
     `<div class="hint">相关 trace：${d.trace_ids.map((t) => `<a class="lnk" data-trace="${esc(t)}">${esc(t.slice(0, 8))}</a>`).join("、") || "无"}</div>
     <h2>分维度评分</h2><div class="grid2">${d.dimension_scores.map((s) => `<div class="card"><div class="muted">${esc(DIM[s.dimension] || s.dimension)}</div>
       <div class="score">${s.score}<small> / 4</small></div><div style="margin-top:4px">${esc(s.rationale)}</div>${s.supplement ? `<div class="hint">补充：${esc(s.supplement)}</div>` : ""}
       ${(ev[s.dimension] || []).map((e) => `<blockquote>${esc(e.quote)}</blockquote>`).join("")}</div>`).join("") || `<div class="card empty">没有分维度评分。</div>`}</div>
     <h2>题目与回答</h2><div class="card">${d.questions.map((q) => `<div class="q"><div class="meta">第 ${q.seq} 题 · ${esc(DIM[q.dimension] || q.dimension)} · ${esc(q.difficulty)}${q.followup_of ? " · 追问" : ""}</div>
-      <div>${esc(q.question)}</div><div class="ans">${q.answer ? esc(q.scoring_text || q.answer) : '<span class="faint">未作答</span>'}</div>
+      <div>${esc(q.question)}</div><div class="ans">${q.answer ? esc(q.scoring_text || q.answer) : '<span class="faint">未作答</span>'}${(d.voice_answers || []).includes(q.answer_id) ? VOICE_MARK : ""}</div>
+      ${(d.voice_answers || []).includes(q.answer_id) ? `<div class="meta">该回答来自语音转写（发送前已由你确认）</div>` : ""}
       ${assess[q.question_id] ? `<div class="meta" style="margin-top:4px">评阅：${esc(assess[q.question_id].judgment)}</div>` : ""}</div>`).join("") || `<div class="empty">没有题目。</div>`}</div>
     ${d.notes.length ? `<h2>提问与兴趣（不计入评分）</h2><div class="card">${d.notes.map((n) => `<div class="q"><div class="meta">${esc(n.kind)}</div><div>${esc(n.text)}</div>${n.explanation ? `<div class="muted" style="font-size:12.5px;margin-top:4px">${esc(n.explanation).slice(0, 300)}</div>` : ""}</div>`).join("")}</div>` : ""}
+    ${d.classifications?.length ? `<h2>输入分类（不含原文）</h2><div class="card">${d.classifications.map((c) => {
+      const seq = d.questions.find((q) => q.question_id === c.question_id)?.seq;
+      return `<div style="display:flex;gap:10px;font-size:12.5px;padding:3px 0;flex-wrap:wrap"><span class="faint">${seq ? `第 ${seq} 题` : ""}</span>
+        <span>模型判断 <b>${esc(TURN[c.model_kind] || c.model_kind)}</b>${c.model_kind === "mixed" ? `（拆分${c.split_valid ? "合法" : "不合法"}）` : ""} → 处理为 <b>${esc(TURN[c.final] || c.final)}</b></span>
+        <span class="faint">${c.decided_by === "user" ? "用户选择" : "模型直接处理"} · ${num(c.input_chars)} 字</span><span class="muted">${esc(c.reason || "")}</span></div>`;
+    }).join("")}</div>` : ""}
     <h2>状态迁移</h2><div class="card">${d.state_events.map((e) => `<div style="display:flex;gap:10px;font-size:12.5px;padding:3px 0"><span class="faint">${esc((e.created_at || "").slice(0, 16).replace("T", " "))}</span>
       <span>${esc(e.payload.entity)} ${esc(e.payload.from ?? "新建")} → <b>${esc(e.payload.to)}</b></span><span class="faint">${esc(e.payload.cause)}</span></div>`).join("") || `<div class="empty">没有记录。</div>`}</div>`;
 }
@@ -765,24 +1143,46 @@ function md(source) {
   return `<div class="md">${out.join("")}</div>`;
 }
 
-// Chat state: the last event seen, the prompt cards by request id, and what is waiting now.
-const C = {mounted: false, after: 0, cards: {}, ask: null, busy: false, pending: [], tick: 0, sending: false};
-// Lines the agent says about tools rather than to the user.
-const TOOL_NOTE = /（(自动|本轮已允许)）$/;
+// Chat state: the last event seen, the prompt cards by request id, what is waiting now, the conversation
+// whose history is on screen and the sidebar's list.
+const C = {mounted: false, after: 0, cards: {}, ask: null, busy: false, pending: [], tick: 0, sending: false,
+  loaded: null, convs: [], renaming: null};
 
 function chatMount() {
   setHead("对话", "加载中…");
-  $("#view").innerHTML = `<div class="chatgrid"><div class="chatmain"><div class="stream" id="stream"></div>
+  const narrow = matchMedia("(max-width: 860px)").matches;
+  $("#view").innerHTML = `<div class="chatgrid"><details class="convs" id="convs"${narrow ? "" : " open"}><summary>会话</summary>
+      <div class="offnote" id="convsoff" hidden>先回答或停止当前提示</div>
+      <div class="cbody"><button class="btn primary new" id="newchat">新对话</button><div id="clist"><div class="faint">加载中…</div></div></div></details>
+    <div class="chatmain"><div class="stream" id="stream"></div>
     <div class="composer"><div class="askbar" id="askbar" hidden></div>
       <div class="line"><textarea id="say" rows="1" placeholder="和知秋说点什么（/help 查看命令，Shift+Enter 换行）"></textarea>
+        <button class="btn mic" id="mic" hidden title="按住说话，松开结束（本地识别，录音不保存）" aria-label="按住说话">${icon("mic")}</button>
         <button class="btn primary" id="send">发送</button><button class="btn" id="stop" disabled title="停止正在等待的提问或审批">停止</button></div>
+      <div class="vhint" id="vhint" hidden></div>
       <div class="state" id="cstate"></div></div></div>
     <details class="spanel" id="spanel"${matchMedia("(max-width: 860px)").matches ? "" : " open"}><summary>当前状态（目标、上下文、风险动作、结果）</summary><div id="spbody"><div class="faint">加载中…</div></div></details></div>`;
-  Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: []});
+  Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: [], loaded: null, convs: [], renaming: null});
+  $("#newchat").addEventListener("click", () => chatControl("/api/chat/new", {}));
+  $("#clist").addEventListener("click", (e) => {
+    const rename = e.target.closest("[data-rename]");
+    if (rename) { e.stopPropagation(); convRename(rename.dataset.rename); return; }
+    const row = e.target.closest(".crow[data-conv]");
+    if (row && !row.classList.contains("on") && !e.target.closest("input")) chatControl("/api/chat/switch", {conversation_id: row.dataset.conv});
+  });
   $("#say").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); } });
   $("#send").addEventListener("click", chatSend);
+  $("#mic").addEventListener("pointerdown", micStart);
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) $("#mic").addEventListener(name, micStop);
+  $("#mic").hidden = !V.available;
+  $("#say").addEventListener("input", () => { if (!$("#say").value.trim()) voiceReset(); });
   $("#stop").addEventListener("click", async () => { try { await post("/api/chat/stop", {}); chatTick(true); } catch (e) { chatNote(e.message, true); } });
 }
+
+// The sidebar and the status panel fold away on narrow screens; they follow the width when it changes.
+matchMedia("(max-width: 860px)").addEventListener("change", (e) => {
+  for (const id of ["#convs", "#spanel"]) { const node = $(id); if (node) node.open = !e.matches; }
+});
 
 function chatAppend(html) {
   const stream = $("#stream");
@@ -817,28 +1217,278 @@ function resolveCard(e) {
   if (card && kind !== "ask") {
     card.classList.add("done");
     card.querySelector(".acts")?.remove();
-    const label = stopped || (kind === "approval" ? (e.value ? "已批准（网页）" : "已拒绝（网页）") : (e.value ? "是" : "否"));
+    const where = e.origin === "approvals" ? "审批页" : "网页";
+    const label = stopped || (kind === "approval" ? (e.value ? `已批准（${where}）` : `已拒绝（${where}）`) : (e.value ? "是" : "否"));
     card.insertAdjacentHTML("beforeend", `<div class="result">${esc(label)} · ${clock(e.at_ns)}</div>`);
   } else if (stopped) {
     chatNote(stopped);
   } else if (typeof e.value === "string") {
-    chatAppend(`<div class="bubble user">${esc(e.value)}</div>`);
+    chatAppend(`<div class="bubble user">${esc(e.value)}${e.input_source === "voice" ? VOICE_MARK : ""}</div>`);
   }
   if (C.ask === e.request_id) C.ask = null;
 }
 
+// ----- lesson diagrams: a flow chart, a tree or a concept map, drawn as plain SVG ------------------------
+// Layered layout: break cycles by reversing back edges, longest-path layers, two barycenter sweeps.
+const DG = {n: 0};
+function dgTextWidth(text) {
+  let w = 0;
+  for (const ch of text) w += /[⺀-￿]/.test(ch) ? 13 : 7.2;
+  return w;
+}
+function dgLayout(d) {
+  const ids = d.nodes.map((n) => n.id), at = Object.fromEntries(ids.map((id, i) => [id, i]));
+  const out = ids.map(() => []), indeg = ids.map(() => 0);
+  d.edges.forEach((e, k) => { out[at[e.from]].push([at[e.to], k]); indeg[at[e.to]]++; });
+  const state = ids.map(() => 0), back = new Set();
+  const dfs = (u) => { state[u] = 1; for (const [v, k] of out[u]) { if (state[v] === 1) back.add(k); else if (!state[v]) dfs(v); } state[u] = 2; };
+  ids.forEach((_, i) => { if (!indeg[i] && !state[i]) dfs(i); });
+  ids.forEach((_, i) => { if (!state[i]) dfs(i); });
+  const dag = d.edges.map((e, k) => back.has(k) ? [at[e.to], at[e.from]] : [at[e.from], at[e.to]]);
+  const succ = ids.map(() => []), pred = ids.map(() => []), inc = ids.map(() => 0), layer = ids.map(() => 0);
+  dag.forEach(([a, b]) => { succ[a].push(b); pred[b].push(a); inc[b]++; });
+  const queue = ids.map((_, i) => i).filter((i) => !inc[i]);
+  while (queue.length) {
+    const u = queue.shift();
+    for (const v of succ[u]) { layer[v] = Math.max(layer[v], layer[u] + 1); if (--inc[v] === 0) queue.push(v); }
+  }
+  const layers = [];
+  ids.forEach((_, i) => (layers[layer[i]] ||= []).push(i));
+  const pos = ids.map(() => 0);
+  layers.forEach((row) => row.forEach((n, j) => { pos[n] = j; }));
+  const sweep = (rows, near) => rows.forEach((row) => {
+    const bc = (n) => near[n].length ? near[n].reduce((s, m) => s + pos[m], 0) / near[n].length : pos[n];
+    row.sort((a, b) => bc(a) - bc(b) || a - b);
+    row.forEach((n, j) => { pos[n] = j; });
+  });
+  for (let round = 0; round < 2; round++) { sweep(layers.slice(1), pred); sweep(layers.slice(0, -1).reverse(), succ); }
+  return {layers, back, layer};
+}
+function drawDiagram(d) {
+  const id = `dg${++DG.n}`, lay = dgLayout(d);
+  const W = d.nodes.map((n) => Math.min(200, Math.max(56, dgTextWidth(n.label) + 22))), H = 30;
+  const wide = lay.layers.length > 4 && lay.layers.some((row) => row.length >= 4);
+  const pad = 14, box = d.nodes.map(() => ({x: 0, y: 0}));
+  let width = 0, height = 0;
+  if (!wide) {
+    const rowW = lay.layers.map((row) => row.reduce((s, n) => s + W[n], 0) + (row.length - 1) * 26);
+    width = Math.max(...rowW) + pad * 2;
+    lay.layers.forEach((row, li) => {
+      let x = pad + (width - pad * 2 - rowW[li]) / 2;
+      row.forEach((n) => { box[n] = {x, y: pad + li * (H + 48)}; x += W[n] + 26; });
+    });
+    height = pad * 2 + lay.layers.length * H + (lay.layers.length - 1) * 48;
+  } else {
+    const colW = lay.layers.map((row) => Math.max(...row.map((n) => W[n])));
+    const colH = lay.layers.map((row) => row.length * H + (row.length - 1) * 16);
+    height = Math.max(...colH) + pad * 2;
+    let x = pad;
+    lay.layers.forEach((row, li) => {
+      let y = pad + (height - pad * 2 - colH[li]) / 2;
+      row.forEach((n) => { box[n] = {x: x + (colW[li] - W[n]) / 2, y}; y += H + 16; });
+      x += colW[li] + 64;
+    });
+    width = x - 64 + pad;
+  }
+  const at = Object.fromEntries(d.nodes.map((n, i) => [n.id, i]));
+  const center = (i) => ({x: box[i].x + W[i] / 2, y: box[i].y + H / 2});
+  const clip = (i, dx, dy) => {
+    const t = Math.min(dx ? (W[i] / 2) / Math.abs(dx) : Infinity, dy ? (H / 2) / Math.abs(dy) : Infinity);
+    return {x: center(i).x + dx * t, y: center(i).y + dy * t};
+  };
+  const arrows = d.type !== "map";
+  const edges = d.edges.map((e, k) => {
+    const a = at[e.from], b = at[e.to], ca = center(a), cb = center(b);
+    // Back edges and edges inside one layer bend to the side so they do not cross the boxes between.
+    const bend = lay.back.has(k) || lay.layer[a] === lay.layer[b];
+    let dx = cb.x - ca.x, dy = cb.y - ca.y;
+    let path, mid;
+    if (!bend) {
+      const s = clip(a, dx, dy), t = clip(b, -dx, -dy);
+      path = `M${s.x.toFixed(1)},${s.y.toFixed(1)} L${t.x.toFixed(1)},${t.y.toFixed(1)}`;
+      mid = {x: (s.x + t.x) / 2, y: (s.y + t.y) / 2};
+    } else {
+      const len = Math.hypot(dx, dy) || 1, off = 46 + len * 0.15;
+      const nx = -dy / len, ny = dx / len;
+      const cx = (ca.x + cb.x) / 2 + nx * off, cy = (ca.y + cb.y) / 2 + ny * off;
+      const s = clip(a, cx - ca.x, cy - ca.y), t = clip(b, cx - cb.x, cy - cb.y);
+      path = `M${s.x.toFixed(1)},${s.y.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${t.x.toFixed(1)},${t.y.toFixed(1)}`;
+      mid = {x: (s.x + 2 * cx + t.x) / 4, y: (s.y + 2 * cy + t.y) / 4};
+      width = Math.max(width, cx + pad); height = Math.max(height, cy + pad);
+    }
+    const label = e.label ? `<text class="el" x="${mid.x.toFixed(1)}" y="${(mid.y + 4).toFixed(1)}" text-anchor="middle">${esc(e.label)}</text>` : "";
+    return `<path class="eg${lay.back.has(k) ? " back" : ""}" d="${path}"${arrows ? ` marker-end="url(#${id}a)"` : ""}/>${label}`;
+  }).join("");
+  const nodes = d.nodes.map((n, i) => `<g class="nd"><rect x="${box[i].x.toFixed(1)}" y="${box[i].y.toFixed(1)}" width="${W[i].toFixed(1)}" height="${H}" rx="8"/>
+    <text x="${center(i).x.toFixed(1)}" y="${(center(i).y + 4.5).toFixed(1)}" text-anchor="middle">${esc(n.label)}</text></g>`).join("");
+  return `<svg class="dgsvg" viewBox="0 0 ${Math.ceil(width)} ${Math.ceil(height)}" width="${Math.ceil(width)}" height="${Math.ceil(height)}" role="img" aria-label="${esc(d.title)}">
+    <defs><marker id="${id}a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+    ${edges}${nodes}</svg>`;
+}
+const DG_KIND = {flow: "流程图", tree: "树", map: "概念图"};
+function diagramFigure(d, text) {
+  return `<figure class="dg"><div class="dgscroll">${drawDiagram(d)}</div>
+    <figcaption><span>${esc(DG_KIND[d.type] || "")} · ${esc(d.title)}</span><button class="lnk" data-dgtext>文字版</button></figcaption>
+    <pre class="code dgtext" hidden>${esc(text || "")}</pre></figure>`;
+}
+// A lesson section with a picture: the diagram goes between the text and the check question.
+function sectionHtml(text, d, dtext) {
+  const cut = text.lastIndexOf("\n想一想：");
+  const body = cut >= 0 ? text.slice(0, cut) : text, tail = cut >= 0 ? text.slice(cut + 1) : "";
+  return md(body) + diagramFigure(d, dtext) + (tail ? md(tail) : "");
+}
+
+// ----- voice input: hold the mic, release, the local transcript lands in the box; nothing is sent by itself -----
+const V = {available: false, max: 60, reason: "", rec: null, voiced: false, voiceId: null, seg: null};
+const VOICE_MARK = `<span class="vmark" title="语音转写，发送前已确认">${icon("mic")}语音</span>`;
+function voiceState(v) {
+  V.available = !!(v && v.available);
+  V.max = (v && v.max_seconds) || 60;
+  V.reason = (v && v.reason_text) || "";
+  const mic = $("#mic");
+  if (mic) mic.hidden = !V.available;
+}
+function voiceHint(html, error = false) {
+  const hint = $("#vhint");
+  if (!hint) return;
+  hint.hidden = !html;
+  hint.className = `vhint${error ? " err" : ""}`;
+  hint.innerHTML = html || "";
+}
+function voiceReset() {
+  Object.assign(V, {voiced: false, voiceId: null, seg: null});
+  voiceHint("");
+}
+function encodeWav(samples) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2), view = new DataView(buffer);
+  const text = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+  text(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); text(8, "WAVE"); text(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, samples.length * 2, true);
+  samples.forEach((value, i) => { const s = Math.max(-1, Math.min(1, value)); view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); });
+  return new Blob([buffer], {type: "audio/wav"});
+}
+async function micStart(event) {
+  if (V.rec || !V.available) return;
+  event.preventDefault();
+  const mic = $("#mic");
+  mic.setPointerCapture?.(event.pointerId);
+  const rec = V.rec = {chunks: [], started: performance.now(), level: 0, stop: null, released: false};
+  mic.classList.add("rec");
+  voiceHint(`<span class="dot live"></span>正在录音 0.0 秒，松开结束`);
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+    let ctx;
+    try { ctx = new AudioContext({sampleRate: 16000}); } catch (e) { ctx = new AudioContext(); }
+    await ctx.audioWorklet.addModule("/voice-worklet.js");
+    const source = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "zhiqiu-recorder");
+    const mute = ctx.createGain();
+    mute.gain.value = 0;  // pulled through the graph, never played back
+    node.port.onmessage = (m) => { rec.chunks.push(m.data); rec.level = Math.max(...m.data.map(Math.abs)); };
+    source.connect(node); node.connect(mute); mute.connect(ctx.destination);
+    rec.stop = () => { source.disconnect(); node.disconnect(); stream.getTracks().forEach((t) => t.stop()); ctx.close(); };
+    rec.timer = setInterval(() => {
+      const seconds = (performance.now() - rec.started) / 1000;
+      voiceHint(`<span class="dot live"></span>正在录音 ${seconds.toFixed(1)} 秒，松开结束<span class="vlevel"><i style="width:${Math.min(100, rec.level * 160).toFixed(0)}%"></i></span>`);
+      if (seconds >= V.max) micStop();
+    }, 150);
+    if (rec.released) micStop();
+  } catch (err) {
+    V.rec = null;
+    mic.classList.remove("rec");
+    voiceHint(err && err.name === "NotAllowedError" ? "浏览器没有麦克风权限" : `无法录音：${esc(err.message || err)}`, true);
+  }
+}
+async function micStop() {
+  const rec = V.rec;
+  if (!rec) return;
+  if (!rec.stop) { rec.released = true; return; }  // let go before the microphone was ready
+  V.rec = null;
+  clearInterval(rec.timer);
+  rec.stop();
+  $("#mic").classList.remove("rec");
+  const total = rec.chunks.reduce((n, c) => n + c.length, 0);
+  if (total < 16000 * 0.3) { voiceHint("按住说话，松开结束"); return; }
+  const samples = new Float32Array(total);
+  let at = 0;
+  for (const chunk of rec.chunks) { samples.set(chunk, at); at += chunk.length; }
+  voiceHint("识别中…");
+  try {
+    const response = await fetch("/api/chat/transcribe", {method: "POST", cache: "no-store", body: encodeWav(samples),
+      headers: {"Content-Type": "audio/wav", "X-Zhiqiu-Token": WB.token}});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(response.status === 409 ? "上一段还在识别" : data.error || response.statusText);
+    voiceInsert(data);
+  } catch (err) {
+    voiceHint(esc(err.message), true);
+  }
+}
+// The transcript goes where the cursor is; what was typed stays.
+function voiceInsert(data) {
+  const box = $("#say");
+  if (!data.text) { voiceHint("没有听清，再说一次"); return; }
+  const start = box.selectionStart ?? box.value.length, end = box.selectionEnd ?? start;
+  box.value = box.value.slice(0, start) + data.text + box.value.slice(end);
+  box.selectionStart = box.selectionEnd = start + data.text.length;
+  box.focus();
+  Object.assign(V, {voiced: true, voiceId: data.voice_id, seg: {start, text: data.text, raw: data.raw, changes: data.replacements.map((r) => ({...r, undone: false}))}});
+  voiceHints();
+}
+function voiceHints() {
+  const seg = V.seg;
+  if (!seg) return voiceHint("");
+  const live = seg.changes.filter((c) => !c.undone);
+  voiceHint(live.length
+    ? `已按术语修正：${seg.changes.map((c, i) => c.undone ? "" : `<span class="vfix">${esc(c.from)}→${esc(c.to)}<button class="lnk" data-vundo="${i}">撤销</button></span>`).join("")}<button class="lnk" data-vraw>用原始转写</button>`
+    : `语音转写已填入，确认后再发送`);
+}
+// Swap the transcript in the box for a new version, if the user has not edited that part since.
+function voiceReplace(next) {
+  const box = $("#say"), seg = V.seg;
+  let at = box.value.substr(seg.start, seg.text.length) === seg.text ? seg.start : box.value.indexOf(seg.text);
+  if (at < 0) { voiceHint("文字已经改过，不能再撤销", true); return false; }
+  box.value = box.value.slice(0, at) + next + box.value.slice(at + seg.text.length);
+  seg.start = at;
+  seg.text = next;
+  return true;
+}
+function voiceUndo(button) {
+  const seg = V.seg;
+  if (!seg) return;
+  if (button.dataset.vraw !== undefined) {
+    if (voiceReplace(seg.raw)) { seg.changes.forEach((c) => { c.undone = true; }); voiceHints(); }
+    return;
+  }
+  const change = seg.changes[Number(button.dataset.vundo)];
+  const next = seg.text.slice(0, change.at) + change.from + seg.text.slice(change.at + change.to.length);
+  if (seg.text.substr(change.at, change.to.length) === change.to && voiceReplace(next)) { change.undone = true; voiceHints(); }
+}
+
 function chatEvent(e) {
-  if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}</div>`);
+  if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}${e.input_source === "voice" ? VOICE_MARK : ""}</div>`);
   else if (e.kind === "say") {
-    if (TOOL_NOTE.test(e.text) || /^对话 [0-9a-f-]{36}/.test(e.text)) chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${esc(e.text)}</span></div>`);
+    // Tool call notes and system notes are small print; everything else is the agent talking.
+    if (e.say_kind === "tool") chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${esc(e.text)}</span></div>`);
+    else if (e.say_kind === "note") chatNote(e.text);
+    else if (e.say_kind === "outcome") chatAppend(outcomeCard(e));
     else {
       // Lines said one after another (a lesson, a grading report) belong in one bubble.
       const last = $("#stream")?.lastElementChild;
+      const diagram = e.meta?.diagram;
+      let html;
+      try { html = diagram ? sectionHtml(e.text, diagram, e.meta.diagram_text) : md(e.text); }
+      catch (err) { html = md(e.text) + (e.meta?.diagram_text ? `<pre class="code">${esc(e.meta.diagram_text)}</pre>` : ""); }
       if (last && last.matches(".bubble.bot:not(.old)")) {
         const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
-        last.insertAdjacentHTML("beforeend", md(e.text));
+        last.insertAdjacentHTML("beforeend", html);
         if (nearBottom) main.scrollTop = main.scrollHeight;
-      } else chatAppend(`<div class="bubble bot">${md(e.text)}</div>`);
+      } else chatAppend(`<div class="bubble bot">${html}</div>`);
+      // A picture wider than the bubble starts centred (its first layer usually holds one node).
+      if (diagram) document.querySelectorAll(".dgscroll:not([data-centred])").forEach((box) => {
+        box.scrollLeft = (box.scrollWidth - box.clientWidth) / 2;
+        box.dataset.centred = "1";
+      });
     }
   } else if (e.kind in {ask: 1, confirm: 1, approval: 1}) {
     chatAppend(promptCard(e));
@@ -848,12 +1498,119 @@ function chatEvent(e) {
   else if (e.kind === "error") chatNote(e.text, true);
 }
 
+// A grading summary: its first line is the total, then one line per dimension (indented tips under it);
+// the last line points the terminal to /detail, which the card replaces with a button.
+function outcomeCard(e) {
+  const lines = e.text.split("\n").filter((line) => !line.startsWith("输入 /detail"));
+  const head = lines.shift() || "";
+  const body = lines.map((line) => /^\s{4}/.test(line) ? `<div class="tip">${esc(line.trim())}</div>` : `<div class="dim">${esc(line.trim())}</div>`).join("");
+  const id = e.meta?.attempt_id;
+  return `<div class="ocard"><div class="head">${esc(head)}</div>${body}
+    ${id ? `<div class="acts" style="margin-top:8px"><button class="btn" data-detail="${esc(id)}">展开详情</button><a class="lnk" data-attempt="${esc(id)}" style="margin-left:8px">学习记录 →</a></div>` : ""}</div>`;
+}
+
+// The detail is read from the read-only attempt endpoint, so it opens even while the chat is busy.
+async function outcomeDetail(button) {
+  const card = button.closest(".ocard");
+  const open = card.querySelector(".more");
+  if (open) { open.remove(); button.textContent = "展开详情"; return; }
+  button.disabled = true;
+  try {
+    const d = await api(`/api/attempt/${encodeURIComponent(button.dataset.detail)}`);
+    const ev = {};
+    d.review_evidence.forEach((x) => { (ev[x.dimension] ||= []).push(x); });
+    const byQuestion = Object.fromEntries(d.questions.map((q) => [q.question_id, q]));
+    const dims = d.dimension_scores.map((g) => `<div class="q"><b>${esc(DIM[g.dimension] || g.dimension)} ${g.score}/4</b>
+      ${(ev[g.dimension] || []).map((x) => `<blockquote>${esc(x.quote)}</blockquote>`).join("")}
+      <div>${esc(g.rationale)}</div>${g.supplement ? `<div class="hint">补充：${esc(g.supplement)}</div>` : ""}
+      ${d.question_assessments.filter((a) => a.dimension === g.dimension).map((a) => {
+        const q = byQuestion[a.question_id] || {};
+        return `<div class="meta" style="margin-top:6px">原题（${esc(q.difficulty || "")}）</div><div>${esc(q.question || "")}</div>
+          <div class="meta">原答</div><div class="ans">${q.answer ? esc(q.answer) : '<span class="faint">未回答</span>'}</div>
+          ${q.scoring_text ? `<div class="meta">评分采用的最终答案</div><div class="ans">${esc(q.scoring_text)}</div>` : ""}`;
+      }).join("")}</div>`).join("");
+    card.insertAdjacentHTML("beforeend", `<div class="more">${dims || '<div class="faint">没有分维度评分。</div>'}</div>`);
+    button.textContent = "收起详情";
+  } catch (err) {
+    chatNote(`读取评阅详情失败：${err.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Switching, starting and renaming are done by the worker between turns; the page only asks.
+async function chatControl(path, body) {
+  // Poll every second until the worker says it is idle again, however quickly it switched.
+  try { await post(path, body); C.expect = true; } catch (e) { chatNote(e.message, true); }
+  await chatTick(true).catch((e) => pulse(e.message));
+}
+
+// The worker opened another conversation (sidebar, "新对话" or a typed /new): show that one instead.
+async function chatSwitched(e) {
+  if (C.after === 0 && C.loaded === e.conversation_id) return;  // the history just loaded is this one
+  $("#stream").innerHTML = "";
+  Object.assign(C, {cards: {}, ask: null});
+  await chatHistory().catch((err) => chatNote(`读取之前的消息失败：${err.message}`, true));
+  await chatConvs().catch((err) => pulse(err.message));
+}
+
+function dayLabel(iso) {
+  const today = new Date();
+  const day = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  if (iso === day(today)) return "今天";
+  if (iso === day(new Date(today.getTime() - 86400000))) return "昨天";
+  return (iso || "").slice(5);
+}
+
+async function chatConvs() {
+  const d = await api("/api/chat/conversations");
+  C.convs = d.conversations;
+  const list = $("#clist");
+  if (!list || C.renaming) return;
+  list.innerHTML = d.conversations.map((c) => `<div class="crow${c.current ? " on" : ""}" data-conv="${esc(c.id)}" title="${esc(c.title)}">
+      <div class="ct">${esc(c.title)}</div><button class="rn" data-rename="${esc(c.id)}" title="改名">✎</button>
+      <div class="cm">${esc(dayLabel(c.chat_date))} · ${num(c.messages)} 条${c.resumable ? `<span class="tag">可继续</span>` : ""}</div></div>`).join("")
+    || `<div class="faint">还没有对话</div>`;
+  chatHead();
+}
+
+function chatHead() {
+  const current = C.convs.find((c) => c.current);
+  setHead("对话", current ? current.title : "", C.pending.length ? pill("running", "等待你") : C.busy ? pill("running", "处理中") : pill("ok", "空闲"));
+  $("#sub").title = current ? current.id : "";  // the full id only on hover
+}
+
+function convRename(id) {
+  const row = document.querySelector(`.crow[data-conv="${CSS.escape(id)}"]`);
+  const item = C.convs.find((c) => c.id === id);
+  if (!row || !item) return;
+  C.renaming = id;
+  const title = row.querySelector(".ct");
+  title.innerHTML = `<input maxlength="30" value="${esc(item.title)}">`;
+  const input = title.querySelector("input");
+  input.focus();
+  input.select();
+  const done = async (save) => {
+    if (C.renaming !== id) return;
+    C.renaming = null;
+    const value = input.value.trim();
+    if (save && value && value !== item.title) await chatControl("/api/chat/rename", {conversation_id: id, title: value});
+    else await chatConvs().catch((e) => pulse(e.message));
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); done(true); }
+    else if (e.key === "Escape") done(false);
+  });
+  input.addEventListener("blur", () => done(false));
+}
+
 async function chatHistory() {
   const h = await api("/api/chat/history");
+  C.loaded = h.conversation_id;
   if (!h.messages.length) return;
   chatAppend(`<div class="divider">之前的消息</div>`);
   for (const m of h.messages) {
-    if (m.role === "user") chatAppend(`<div class="bubble user old">${esc(m.content)}</div>`);
+    if (m.role === "user") chatAppend(`<div class="bubble user old">${esc(m.content)}${m.input_source === "voice" ? VOICE_MARK : ""}</div>`);
     else if (m.kind === "chat") chatAppend(`<div class="bubble bot old">${md(m.content)}</div>`);
     else chatNote(m.content, m.kind === "error");
   }
@@ -888,6 +1645,7 @@ const MODE = {chat: "对话", lesson: "讲解", self_test: "自测", review: "�
 // The status panel follows the L6 guideline: goal, context in scope, what runs, risky actions, results.
 async function chatPanel() {
   const d = await api("/api/chat/state");
+  voiceState(d.voice);
   const body = $("#spbody");
   if (!body) return;
   const list = (items, empty) => items.length ? items.map((p) => `<div class="path">${esc(p)}</div>`).join("") : `<span class="faint">${empty}</span>`;
@@ -896,8 +1654,11 @@ async function chatPanel() {
     ${g.goal ? `<div>${esc(g.goal)}</div>` : `<div class="faint">没有进行中的流程</div>`}${g.step && g.step !== g.mode ? `<div class="faint">步骤：${esc(MODE[g.step] || g.step)}</div>` : ""}` : `<span class="faint">没有对话</span>`;
   const c = d.context;
   const context = `<dl class="kv"><dt>可读</dt><dd>${list(c.read_roots, "未配置，不能读文件")}</dd><dt>可写</dt><dd>${list(c.write_roots, "未配置，不能写文件")}</dd>
+    <dt></dt><dd><a class="lnk" data-view="roots">管理目录 →</a></dd>
     <dt>记忆</dt><dd>${num(c.memories)} 条（本段对话开始时的快照）</dd><dt>摘要</dt><dd>${c.summarized ? "较早的对话已摘要" : "无"}</dd>
-    <dt>联网</dt><dd>${c.network ? "可用" : "已关闭（--offline）"}</dd></dl>`;
+    <dt>联网</dt><dd>${c.network ? "可用" : "已关闭（--offline）"}</dd>
+    ${d.voice ? `<dt>语音</dt><dd>${d.voice.available ? "可用：按住麦克风说话，本地识别" : `<span class="faint">${esc(d.voice.reason_text)}</span>`}</dd>` : ""}
+    ${d.skills ? `<dt>Skill</dt><dd>${num(d.skills.count)} 个可用：${d.skills.names.map((s) => esc(s.title)).join("、")}${d.skills.errors.length ? `<details><summary class="warnc">${num(d.skills.errors.length)} 个用户 Skill 有错误</summary>${d.skills.errors.map((e) => `<div class="path">${esc(e)}</div>`).join("")}</details>` : ""}</dd>` : ""}</dl>`;
   const running = d.running.length ? d.running.map((run) => {
     const last = run.chain.at(-1);
     return `<div><span class="dot live"></span> ${esc(run.chain.map(spanLabel).join(" › "))}</div>
@@ -931,18 +1692,32 @@ async function chatTick(force = false) {
   }
   // Every second while something runs or waits; every third second when idle.
   C.tick++;
-  if (!force && !C.busy && !C.pending.length && C.after && C.tick % 3) return;
+  if (!force && !C.busy && !C.pending.length && !C.expect && C.after && C.tick % 3) return;
   const d = await api(`/api/chat/events?after=${C.after}`);
-  if (d.events.length && d.events[0].seq > C.after + 1 && C.after) chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
-  for (const e of d.events) chatEvent(e);
+  if (d.events.length && d.events[0].seq > C.after + 1 && C.after && d.events[0].kind !== "switched") chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
+  for (const e of d.events) {
+    if (e.kind === "switched") await chatSwitched(e);
+    else chatEvent(e);
+    if (e.kind === "idle") C.expect = false;
+    C.after = Math.max(C.after, e.seq);
+  }
   C.after = d.next;
   C.busy = d.busy;
   C.pending = d.pending;
   if (C.ask && !C.pending.some((p) => p.request_id === C.ask)) C.ask = null;
-  setHead("对话", d.conversation_id ? `对话 ${d.conversation_id}` : "", C.pending.length ? pill("running", "等待你") : C.busy ? pill("running", "处理中") : pill("ok", "空闲"));
+  // Switching is refused while a turn runs or a prompt waits; the sidebar says so instead of failing.
+  const off = C.busy || C.pending.length > 0;
+  $("#convs")?.classList.toggle("off", off);
+  if ($("#convs")) $("#convs").title = off ? "先回答或停止当前提示" : "";
+  const offnote = $("#convsoff");
+  if (offnote) offnote.hidden = !off;
+  chatHead();
   await chatState();
-  // The panel reads the database, so it refreshes less often than the event stream.
-  if (force || d.events.length || C.tick % 3 === 0) await chatPanel().catch((e) => pulse(e.message));
+  // The panel and the sidebar read the database, so they refresh less often than the event stream.
+  if (force || d.events.length || C.tick % 3 === 0) {
+    await chatPanel().catch((e) => pulse(e.message));
+    await chatConvs().catch((e) => pulse(e.message));
+  }
 }
 
 async function chatSend() {
@@ -950,10 +1725,13 @@ async function chatSend() {
   const text = box.value.trim();
   if (!text || C.sending) return;
   C.sending = true;
+  // Any part of this input that came from a confirmed transcript marks it as voice.
+  const source = V.voiced ? {input_source: "voice", voice_id: V.voiceId} : {};
   try {
-    if (C.ask) await post("/api/chat/respond", {request_id: C.ask, value: text});
-    else await post("/api/chat/input", {text});
+    if (C.ask) await post("/api/chat/respond", {request_id: C.ask, value: text, ...source});
+    else await post("/api/chat/input", {text, ...source});
     box.value = "";
+    voiceReset();
   } catch (e) {
     chatNote(`没有发出：${e.message}`, true);
   } finally {
@@ -981,6 +1759,7 @@ async function summary() {
     const set = (id, v, cls = "") => { const node = $(id); node.textContent = v ? num(v) : ""; node.className = "n " + cls; };
     set("#n-live", s.running, "live"); set("#n-traces", s.traces); set("#n-failures", s.failures, "hot"); set("#n-learn", s.attempts);
     set("#n-approvals", s.approvals_pending, "hot");
+    set("#n-schedule", s.reviews_due, "hot");
   } catch (e) { /* the view's own poll reports errors */ }
 }
 
@@ -990,7 +1769,8 @@ function schedule(fn, every) {
   S.token = token;
   const tick = async () => {
     let again = every;
-    try { const result = await fn(); if (result === false) again = 0; pulse(); } catch (e) { pulse(e.message); }
+    // A loader may return false to stop, or a number of milliseconds until its next refresh.
+    try { const result = await fn(); if (result === false) again = 0; else if (typeof result === "number") again = result; pulse(); } catch (e) { pulse(e.message); }
     if (again && S.token === token) S.timer = setTimeout(tick, again);
   };
   tick();
@@ -1009,7 +1789,7 @@ function route() {
   } else if (view === "learn" && S.arg) {
     schedule(() => viewAttempt(S.arg), 0);
   } else {
-    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], approvals: [viewApprovals, 5000], learn: [viewLearn, 15000], chat: [chatTick, 1000]};
+    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], approvals: [viewApprovals, 5000], schedule: [viewSchedule, 15000], learn: [viewLearn, 15000], roots: [viewRoots, 0], chat: [chatTick, 1000]};
     schedule(...loaders[S.view]);
   }
 }
@@ -1020,6 +1800,8 @@ if (WB.on) {
   document.querySelector(".brand small").textContent = "工作台 · 仅本机";
   document.querySelector(".brand").insertAdjacentHTML("afterend",
     `<div class="grp">工作台</div><a data-view="chat">${icon("turn")}对话</a>`);
+  document.querySelector(".navfoot").insertAdjacentHTML("beforebegin",
+    `<div class="grp">设置</div><a data-view="roots">${icon("shield")}目录白名单</a>`);
 }
 window.addEventListener("hashchange", route);
 $("#days").addEventListener("change", (e) => { S.days = Number(e.target.value); summary(); route(); });

@@ -14,8 +14,9 @@ from .redact import redact
 
 EVENT = "GuardrailTriggered"
 # blocked: the program refused; denied_by_user: the user said no; rejected: a model output failed
-# validation; stopped: a loop hit its bound and was ended.
-ACTIONS = ("blocked", "denied_by_user", "rejected", "stopped")
+# validation; stopped: a loop hit its bound and was ended; warned: an output was kept although it broke
+# a soft rule (a question over the shape limits after its retry).
+ACTIONS = ("blocked", "denied_by_user", "rejected", "stopped", "warned")
 RULES = {
     "leak_check": "联网参数夹带本地资料原文或过长",
     "read_root": "读取范围外的文件",
@@ -33,6 +34,7 @@ RULES = {
     "output_invalid": "模型输出未通过校验",
     "illegal_transition": "非法状态转换",
     "consent_missing": "资料或端点未获发送授权",
+    "question_shape": "题目超出一题一问的形状限制（重出后仍超出，已保存）",
 }
 REASON_CHARS = 500
 

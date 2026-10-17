@@ -7,6 +7,8 @@ from a crash is reconciled back to chat.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any
 
 from . import flow, history
@@ -14,6 +16,33 @@ from .redact import redact, redact_obj
 from .store import Store, new_id
 
 MESSAGE_KINDS = frozenset({"chat", "command", "proposal", "flow_result", "error", "memory_proposal"})
+# Where a title came from: a command's rule, the model after the first turn, the first message as a
+# fallback, or the user. Once set, no title is generated again.
+TITLE_SOURCES = ("", "rule", "model", "fallback", "user")
+FALLBACK_TITLE_CHARS = 20
+EMPTY_TITLE = "（空对话）"
+# Stripped from the ends of a title: quotes, Markdown marks and sentence punctuation (an explicit list,
+# so "C#" or "C++" keep their last character). Brackets go only when they wrap the whole title: a closing
+# bracket that ends one, as in "继续：二叉树遍历（老讲解）", stays (V7 smoke).
+_LEADING = "\"'“‘<`*#>-—、，。,.;；:：!！?？…~～ "
+_TRAILING = "\"'”’>`*、，。,.;；:：!！?？~～ "
+_WRAPPERS = {"「": "」", "『": "』", "《": "》", "〈": "〉", "【": "】", "(": ")", "（": "）", "[": "]"}
+
+
+def clean_title(text: str) -> str:
+    """A title as shown: no control or zero-width characters, single spaces, no surrounding quotes or
+    punctuation (after Hermes' sanitize_title)."""
+    # Whitespace (tabs, newlines) becomes a space; other control and format characters (zero-width) go.
+    text = "".join(" " if char.isspace() else char for char in str(text)
+                   if char.isspace() or unicodedata.category(char) not in ("Cc", "Cf"))
+    text = re.sub(r"\s+", " ", text).strip()
+    while True:
+        before = text
+        text = text.lstrip(_LEADING).rstrip(_TRAILING).strip()
+        if len(text) >= 2 and _WRAPPERS.get(text[0]) == text[-1] and text[0] not in text[1:-1]:
+            text = text[1:-1].strip()
+        if text == before:
+            return text
 
 
 class Conversations:
@@ -209,6 +238,38 @@ class Conversations:
                 "summaries": summaries, "state_events": events, "tool_calls": tools}
 
     def recent(self, limit: int = 10) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.db.execute("""SELECT c.id,c.chat_date,c.status,c.mode,
+        rows = [dict(row) for row in self.db.execute("""SELECT c.id,c.chat_date,c.status,c.mode,c.title,
+            c.title_source,c.active_kind,c.active_id,c.updated_at,
             (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) messages
             FROM conversations c ORDER BY c.rowid DESC LIMIT ?""", (limit,))]
+        for row in rows:
+            row["title"] = self.display_title(row)
+        return rows
+
+    # ----- titles -------------------------------------------------------------------------
+
+    def set_title(self, conversation_id: str, title: str, source: str) -> str:
+        if source not in TITLE_SOURCES or not source:
+            raise ValueError(f"invalid title source: {source}")
+        title = clean_title(title)
+        if not title:
+            raise ValueError("empty conversation title")
+        with self.store.transaction():
+            self.get(conversation_id)
+            self.db.execute("UPDATE conversations SET title=?,title_source=?,updated_at=? WHERE id=?",
+                            (redact(title), source, self.store._ts(), conversation_id))
+        return title
+
+    def fallback_title(self, conversation_id: str) -> str:
+        """The first user message, cut short; what an untitled conversation shows until it has a title."""
+        # A typed question names a conversation better than a command such as /status.
+        row = self.db.execute("""SELECT content FROM conversation_messages WHERE conversation_id=? AND role='user'
+            ORDER BY kind!='chat', seq LIMIT 1""", (conversation_id,)).fetchone()
+        text = clean_title(row["content"]) if row else ""
+        if not text:
+            return EMPTY_TITLE
+        return text[:FALLBACK_TITLE_CHARS] + ("…" if len(text) > FALLBACK_TITLE_CHARS else "")
+
+    def display_title(self, row: dict[str, Any]) -> str:
+        """The stored title, or one worked out from the first message (not written back)."""
+        return row.get("title") or self.fallback_title(row["id"])

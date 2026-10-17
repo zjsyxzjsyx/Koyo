@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zhiqiu"
-version = "6.1.0"
+version = "7.2.0"
 description = "A local-first CLI learning agent with durable review tasks"
 requires-python = ">=3.12"
 dependencies = [
@@ -17,6 +17,10 @@ dependencies = [
 test = ["pytest>=8,<9"]
 # Official MCP Python SDK (MIT); only needed for `zhiqiu mcp` and MCP client tools.
 mcp = ["mcp>=1.10,<2"]
+# Local voice input (SenseVoice-Small via sherpa-onnx, Apache-2.0; pypinyin, MIT); model files are downloaded by hand.
+# sherpa-onnx-core is listed too: resolved from the sdist the lock misses it, and Windows then loads the
+# system's older onnxruntime.dll instead of the one it ships.
+voice = ["sherpa-onnx>=1.12,<2", "sherpa-onnx-core>=1.12,<2", "numpy>=1.26", "pypinyin>=0.51,<1"]
 
 [project.scripts]
 zhiqiu = "zhiqiu.cli:app"

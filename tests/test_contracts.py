@@ -198,3 +198,17 @@ def test_each_approval_inconsistency_is_caught(tmp_path, setup, problem):
     setup(store)
     result = status(store, "approvals_consistent")
     assert result["status"] == "fail" and problem in result["evidence"][0]["problem"]
+
+def test_a_user_saying_no_is_listed_apart_from_failures(tmp_path):
+    from zhiqiu import guardrails
+    store = Store(tmp_path / "s.sqlite")
+    with tracing.span(store, "turn", "chat"):
+        guardrails.record(store, "confirmation_denied", "denied_by_user", "用户拒绝了 web_search", tool="web_search")
+        guardrails.record(store, "confirmation_unavailable", "blocked", "当前环境无法确认", tool="write_file")
+    data = contracts.failures(store.db, 1)
+    assert data["total"] == 1
+    assert [item["category"] for item in data["categories"]] == ["guard:confirmation_unavailable"]
+    assert [(item["category"], item["count"]) for item in data["intentional"]] == [("guard:confirmation_denied", 1)]
+    assert data["intentional_total"] == 1
+    text = contracts.render_failures(data)
+    assert "共 1 条失败" in text and "用户有意拒绝 1 次（不计入失败）" in text

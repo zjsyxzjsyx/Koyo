@@ -149,7 +149,7 @@ def test_v14_database_gains_status_snapshot_and_summaries_and_forget_removes_the
     store.db.execute("PRAGMA user_version=14")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 13)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
     assert path.with_suffix(".sqlite.pre-v15.bak").exists()
     chats = Conversations(reopened)
     assert chats.get(conversation["id"])["status_snapshot_json"] == "{}"

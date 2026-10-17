@@ -22,6 +22,8 @@ class ClassifyModel(FakeModel):
         label = self.labels.get(text, "answer")
         if label == "error":
             raise ValueError("模型超时")
+        if isinstance(label, dict):
+            return {"reason": "脚本", **label}
         return {"kind": label, "reason": "脚本"}
 
     def grade(self, point, context, sources):
@@ -81,3 +83,72 @@ def test_models_that_cannot_classify_keep_the_old_behaviour(tmp_path):
     run_quiz(io, store, service, attempt)
     assert store.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 3
     assert not any("识别为提问" in prompt for prompt in io.prompts)
+
+
+MIXED = "就这样的，什么时候进行复习"
+SPLIT = {"kind": "mixed", "answer_text": "就这样的，", "question_text": "什么时候进行复习"}
+
+
+def sub(path):
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def classified(store):
+    return [json.loads(row[0]) for row in store.db.execute(
+        "SELECT payload_json FROM events WHERE type='TurnClassified' ORDER BY id")]
+
+
+def test_a_mixed_input_is_split_by_default(tmp_path):
+    model, store, io, result, answers, notes = quiz(tmp_path, {MIXED: SPLIT}, MIXED, "", "递归", "表达式")
+    assert answers == ["就这样的", "递归", "表达式"] and notes == ["什么时候进行复习"]
+    assert io.prompts.count("这段话里既有回答也有提问：回答“就这样的”，提问“什么时候进行复习”。"
+                            "回车＝分开处理（保存回答、再回答提问），a＝全部作为回答，q＝全部作为提问：") == 1
+    assert model.graded and all("什么时候进行复习" not in seen for seen in model.graded)
+    events = classified(store)
+    assert [(e["model_kind"], e["split_valid"], e["final"], e["decided_by"]) for e in events] == [
+        ("mixed", True, "split", "user"), ("answer", None, "answer", "model"), ("answer", None, "answer", "model")]
+    assert events[0]["input_chars"] == len(MIXED) and events[0]["reason"] == "脚本"
+    assert all(MIXED not in json.dumps(e, ensure_ascii=False) and "就这样的" not in json.dumps(e, ensure_ascii=False)
+               for e in events)
+    span = json.loads(store.db.execute("SELECT attrs_json FROM spans WHERE kind='flow' AND name='quiz'").fetchone()[0])
+    assert span["classified_mixed"] == 1
+
+
+def test_a_mixed_input_can_be_kept_whole_as_answer_or_question(tmp_path):
+    _, store, _, _, answers, notes = quiz(tmp_path, {MIXED: SPLIT}, MIXED, "a", "递归", "表达式")
+    assert answers == [MIXED, "递归", "表达式"] and notes == []
+    assert classified(store)[0]["final"] == "answer" and classified(store)[0]["decided_by"] == "user"
+    _, store, _, _, answers, notes = quiz(sub(tmp_path / "q"), {MIXED: SPLIT}, MIXED, "q", "根左右", "递归", "表达式")
+    assert answers == ["根左右", "递归", "表达式"] and notes == [MIXED]
+    assert classified(store)[0]["final"] == "question"
+
+
+def test_a_split_that_is_not_from_the_input_falls_back_to_choosing(tmp_path):
+    bad = {"kind": "mixed", "answer_text": "就是这样", "question_text": "什么时候进行复习"}
+    model, store, io, result, answers, notes = quiz(tmp_path, {MIXED: bad}, MIXED, "a", "递归", "表达式")
+    assert answers == [MIXED, "递归", "表达式"]
+    assert io.prompts.count("这是回答还是提问？输入 a 作为回答保存，输入 q 作为提问：") == 1
+    first = classified(store)[0]
+    assert (first["model_kind"], first["split_valid"], first["final"], first["decided_by"]) == (
+        "mixed", False, "answer", "user")
+    empty = {"kind": "mixed", "answer_text": "，", "question_text": "什么时候进行复习"}
+    _, store, io, _, _, _ = quiz(sub(tmp_path / "e"), {MIXED: empty}, MIXED, "q", "根左右", "递归", "表达式")
+    assert classified(store)[0]["split_valid"] is False
+
+
+def test_question_and_failed_classifications_are_recorded_as_user_decisions(tmp_path):
+    _, store, _, _, _, _ = quiz(tmp_path, {SIDE: "question"}, SIDE, "", "根左右", "递归", "表达式")
+    assert [(e["model_kind"], e["final"], e["decided_by"]) for e in classified(store)][0] == (
+        "question", "question", "user")
+    _, store, _, _, _, _ = quiz(sub(tmp_path / "f"), {SIDE: "error"}, SIDE, "q", "根左右", "递归", "表达式")
+    assert [(e["model_kind"], e["final"], e["decided_by"]) for e in classified(store)][0] == (
+        "failed", "question", "user")
+
+
+
+def test_split_fragments_keep_brackets_and_lose_only_sentence_punctuation():
+    from zhiqiu.runtime import _trim_fragment
+    assert _trim_fragment(" 我觉得时间复杂度是 O(n)，") == "我觉得时间复杂度是 O(n)"
+    assert _trim_fragment("“什么时候进行复习？”") == "什么时候进行复习"
+    assert _trim_fragment(None) == "" and _trim_fragment("，。") == ""

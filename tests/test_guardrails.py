@@ -151,3 +151,15 @@ def test_secrets_are_redacted_by_value_everywhere_they_could_be_written(tmp_path
     audit = JsonlAudit(tmp_path / "mcp-audit.jsonl")
     audit({"tool": "zhiqiu_status", "error": f"echo {SECRET}"})
     assert SECRET not in (tmp_path / "mcp-audit.jsonl").read_text(encoding="utf-8")
+
+
+def test_a_kept_question_over_the_shape_limits_is_a_warning(tmp_path):
+    store = Store(tmp_path / "state.sqlite")
+    with tracing.span(store, "flow", "quiz") as span:
+        guardrails.record(store, "question_shape", "warned", "题目过长：120 字，上限 80", question_id="Q1")
+    assert guards(store) == [{"rule": "question_shape", "action": "warned", "reason": "题目过长：120 字，上限 80",
+                              "question_id": "Q1"}]
+    row = store.db.execute("SELECT trace_id FROM events WHERE type='GuardrailTriggered'").fetchone()
+    assert row[0] == span.trace_id
+    with pytest.raises(ValueError, match="unknown guardrail action"):
+        guardrails.payload("question_shape", "ignored")

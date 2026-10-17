@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from pathlib import Path
 
@@ -144,6 +145,8 @@ def test_review_questions_receive_original_low_score_evidence(tmp_path):
     assert len(model.last_focus) == 1
     assert model.last_focus[0]["dimension"] == "application"
     assert model.last_focus[0]["answer"] == "第 3 个真实回答"
+    # Old questions carry no ids, so they cannot pass for answers in the new attempt or be followed up.
+    assert not {"question_id", "answer_id", "review_id"} & set(model.last_focus[0])
     store.revise(first["review_id"], "application", 3, "原答支持基本正确")
     assert store.wrong_points_for(kp) == []
 
@@ -397,3 +400,118 @@ def test_partial_relearn_remains_unplanned_until_full_assessment(tmp_path):
     result = store.finalize(attempt, [DimensionGrade("concept", 2, q, a, "部分概念", "只覆盖概念")], new_cycle=True)
     assert result["kind"] == "partial" and result["task_id"] is None
     assert store.get_knowledge_point(kp)["state"] == "needs_relearn"
+
+
+QUIZ_1FC9D266 = json.loads((Path(__file__).parent / "data" / "quiz_1fc9d266_questions.json").read_text(encoding="utf-8"))
+S1_QUESTIONS = ("根为 1、左 2 右 3，做中序遍历时进入节点 1 后，第一件事是做什么？",
+                "你说“先记下 1”，那节点 2 是在 1 之前还是之后被记下的？")
+
+
+def test_question_shape_rejects_the_1fc9d266_questions_and_passes_one_thing_questions():
+    from zhiqiu.scoring import question_shape
+    assert len(QUIZ_1FC9D266) == 4
+    assert all(question_shape(question) for question in QUIZ_1FC9D266)
+    assert all(question_shape(question) is None for question in S1_QUESTIONS)
+    assert question_shape("甲？乙?") == "一题只能问一件事：题目里有 2 个问号"
+    assert question_shape("长" * 81) == "题目过长：81 字，上限 80"
+    assert question_shape(" ".join("长" * 80)) is None  # spaces are not counted
+
+
+class ShapeModel(FakeModel):
+    """Proposes the given questions in turn for the first dimension, then behaves normally."""
+
+    def __init__(self, *questions):
+        super().__init__()
+        self.queue = list(questions)
+
+    def next_question(self, point, context, sources, focus):
+        if not context and self.queue:
+            question = self.queue.pop(0)
+            if question is None:
+                return {"done": False, "dimension": "nope", "question": "坏题"}
+            return {"done": False, "dimension": "concept", "question": question, "difficulty": "basic",
+                    "difficulty_basis": "直接解释"}
+        return super().next_question(point, context, sources, focus)
+
+
+def shape_quiz(tmp_path, *questions):
+    store, service, path = prepare_service(tmp_path, ShapeModel(*questions))
+    kp, _, _ = service.prepare("二叉树遍历", path, lambda *_: True)
+    return store, service, store.start_attempt(kp, "first")
+
+
+def shape_warnings(store):
+    return [json.loads(row[0]) for row in store.db.execute("""SELECT payload_json FROM events
+        WHERE type='GuardrailTriggered' AND json_extract(payload_json,'$.rule')='question_shape'""")]
+
+
+def test_a_long_question_is_asked_again_once(tmp_path):
+    store, service, attempt = shape_quiz(tmp_path, QUIZ_1FC9D266[3], S1_QUESTIONS[0])
+    proposed = service.next_question(attempt)
+    assert proposed["question"] == S1_QUESTIONS[0]
+    assert [row["question"] for row in store.qa_for(attempt)] == [S1_QUESTIONS[0]]
+    failures = store.db.execute("SELECT stage,error FROM llm_failures").fetchall()
+    assert [(row[0], row[1]) for row in failures] == [("next_question", "一题只能问一件事：题目里有 3 个问号")]
+    assert shape_warnings(store) == []
+
+
+def test_a_question_still_too_long_after_the_retry_is_kept_with_a_warning(tmp_path):
+    from zhiqiu import contracts
+    store, service, attempt = shape_quiz(tmp_path, QUIZ_1FC9D266[1], QUIZ_1FC9D266[2])
+    proposed = service.next_question(attempt)
+    assert proposed["question"] == QUIZ_1FC9D266[2] and not proposed["done"]
+    warnings = shape_warnings(store)
+    assert len(warnings) == 1 and warnings[0]["action"] == "warned"
+    assert warnings[0]["question_id"] == proposed["question_id"]
+    assert store.db.execute("SELECT COUNT(*) FROM llm_failures").fetchone()[0] == 1
+    categories = {item["category"] for item in contracts.failures(store.db, 1)["categories"]}
+    assert {"guard:question_shape", "invalid_output:next_question"} <= categories
+    store.add_answer(proposed["question_id"], "先递归左子树")
+    assert service.next_question(attempt)["dimension"] == "mechanism"  # the quiz goes on
+
+
+def test_structural_errors_still_stop_after_the_retry(tmp_path):
+    store, service, attempt = shape_quiz(tmp_path, None, None)
+    with pytest.raises(ValueError, match="无效问题"):
+        service.next_question(attempt)
+    assert store.qa_for(attempt) == [] and shape_warnings(store) == []
+    assert store.db.execute("SELECT state FROM attempts WHERE id=?", (attempt,)).fetchone()[0] == "in_progress"
+
+
+class FeedbackModel(FakeModel):
+    """Grades like FakeModel and adds a learner-facing feedback line: short, too long, or missing."""
+
+    FEEDBACK = {"concept": "定义说对了，缺少适用条件", "mechanism": "长" * 81}
+
+    def grade(self, point, context, sources):
+        result = super().grade(point, context, sources)
+        for grade in result["grades"]:
+            if grade["dimension"] in self.FEEDBACK:
+                grade["feedback"] = self.FEEDBACK[grade["dimension"]]
+        return result
+
+
+def test_feedback_is_kept_when_short_and_dropped_when_too_long_or_missing(tmp_path):
+    from zhiqiu.flows import show_outcome
+    from test_flows import ScriptedIO
+    store, service, path = prepare_service(tmp_path, FeedbackModel())
+    kp, _, _ = service.prepare("二叉树遍历", path, lambda *_: True)
+    outcome = complete_first(store, service, kp)
+    assert outcome["total"] == 78  # feedback never changes the score
+    stored = dict(store.db.execute("SELECT dimension,feedback FROM dimension_scores").fetchall())
+    assert stored == {"concept": "定义说对了，缺少适用条件", "mechanism": "", "application": ""}
+    io = ScriptedIO()
+    show_outcome(io, store, outcome)
+    lines = io.text.splitlines()
+    assert lines[1] == "  概念准确 4/4：定义说对了，缺少适用条件"
+    assert lines[2] == "  机制解释 3/4：依据原答"  # falls back to the rationale's first sentence
+
+
+def test_question_rules_say_review_focus_is_not_this_attempt():
+    # Real reviews ended at once ({"done": true}) or followed up an old question: the model took the
+    # focus items for answers given in this attempt.
+    from zhiqiu.context import ContextManager, ContextTask, system_message
+    rules = system_message("next_question")["content"]
+    assert "current_attempt" in rules and "focus 里的题不算本次已作答，也不能被追问" in rules
+    required = ContextManager._required(ContextTask("next_question", "二叉树遍历", focus=({"dimension": "concept"},)))
+    assert required["current_attempt"] == [] and required["focus"] == [{"dimension": "concept"}]

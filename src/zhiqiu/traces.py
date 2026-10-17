@@ -197,8 +197,9 @@ def llm_detail(db: sqlite3.Connection, call_id: str) -> dict[str, Any]:
     if row is None:
         raise LookupError(f"没有这次模型调用：{call_id}")
     item = {**_leaf_llm(row), "trace_id": row["trace_id"], "point": row["point"]}
-    build = db.execute("SELECT stage,template_version,status,budget_json,source_ids_json,excluded_json FROM context_builds "
-                       "WHERE id=?", (row["context_build_id"],)).fetchone() if row["context_build_id"] else None
+    build = db.execute("""SELECT stage,template_version,status,budget_json,source_ids_json,excluded_json,
+        skill_name,skill_version,skill_sha,skill_source FROM context_builds WHERE id=?""",
+                       (row["context_build_id"],)).fetchone() if row["context_build_id"] else None
     if build:
         budget = json.loads(build["budget_json"] or "{}")
         item["build"] = {"template_version": build["template_version"], "status": build["status"],
@@ -206,6 +207,9 @@ def llm_detail(db: sqlite3.Connection, call_id: str) -> dict[str, Any]:
                          "excluded": len(json.loads(build["excluded_json"] or "[]")),
                          "budget": {key: value for key, value in budget.items()
                                     if isinstance(value, (int, float, str, bool)) or value is None}}
+        if build["skill_name"]:
+            item["build"]["skill"] = {"name": build["skill_name"], "version": build["skill_version"],
+                                      "sha": build["skill_sha"], "source": build["skill_source"]}
     content = db.execute("SELECT request_json,response_text FROM llm_contents WHERE llm_call_id=?", (call_id,)).fetchone()
     if content:
         try:

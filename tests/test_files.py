@@ -187,7 +187,9 @@ def test_write_roots_come_from_the_environment(monkeypatch, tmp_path):
     monkeypatch.delenv("ZHIQIU_WRITE_ROOTS")
     assert write_roots_from_env() == []
     store, _, _ = prepare_service(tmp_path)
-    assert "write_file" not in LearningRuntime(store, FakeModel()).tools.names()
+    # Registered either way; with no write root it is never offered to the model (see test_dynamic_roots).
+    service = LearningRuntime(store, FakeModel())
+    assert service.write_roots == [] and "write_file" in service.tools.names()
 
 
 def test_symlink_checks_without_link_privileges(tmp_path, monkeypatch):

@@ -209,6 +209,8 @@ def test_cli_chat_shows_status_then_talks_and_bare_command_stays_status_only(tmp
     result = CliRunner().invoke(app, db + ["chat"], input="你好\n/exit\n")
     assert result.exit_code == 0, result.output
     assert "当前没有到期复习" in result.output and "你好，我是知秋。" in result.output
+    # The greeting itself does not mention /exit; only the terminal adds it.
+    assert "输入 /exit 退出。" in result.output and "查看命令，/exit" not in result.output
     bare = CliRunner().invoke(app, db, input="你好\n")
     assert bare.exit_code == 0 and "你：" not in bare.output and "当前没有到期复习" in bare.output
 
@@ -219,3 +221,187 @@ def test_models_without_tool_rounds_report_instead_of_crashing(tmp_path):
     agent.start()
     agent.handle("你好")
     assert chat_messages(store, agent)[-1][1] == "error"
+
+
+def test_after_a_graded_flow_the_total_is_not_repeated_and_detail_shows_the_report(tmp_path):
+    import re
+    store, model, io, agent = make_agent(tmp_path, [], "/done", "根左右", "递归栈", "表达式树")
+    agent.handle(f"/learn 红黑树 --from {agent.read_roots[0] / 'rbtree.md'}")
+    assert io.said[-1] == "已回到对话。"
+    assert sum("评阅" in line and "分" in line for line in io.said) == 1
+    result = chat_messages(store, agent)[-1]
+    assert result[1] == "flow_result" and "完整评阅 78 分" in result[2]  # the log keeps the summary
+    attempt = store.db.execute("SELECT id FROM attempts").fetchone()[0]
+    start = len(io.said)
+    agent.handle("/detail")
+    report = io.said[start:]
+    assert report[0].startswith("完整评阅已保存：78 分") and any(line.startswith("    原题：") for line in report)
+    start = len(io.said)
+    agent.handle(f"/detail {attempt[:8]}")
+    assert io.said[start:] == report
+    agent.handle("/detail abc")
+    assert io.said[-1] == "短号至少 6 位：abc"
+    agent.handle("/detail ffffffff")
+    assert io.said[-1] == "没有以 ffffffff 开头的尝试"
+    with pytest.raises(ValueError, match="有多个尝试以 abcdef 开头"):
+        ChatAgent._resolve_prefix("abcdef", ["abcdef01-x", "abcdef02-y"], "尝试")
+    assert not any(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-", line) for line in io.said[:start] if "评阅" in line
+                   and "已保存" not in line)
+
+
+def test_detail_without_a_graded_flow_explains_how_to_pick_one(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [])
+    agent.handle("/detail")
+    assert "本段对话还没有评阅结果" in io.said[-1]
+    agent.handle("/help")
+    assert "/detail" in io.said[-1]
+
+
+
+class TitledModel(ChatModel):
+    """A chat model that also names the conversation; `titles` is what each call returns (or raises)."""
+
+    def __init__(self, rounds, titles):
+        super().__init__(rounds)
+        self.titles = list(titles)
+        self.title_inputs = []
+
+    def conversation_title(self, text, reply):
+        self.title_inputs.append((text, reply))
+        value = self.titles.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return {"title": value}
+
+
+def titled_agent(tmp_path, rounds, titles):
+    store = Store(tmp_path / "state.sqlite", FixedClock(date(2026, 10, 16)))
+    model = TitledModel(rounds, titles)
+    io = ScriptedIO()
+    agent = ChatAgent(store, LearningRuntime(store, model), io)
+    agent.start()
+    return store, model, io, agent
+
+
+def title_of(store, agent):
+    row = Conversations(store).get(agent.conversation_id)
+    return row["title"], row["title_source"]
+
+
+def test_the_model_names_a_conversation_once_after_its_first_answer(tmp_path):
+    store, model, io, agent = titled_agent(tmp_path, [say("中序遍历先左后根再右。"), say("是的。")],
+                                           ["“BST 中序遍历有序性”"])
+    agent.handle("二叉树的中序遍历为什么能输出有序序列")
+    assert title_of(store, agent) == ("BST 中序遍历有序性", "model")
+    assert model.title_inputs == [("二叉树的中序遍历为什么能输出有序序列", "中序遍历先左后根再右。")]
+    agent.handle("那后序呢")
+    assert len(model.title_inputs) == 1 and title_of(store, agent)[1] == "model"
+    assert io.said[-1] == "是的。"  # nothing about the title is said
+
+
+@pytest.mark.parametrize("value", ["", "一个远远超过十六个字的非常非常长的对话标题", ValueError("模型超时")])
+def test_a_bad_or_failed_title_falls_back_to_the_first_message(tmp_path, value):
+    store, model, io, agent = titled_agent(tmp_path, [say("好的。")], [value])
+    agent.handle("明天杭州天气怎么样")
+    assert title_of(store, agent) == ("明天杭州天气怎么样", "fallback")
+    failures = store.db.execute("SELECT stage,conversation_id FROM llm_failures").fetchall()
+    assert [tuple(row) for row in failures] == [("conversation_title", agent.conversation_id)]
+    assert io.said[-1] == "好的。"
+
+
+def test_a_conversation_opened_by_a_command_is_named_by_rule(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [], "/pause")
+    agent.handle(f"/learn 红黑树 --from {agent.read_roots[0] / 'rbtree.md'}")
+    assert title_of(store, agent) == ("学习：红黑树", "rule")
+    assert store.db.execute("SELECT COUNT(*) FROM llm_failures WHERE stage='conversation_title'").fetchone()[0] == 0
+    agent.handle("/new")
+    agent.handle("/resume")
+    assert title_of(store, agent) == ("继续：红黑树", "rule")
+    # A command later in a conversation does not rename it.
+    agent.handle("/status")
+    agent.handle(f"/learn 红黑树 --from {agent.read_roots[0] / 'rbtree.md'}")
+    assert title_of(store, agent) == ("继续：红黑树", "rule")
+
+
+def test_the_user_renames_a_conversation_and_keeps_that_title(tmp_path):
+    store, model, io, agent = titled_agent(tmp_path, [say("好。"), say("嗯。")], ["模型标题"])
+    agent.handle("/title  「我的红黑树笔记」 ")
+    assert title_of(store, agent) == ("我的红黑树笔记", "user") and io.said[-1] == "已改名为「我的红黑树笔记」。"
+    agent.handle("你好")
+    assert title_of(store, agent) == ("我的红黑树笔记", "user") and model.title_inputs == []
+    agent.handle("/title " + "长" * 31)
+    assert io.said[-1] == "标题最多 30 字（现在 31 字）"
+    agent.handle("/title 。。")
+    assert io.said[-1] == "用法：/title 新标题"
+    assert title_of(store, agent) == ("我的红黑树笔记", "user")
+
+
+
+UUID_RE = __import__("re").compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def test_greetings_new_and_switch_show_titles_not_ids(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [say("你好"), say("在的")])
+    assert io.said[-1] == "新对话。输入 /help 查看命令。"
+    agent.handle("/title 红黑树复习")
+    agent.handle("在吗")
+    first = agent.conversation_id
+    again = ChatAgent(store, agent.service, ScriptedIO(), read_roots=agent.read_roots)
+    again.start()
+    assert again.io.inner.said[-1] == "接着「红黑树复习」（3 条消息）。输入 /help 查看命令。"
+    again.handle("/new")
+    assert again.io.inner.said[-1] == "已开始新对话。"
+    again.switch(first)
+    assert again.conversation_id == first and again.io.inner.said[-1] == "已切换到「红黑树复习」（4 条消息）。"
+    assert Conversations(store).get(first)["status"] == "open"
+    again.switch(first)
+    assert again.io.inner.said[-1] == "已经在「红黑树复习」里了。"
+    assert not any(UUID_RE.search(line) for line in io.said + again.io.inner.said)
+
+
+def test_chats_numbers_are_good_for_the_next_input_only(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [say("一"), say("二")])
+    agent.handle("第一段")
+    first = agent.conversation_id
+    agent.handle("/new")
+    agent.handle("/new")  # an empty conversation in between is not listed, and /new does not fill it
+    agent.handle("第二段")
+    second = agent.conversation_id
+    agent.handle("/chats")
+    listing = io.said[-1].splitlines()
+    assert listing[0].startswith("1. 第二段 · 今天 · ") and listing[0].endswith("（当前）")
+    assert listing[1].startswith("2. 第一段 · 今天 · 3 条") and len(listing) == 3
+    agent.handle("/open 2")
+    assert agent.conversation_id == first
+    agent.handle("/open 1")
+    assert io.said[-1] == "编号已失效，请先用 /chats 重新列出。" and agent.conversation_id == first
+    agent.handle("/chats")
+    agent.handle("/status")
+    agent.handle("/open 1")
+    assert io.said[-1] == "编号已失效，请先用 /chats 重新列出。"
+    agent.handle("/chats")
+    agent.handle("/open 9")
+    assert io.said[-1].startswith("没有编号 9")
+    agent.handle(f"/open {second[:8]}")
+    assert agent.conversation_id == second
+    assert not any(UUID_RE.search(line) for line in io.said)
+
+
+def test_status_and_resume_use_short_ids(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [], "/pause", "/pause", "/pause")
+    agent.handle(f"/learn 红黑树 --from {agent.read_roots[0] / 'rbtree.md'}")
+    session = store.pending_lessons()[0]["session_id"]
+    agent.handle("/status")
+    assert f"待继续讲解：红黑树  短号 {session[:8]}" in io.said[-1] and not UUID_RE.search(io.said[-1])
+    agent.handle(f"/resume {session[:8]}")
+    assert any(line == "继续讲解：红黑树" for line in io.said)
+    kp = store.get_knowledge_point("红黑树")["id"]
+    attempt = store.start_attempt(kp, "first")
+    store.pause(attempt)
+    agent.handle("/status")
+    assert f"待继续：红黑树  paused  短号 {attempt[:8]}" in io.said[-1] and not UUID_RE.search(io.said[-1])
+    agent.handle(f"/resume {attempt[:6]}")
+    assert store.db.execute("SELECT state FROM attempts WHERE id=?", (attempt,)).fetchone()[0] == "paused"
+    assert any(line == f"已暂停（短号 {attempt[:8]}），可以用 resume 继续。" for line in io.said)
+    agent.handle("/resume abc")
+    assert io.said[-1] == "短号至少 6 位：abc"

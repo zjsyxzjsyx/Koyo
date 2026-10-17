@@ -125,3 +125,17 @@ def test_a_flow_error_is_reported_in_the_flow_result(tmp_path):
     last = chat_messages(store, agent)[-1]
     assert last[1] == "flow_result" and "出错停止（模型返回了无效题目）" in last[2]
     assert "模型返回了无效题目" in Conversations(store).get(agent.conversation_id)["last_error"]
+
+
+def test_review_takes_the_rest_of_the_line_as_the_title():
+    from zhiqiu.agent import _command_parts
+    assert _command_parts("/review Agent 沙箱的实现原理（隔离机制与架构）") == ["/review", "Agent 沙箱的实现原理（隔离机制与架构）"]
+    assert _command_parts("/review Python's  GIL") == ["/review", "Python's  GIL"]
+    assert _command_parts('/review "红黑树"') == ["/review", "红黑树"] and _command_parts("/review") == ["/review"]
+    assert _command_parts('/learn 红黑树 --from "a b.md"') == ["/learn", "红黑树", "--from", "a b.md"]
+
+
+def test_a_title_with_a_quote_reaches_the_review_plan(tmp_path):
+    store, model, io, agent = make_agent(tmp_path, [])
+    agent.handle("/review Python's GIL")
+    assert "没有这个知识点：Python's GIL" in io.said and not any("命令格式有误" in line for line in io.said)
