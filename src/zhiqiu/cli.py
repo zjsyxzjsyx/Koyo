@@ -87,6 +87,14 @@ def runtime(store: Store, mcp: bool = False) -> LearningRuntime:
     return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [], notion)
 
 
+def _terminal(service: Any) -> Any:
+    """A runtime used by a terminal command: the terminal shows how much of a stage's reply has arrived.
+    Never for `zhiqiu mcp`, whose stdout is the protocol."""
+    if hasattr(service, "progress"):
+        service.progress = TerminalIO.progress_line
+    return service
+
+
 def show_status(store: Store, full: bool = False) -> None:
     state = store.status()
     if state["due"]:
@@ -220,25 +228,86 @@ def memory_delete(ctx: typer.Context, key: str,
     typer.echo("已删除。" if deleted else "没有该有效记忆。")
 
 
+# What each stage writes, for the progress line while its reply arrives.
+STAGE_NAMES = {"teach": "讲解", "next_question": "题目", "grade": "评阅", "grade_segment": "评阅",
+               "grade_extract": "评阅", "grade_combine": "评阅", "clarify": "解答", "clarify_chunk": "解答",
+               "clarify_combine": "解答", "assess": "评估", "assess_chunk": "评估", "assess_combine": "评估",
+               "synthesize": "资料整理", "synthesize_batch": "资料整理", "classify_turn": "判断",
+               "chat_summary": "对话摘要", "conversation_title": "标题"}
+
+
 class TerminalIO:
-    """FlowIO for the terminal: line input, typer output and yes/no prompts."""
+    """FlowIO for the terminal: line input, typer output and yes/no prompts.
+
+    A streamed answer is printed piece by piece; the line that says it afterwards only ends the line.
+    Printed text cannot be taken back, so a draft withdrawn because the model went on to call tools
+    stays on screen, followed by a dim note that it was not the answer."""
 
     channel = "terminal"
     # Every kind of output is printed the same way.
     say_kinds = True
+    # Shared by every instance: one terminal, one progress line.
+    _progress = ""
+    _progress_at = 0.0
+
+    def __init__(self) -> None:
+        self._streaming: str | None = None
+
+    @classmethod
+    def progress_line(cls, stage: str, chars: int) -> None:
+        """'正在生成讲解，已写约 820 字', rewritten in place at most every 0.2 seconds."""
+        import time
+        now = time.monotonic()
+        if cls._progress and now - cls._progress_at < 0.2:
+            return
+        cls._progress_at = now
+        line = f"正在生成{STAGE_NAMES.get(stage, stage)}，已写约 {chars} 字"
+        sys.stdout.write("\r" + typer.style(line, dim=True) + " " * max(len(cls._progress) - len(line), 0) * 2)
+        sys.stdout.flush()
+        cls._progress = line
+
+    @classmethod
+    def _clear_progress(cls) -> None:
+        if cls._progress:
+            sys.stdout.write("\r" + " " * (len(cls._progress) * 2 + 2) + "\r")
+            sys.stdout.flush()
+            cls._progress = ""
+
+    def progress(self, stage: str, chars: int) -> None:
+        self.progress_line(stage, chars)
+
+    def stream(self, stream_id: str, text: str) -> None:
+        self._clear_progress()
+        self._streaming = stream_id
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def stream_reset(self, stream_id: str) -> None:
+        if self._streaming == stream_id:
+            typer.echo("")
+            typer.echo(typer.style("（以上是调用工具前的说明，不是回答）", dim=True))
+            self._streaming = None
 
     def ask(self, prompt: str) -> str:
+        self._clear_progress()
         try:
             return input(prompt)
         except (EOFError, KeyboardInterrupt):
             raise FlowInterrupted from None
 
     def say(self, text: str, kind: str = "text", **meta: Any) -> None:
-        typer.echo(text)
+        self._clear_progress()
+        if meta.get("stream_id") and meta["stream_id"] == self._streaming:
+            # Already on screen as it streamed: just end its line.
+            typer.echo("")
+            self._streaming = None
+        else:
+            typer.echo(text)
         if meta.get("diagram_text"):
             typer.echo(meta["diagram_text"])
 
     def confirm(self, text: str) -> bool:
+        self._clear_progress()
         # Ctrl+C or EOF at a yes/no prompt is a "no", not a crash of the whole session.
         try:
             return typer.confirm(text, default=False)
@@ -261,7 +330,7 @@ def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个�
     store = context_store(ctx)
     if source is None and not urls and not notion_pages:
         raise typer.BadParameter("请用 --from、--url 或 --notion 指定资料")
-    service = runtime(store, mcp=not ctx.obj["offline"])
+    service = _terminal(runtime(store, mcp=not ctx.obj["offline"]))
     try:
         run_lesson(TerminalIO(), store, service, point, source=source, urls=urls or [],
                    notion_pages=notion_pages or [], offline=ctx.obj["offline"])
@@ -288,7 +357,7 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
     if attempt:
         if attempt["state"] == "awaiting_review":
             try:
-                outcome = runtime(store).finish(attempt["id"], "explicit", grade_original=grade_original)
+                outcome = _terminal(runtime(store)).finish(attempt["id"], "explicit", grade_original=grade_original)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
             show_outcome(TerminalIO(), store, outcome)
@@ -296,7 +365,7 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
         if grade_original:
             raise typer.BadParameter("--grade-original 只用于待评阅的尝试")
         store.resume(attempt["id"])
-        run_quiz(TerminalIO(), store, runtime(store), attempt["id"])
+        run_quiz(TerminalIO(), store, _terminal(runtime(store)), attempt["id"])
         return
     pending = [row for row in store.pending_lessons() if attempt_id is None or row["session_id"] == attempt_id]
     if not pending:
@@ -307,7 +376,7 @@ def resume(ctx: typer.Context, attempt_id: Annotated[str | None, typer.Argument(
             typer.echo(f"  {row['title']}  {row['session_date']}  短号 {short_id(row['session_id'])}")
         return
     try:
-        resume_lesson(TerminalIO(), store, pending[0]["session_id"], lambda: runtime(store))
+        resume_lesson(TerminalIO(), store, pending[0]["session_id"], lambda: _terminal(runtime(store)))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -440,7 +509,7 @@ def review(ctx: typer.Context, point: Annotated[str | None, typer.Argument()] = 
     kp_id = due[0]["kp_id"]
     task_ids = [task["id"] for task in due if task["kp_id"] == kp_id]
     attempt = store.start_attempt(kp_id, "review", task_ids)
-    run_quiz(TerminalIO(), store, runtime(store), attempt)
+    run_quiz(TerminalIO(), store, _terminal(runtime(store)), attempt)
 
 
 def start_chat(store: Store, offline: bool, resume: str | None = None) -> None:

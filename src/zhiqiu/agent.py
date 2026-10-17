@@ -34,7 +34,7 @@ from .model import ModelContextOverflowError
 from .queries import status as status_query
 from .redact import redact
 from .store import DAILY_REVIEW_LIMIT, Store
-from .toolloop import LOOP_SECONDS, MAX_ROUNDS, LoopResult, ToolLoop, query_leak_check
+from .toolloop import LOOP_SECONDS, MAX_ROUNDS, Draft, LoopResult, ToolLoop, query_leak_check
 from .tools import Approval, ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec, summarize_args
 
 CHAT_PERMISSIONS = frozenset({"read", "network", "write_file", "external_mcp", "propose"})
@@ -107,6 +107,23 @@ class ChatIO:
 
     def stage(self, mode: str, active_kind: str, active_id: str) -> None:
         self.on_stage(mode, active_kind, active_id)
+
+    # ----- streaming (an IO that can show text as it arrives: the workbench, the terminal) -----
+
+    @property
+    def streams(self) -> bool:
+        return callable(getattr(self.inner, "stream", None)) and callable(getattr(self.inner, "stream_reset", None))
+
+    def stream(self, stream_id: str, text: str) -> None:
+        self.inner.stream(stream_id, text)
+
+    def stream_reset(self, stream_id: str) -> None:
+        self.inner.stream_reset(stream_id)
+
+    def progress(self, stage: str, chars: int) -> None:
+        hook = getattr(self.inner, "progress", None)
+        if callable(hook):
+            hook(stage, chars)
 
 
 def _describe_external(spec: ToolSpec) -> Callable[[dict[str, Any]], str]:
@@ -188,6 +205,9 @@ class ChatAgent:
         # Which governed tools run without asking, need the user's approval, or are withheld.
         self.policy = policy or ApprovalPolicy()
         self.io = ChatIO(io, self._on_stage)
+        # JSON stages (lessons, questions, grading) report how much of their reply has arrived.
+        if hasattr(service, "progress") and callable(getattr(io, "progress", None)):
+            service.progress = self.io.progress
         # Private text read in this run; outgoing tool arguments may not copy it.
         self.private: list[Material] = []
         self.conversation: dict[str, Any] | None = None
@@ -347,24 +367,35 @@ class ChatAgent:
 
     def _turn(self, text: str) -> str:
         self.chats.add_message(self.conversation_id, "user", "chat", text, self._input or None)
+        # The answer is shown as it streams in when the IO can; whatever ends the turn without an
+        # answer withdraws what was shown.
+        draft = Draft(self.io) if self.io.streams else None
         try:
-            result = self._think(text)
+            result = self._think(text, draft)
         except KeyboardInterrupt:
+            if draft is not None:
+                draft.withdraw()
             self.chats.add_message(self.conversation_id, "assistant", "error", "已取消")
             self.io.say("已取消本轮。")
             return "cancelled"
         except (ContextBudgetError, ModelContextOverflowError, ValueError, httpx.HTTPError) as exc:
+            if draft is not None:
+                draft.withdraw()
             self._fail(f"本轮未完成：{exc}")
             return "error"
         if result.status == "proposal" and result.stopped_by:
+            if draft is not None:
+                draft.withdraw()
             self._proposal(*result.stopped_by, loop=result)
             return "proposal"
         if not result.text:
+            if draft is not None:
+                draft.withdraw()
             self._fail(f"本轮未完成：{result.reason}，模型没有给出回答。")
             return "no_answer"
         self.chats.add_message(self.conversation_id, "assistant", "chat", result.text,
                                {"status": result.status, "rounds": result.rounds, "loop_id": result.loop_id})
-        self.io.say(result.text)
+        self.io.say(result.text, **({"stream_id": draft.stream_id} if draft is not None and draft.shown else {}))
         if not self.chats.get(self.conversation_id)["title_source"]:
             self._auto_title(text, result.text)
         return result.status
@@ -515,7 +546,7 @@ class ChatAgent:
             names.append(name)
         return names
 
-    def _think(self, text: str) -> LoopResult:
+    def _think(self, text: str, draft: Draft | None = None) -> LoopResult:
         model = self.service.model
         if not callable(getattr(model, "tool_round", None)):
             raise ValueError("当前模型适配器不支持对话")
@@ -529,13 +560,15 @@ class ChatAgent:
         loop = ToolLoop(model, self.service.context, self.registry, self.executor, self.max_rounds, self.deadline_s)
         try:
             result = loop.run(request, self._tool_names(), scope, require_final=True,
-                              final_instruction=CLOSING, stop_on=PROPOSE_TOOLS)
+                              final_instruction=CLOSING, stop_on=PROPOSE_TOOLS, draft=draft)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 400:
                 raise
             # Some endpoints refuse tool declarations; answer without tools rather than fail.
             self.io.say("模型端点不接受工具调用，本轮不使用工具。", kind="note")
-            result = loop.run(request, [], scope, require_final=True, final_instruction=CLOSING)
+            if draft is not None:
+                draft.withdraw()
+            result = loop.run(request, [], scope, require_final=True, final_instruction=CLOSING, draft=draft)
         self._record_build(request.build_id, result.status)
         return result
 

@@ -16,6 +16,7 @@
 - **学习体验与会话切换**（V7）：出题一题一问（程序校验问号数和长度，不合格重出一次）；评阅默认每个维度一行，`/detail` 或网页“展开详情”看原题原答与完整理由；自测中半答半问的输入可以拆开处理，每次分类都留痕；老讲解按“一、二、三”标题分节继续；会话有标题（命令规则、模型首轮命名、用户改名），工作台左侧会话侧栏可以切换、新建、改名，界面不再显示完整 UUID。见“自测中的出题与输入”“评阅结果的显示”“会话与切换”。
 - **教学 Skill**（7.2）：讲解和澄清的“怎么教”放在带版本号的 `SKILL.md` 文件里（内置“通用讲解”和“费曼学习法”，也可以在自己的 Skill 目录里加），规则和输出结构仍写在代码里；渐进式披露：资料评估时模型只看到各个 Skill 的名称和描述，顺带选一个，程序校验后讲解和澄清才读入它的正文；`/skill` 查看或指定讲法，trace 记下用了哪个 Skill、哪一版、谁选的、为什么。见“教学 Skill”。
 - **讲解配图与本地语音**（7.2）：讲解某一节可以带一张流程图、树或概念图（程序校验，工作台画成 SVG，终端打印文字版）；工作台按住麦克风说话，本机 SenseVoice-Small（sherpa-onnx，CPU）离线转写，按知识点标题修正同音术语，填进输入框由你确认后发送，录音不保存，来自语音的回答带“语音”标记。见“教学 Skill”“语音输入”。
+- **FastAPI 服务层与流式输出**（V8.0）：看板和工作台改由 FastAPI + uvicorn 提供（接口路径、状态码和 JSON 不变，安全检查集中定义）；对话事件用 SSE 实时推送（`/api/chat/stream`，断线按最后一个事件续传，连不上时自动改回轮询）；模型调用默认流式，对话回答在网页和终端里逐字出现，讲解、出题、评阅等 JSON 阶段显示“已写约 N 字”；每次流式调用记下首字耗时（`ttft_ms`），看板和 `metrics` 显示其 p50／p95。`ZHIQIU_LLM_STREAM=0` 关闭流式。见“网页工作台”“流式输出”。
 - **复习日程、目录白名单与审批页**（7.1）：看板“复习日程”按周、月显示逾期、今天和未来的复习，加未来 14 天负载（超过每日 3 次的那天标红），工作台里点到期条目即开始复习；工作台“目录白名单”页可以粘贴绝对路径、先预览再添加或移除可读／可写目录，在两轮对话之间生效、不用重启，环境变量里的目录只能看，每次改动记 `RootsChanged`，知秋自己没有任何办法改这份名单；审批页可以直接批准或拒绝工作台正在等待的动作。见“本地看板”“网页工作台”。
 
 ## 项目结构与职责
@@ -56,7 +57,8 @@
 │  ├─ contracts.py    运行契约检查（PASS／FAIL／证据不足）与失败分类
 │  ├─ regressions.py  校验失败的模型原文导出为回归样例
 │  ├─ gate.py         发布门禁
-│  ├─ dashboard.py    `zhiqiu dashboard` 本地只读看板（dashboard.html 为页面）
+│  ├─ dashboard.py    看板与工作台各接口返回的数据、服务器对象（dashboard.html 为页面）
+│  ├─ web/            FastAPI 应用：app.py 路由，security.py 请求检查与响应头，sse.py 对话事件流
 │  ├─ diagnostics.py  模型联通、预算与窗口容量检查
 │  ├─ local_env.py    读取项目根目录的 .env
 │  └─ clock.py        系统时钟与测试用固定时钟
@@ -341,7 +343,7 @@ flowchart TD
   ```
 - Hermes（本版搁置，未做真实接入，仅供参考）：在 `config.yaml` 的 `mcp_servers` 段增加一项，`command` 为 `uv`，`args` 为 `["--directory", "D:\\code\\知秋\\知秋V1.0", "run", "--extra", "mcp", "zhiqiu", "--db", "D:\\path\\to\\state.sqlite", "mcp"]`。本机的 Hermes 学习源码不含 MCP 配置解析部分，字段名请以 Hermes 文档为准。
 
-[server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==7.2.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
+[server.json](server.json) 按官方 MCP Registry 的 2025-12-11 格式登记本服务（PyPI 包 `zhiqiu`，经 `uvx --from zhiqiu[mcp]==8.0.0` 以 stdio 启动），只用于本地记录和以后发布，目前没有发布到 Registry 或 PyPI。测试会用 `tests/data/server.schema.json`（官方 schema 的本地副本）离线校验它，并核对版本号与 `pyproject.toml` 一致。
 
 ## 外部 MCP 工具（客户端）
 
@@ -409,7 +411,7 @@ flowchart TD
 
 ### 网页工作台（V6）
 
-`zhiqiu web [--port 8765] [--open] [--resume 对话ID]` 启动工作台：在看板的全部页面之外，可以在浏览器里与知秋对话、走完学习与复习流程、批准或拒绝需要审批的动作。打开页面默认进入“对话”：知秋的回答按简单 Markdown 显示（标题、列表、表格、代码块、粗体；先整体转义，回答里的 HTML 与脚本只显示为文字，链接只显示地址）；工具调用以灰色小字显示（如“联网搜索：…（自动）”）；讲解与自测中的提问显示在输入框上方，直接输入作答；“是／否”确认与审批卡片带按钮，审批卡片显示工具、权限与完整描述（写文件含路径、新建或覆盖、内容预览），回答后变灰并标出结果与时间。“停止”只在有等待中的提示时可用。刷新页面不会丢失对话：本次工作台的消息从内存事件补齐，工作台启动前已有的消息从数据库读取，显示在“之前的消息”下。对话运行在一个后台线程里，用它自己的数据库连接；一次只处理一条输入，上一轮没结束时新输入返回 409。`--offline` 与审批策略同 `zhiqiu chat`；审批策略有误时不启动。
+`zhiqiu web [--port 8765] [--open] [--resume 对话ID]` 启动工作台：在看板的全部页面之外，可以在浏览器里与知秋对话、走完学习与复习流程、批准或拒绝需要审批的动作。打开页面默认进入“对话”：知秋的回答按简单 Markdown 显示（标题、列表、表格、代码块、粗体；先整体转义，回答里的 HTML 与脚本只显示为文字，链接只显示地址）；工具调用以灰色小字显示（如“联网搜索：…（自动）”）；讲解与自测中的提问显示在输入框上方，直接输入作答；“是／否”确认与审批卡片带按钮，审批卡片显示工具、权限与完整描述（写文件含路径、新建或覆盖、内容预览），回答后变灰并标出结果与时间。“停止”只在有等待中的提示时可用。刷新页面不会丢失对话：本次工作台的消息从内存事件补齐，工作台启动前已有的消息从数据库读取，显示在“之前的消息”下。事件经 SSE 实时推送（8.0）：左下角显示“实时连接”，断线后按 1、2、4…最多 10 秒重连并从最后一个事件续传，显示“重连中…”；连续 3 次连不上时改为每秒查询一次（之后每 30 秒再试一次实时连接）。知秋的回答边生成边显示（带闪烁光标），写完后换成保存进数据库的同一段文字；模型先说了一句再去调用工具时，那句话会被收起，和 7.2 一样不算回答。讲解、出题、评阅这类先校验再显示的输出，在“知秋正在思考…”后面显示“正在生成讲解，已写约 820 字”。对话运行在一个后台线程里，用它自己的数据库连接；一次只处理一条输入，上一轮没结束时新输入返回 409。`--offline` 与审批策略同 `zhiqiu chat`；审批策略有误时不启动。
 
 对话页左侧是会话侧栏（V7）：顶部“新对话”，下面按最近活动列出有消息的对话（当前对话即使为空也列出），每行显示标题、日期、消息数，“可继续”角标表示那段对话停在流程中或最近的结果指向未完成的尝试；悬停显示改名按钮，行内输入、回车提交。点一行就切换：对话区换成那段对话的历史，之后的输入写入那段对话，页头显示标题（悬停显示完整 ID）。正在处理或有等待中的提示时侧栏置灰，提示“先回答或停止当前提示”。切换、新建、改名都作为控制指令排进工作线程的输入队列（agent 和数据库连接只在工作线程上），每次换会话（包括在对话里输入 `/new`）发一个 `switched` 事件；刷新页面时只取最近一次切换之后的事件，不会混入上一段对话。中等宽度时侧栏和状态面板合在左侧一栏，窄屏时都折叠在对话上方（“会话”）。知秋说的话带种类（`say` 事件的 `say_kind`：`text` 正文、`tool` 工具小字、`note` 开场白与切换等提示、`outcome` 评阅卡片），页面按种类渲染。
 
@@ -421,7 +423,8 @@ flowchart TD
 
 | 接口 | 作用 |
 |---|---|
-| `GET /api/chat/events?after=N` | 序号大于 N 的事件（`say` 知秋说的话，带 `say_kind` 与 `meta`；`user` 用户输入；`ask`／`confirm`／`approval` 等待回答的提示；`resolved` 提示的结果；`switched` 换了会话；`status`、`error`、`idle` 本轮结束），只给最近一次 `switched` 之后的部分，以及 `busy`、等待中的提示 |
+| `GET /api/chat/stream[?after=N]` | 8.0：对话事件的 SSE 流（`text/event-stream`）。先发 `hello`（`busy`、`pending`、`next`、`conversation_id`），之后每个事件以 `id: 序号`、`event: 种类`、`data: JSON` 发出，每批事件后跟一帧 `state`（`busy`、`pending`）；起点取请求头 `Last-Event-ID`，否则 `after`，都没有为 0，与轮询一样不给最近一次切换之前的事件；起点早于内存里已丢弃的事件时先发 `gap`；15 秒没有事件发一行 `: ping`。流式回答的事件：`delta`（`stream_id`、`text`，约每 50 毫秒或 40 字合并一次）、`stream_reset`（收起这段草稿）、带 `stream_id` 的 `say`（最终文字，此后日志里不再保留这段的 `delta`）；JSON 阶段的 `progress`（`stage`、`chars`，每秒最多一次）。令牌同样放在请求头里，页面用 `fetch` 读流而不用 `EventSource` |
+| `GET /api/chat/events?after=N` | 轮询（SSE 不可用时页面用它）：序号大于 N 的事件（`say` 知秋说的话，带 `say_kind` 与 `meta`；`user` 用户输入；`ask`／`confirm`／`approval` 等待回答的提示；`resolved` 提示的结果；`switched` 换了会话；`status`、`error`、`idle` 本轮结束），只给最近一次 `switched` 之后的部分，以及 `busy`、等待中的提示；`lost` 表示 N 之后有事件已从内存丢弃（流式回答压缩后序号本来就不连续） |
 | `GET /api/chat/state` | 状态面板：当前目标、上下文范围、执行状态、风险动作、验证结果 |
 | `GET /api/chat/history[?conversation_id=]` | 指定对话的消息；省略时为当前对话，只给切换到它时已有的消息（之后的以事件给出） |
 | `GET /api/chat/conversations?limit=30` | 会话侧栏：`id`、`short_id`、`title`、`title_source`、`chat_date`、`updated_at`、`messages`、`current`、`resumable` |
@@ -452,7 +455,17 @@ powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
 
 窗口用 Edge 的独立应用窗口（`--app`）打开，没有地址栏；没装 Edge 时用默认浏览器。要换数据库，运行 `install-shortcut.ps1 -Db 路径` 重新生成快捷方式。
 
+服务层（8.0）：`zhiqiu dashboard` 与 `zhiqiu web` 是同一个 FastAPI 应用，跑在 uvicorn 上（不再是标准库 `ThreadingHTTPServer`），关闭了自动生成的 `/docs`、`/redoc`、`/openapi.json`。Host 与方法检查、`no-store`／`nosniff`／CSP 响应头在中间件里对所有请求统一处理；令牌、Origin、Content-Type 与请求体大小在工作台写接口共用的检查里处理，请求体按实际读到的字节计数，没有 `Content-Length` 的分块请求也不能超限；所有 JSON 响应统一脱敏。Windows 上页面中途断开时 asyncio 会打印的 `ConnectionResetError` 已静音。
+
 安全：仍只绑定 `127.0.0.1` 并校验 Host。每次启动生成一个随机令牌，只嵌在工作台页面里（其他网站读不到）；`/api/chat/*` 与 `/api/roots*` 的读写都要带请求头 `X-Zhiqiu-Token`。写请求还要求 `Origin`（如有）是本页、`Content-Type: application/json`、请求体不超过 64 KB；不合规的写请求被拒绝，并记护栏 `web_request_refused`。`zhiqiu dashboard` 不变：页面里没有令牌，仍然只接受 GET。
+
+### 流式输出（8.0）
+
+模型调用默认带 `"stream": true, "stream_options": {"include_usage": true}`，适配器把收到的片段拼回与非流式完全相同的消息（正文、按序号拼起来的工具调用、推理内容），上层代码不变；请求指纹（`prompt_hash`）不含这两个字段，流式与否指纹相同。连接超时 10 秒，两个片段之间最多等调用方的超时（对话每轮 60 秒）；不设整次调用的总时长上限，和非流式时一样（讲解这类长输出可能要一两分钟）。读到一半断开按失败记录，已收到的部分不算结果。usage 取最后一个带 usage 的片段，端点不给时 token 记为空。
+
+- 对话：每轮把正文片段交给界面（网页的草稿气泡、终端直接打印）；这一轮最后带了工具调用，就收起草稿（终端没法收回，补一行灰字“以上是调用工具前的说明，不是回答”）；没有工具调用的那一轮就是回答，存库内容与 7.2 相同。本轮出错、取消或变成建议时也收起草稿。
+- JSON 阶段（讲解、出题、评阅、澄清、评估等）：只统计收到了多少字，内容照旧先校验再显示。`zhiqiu learn`、`review`、`resume` 与 `chat` 在终端同一行原地刷新“正在生成讲解，已写约 N 字”；`zhiqiu mcp` 不显示（它的 stdout 是协议）。
+- 观测：`llm_calls` 新增 `ttft_ms`（第一个正文、推理或工具调用片段到达的耗时）与 `streamed`（schema v23，旧记录为空和 0）；trace 节点详情显示“首字”，`zhiqiu trace` 文字版也带上；`metrics` 与看板“指标与花费”按阶段显示首字 p50／p95，流式调用不足 5 次时显示“样本不足”。第 10 项运行契约 `stream_consistent`：每次成功的流式调用都有首字耗时，且不超过整次耗时。
 
 ### 指标与花费
 
@@ -483,7 +496,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
 
 ### Eval：场景套件、运行契约与失败沉淀
 
-- **运行契约检查**（`zhiqiu check [--days 7] [--json]`）：对已记录的运行逐项给出 PASS／FAIL／证据不足（没有可检查的数据时说“证据不足”，不当作通过），有 FAIL 时退出码为 1。检查项：工具循环轮数与结束原因（`loop_rounds`）、工具调用轮次在循环之内（`tool_round_bound`）、提议之后同一轮不再执行工具（`proposal_stops_round`）、写文件必须由用户批准、对话中的联网与外部 MCP 调用须经策略或用户批准（`confirmed_side_effects`；v19 之前没有来源的记录按用户批准计）、每次询问都有审批记录且结果与被决定的调用一致、没有超过 30 分钟仍未取消的待审批（`approvals_consistent`）、状态迁移按转换表重放且首尾衔接（`state_replay`）、模型与工具调用都挂在存在的 span 上（`trace_linked`）、没有遗留的运行中 span（`spans_closed`）、7.2 起每次讲解和澄清都记下了所用 Skill（`skills_recorded`）。全部通过只说明程序守住了规则，不代表讲解或评分质量。
+- **运行契约检查**（`zhiqiu check [--days 7] [--json]`）：对已记录的运行逐项给出 PASS／FAIL／证据不足（没有可检查的数据时说“证据不足”，不当作通过），有 FAIL 时退出码为 1。检查项：工具循环轮数与结束原因（`loop_rounds`）、工具调用轮次在循环之内（`tool_round_bound`）、提议之后同一轮不再执行工具（`proposal_stops_round`）、写文件必须由用户批准、对话中的联网与外部 MCP 调用须经策略或用户批准（`confirmed_side_effects`；v19 之前没有来源的记录按用户批准计）、每次询问都有审批记录且结果与被决定的调用一致、没有超过 30 分钟仍未取消的待审批（`approvals_consistent`）、状态迁移按转换表重放且首尾衔接（`state_replay`）、模型与工具调用都挂在存在的 span 上（`trace_linked`）、没有遗留的运行中 span（`spans_closed`）、7.2 起每次讲解和澄清都记下了所用 Skill（`skills_recorded`）、8.0 起每次成功的流式模型调用都有不超过整次耗时的首字耗时（`stream_consistent`）。全部通过只说明程序守住了规则，不代表讲解或评分质量。
 - **场景套件**（`tests/test_scenarios.py`）：用脚本化模型端到端运行学习→自测→评分、对话调用工具、提议→确认→流程→回到对话、自测中提问隔离、泄露拦截与确认被拒、中断与恢复，以及 V6 的默认策略（联网放行、写文件询问）、`deny` 配置、网页工作台上拒绝写文件、网页工作台上完成讲解与自测；每个场景结束后契约检查必须没有 FAIL，trace 必须是一棵连通的树。`tests/test_contracts.py` 用人为构造的违规记录检验每个检查器确实会判 FAIL。
 - **失败分类**（`zhiqiu failures [--days 7] [--json]`）：模型错误、上下文溢出、无效输出（按阶段，不允许的追问单列 `invalid_followup`）、工具超时与错误、各护栏、工具循环上限、评分延期、流程中断与出错，每类附最近的样例 trace。用户有意拒绝（护栏动作为 `denied_by_user` 的 `confirmation_denied`、`proposal_rejected`）是用户的决定，不算失败：单独列在 `intentional` 里，不计入总数和看板导航上的失败数；`confirmation_unavailable`（无法确认）仍算失败（V7）。
 - **失败沉淀**：输出未通过校验时，模型原文（脱敏、最多 2 万字）写入 `llm_failures`，`forget`／`chat forget` 一并删除。`zhiqiu failures export FAILURE_ID --to tests\regressions\NAME.json --expect rejected|recovered` 导出为回归样例，`tests/test_regressions.py` 把每个样例重放进同一套校验。第一条样例来自 V4 遗留的“不允许的追问”：V5 起出题校验失败会带着校验错误重试一次（`QUESTION_RETRIES=1`），重试给出合法题目即恢复。
@@ -535,6 +548,7 @@ $env:ZHIQIU_LLM_API_KEY = 'your-key'
 | `ZHIQIU_MODEL_BUDGETS` | 按模型配置窗口、输出预留与余量（见下文） | 沿用下面三个变量 |
 | `ZHIQIU_LLM_WINDOW`、`ZHIQIU_LLM_OUTPUT_RESERVE`、`ZHIQIU_LLM_MARGIN` | 未在 `ZHIQIU_MODEL_BUDGETS` 中匹配的模型的预算 | 不做超限判断 |
 | `ZHIQIU_LLM_WINDOW_VERIFIED` | 设为 `1` 表示窗口已实测（只记入审计） | 视为未实测 |
+| `ZHIQIU_LLM_STREAM` | 设为 `0` 关闭流式请求（回到 7.2 的一次性返回）；端点拒绝 `stream_options` 时自动去掉重试，拒绝流式时本进程内不再请求流式 | 开启 |
 | `ZHIQIU_LONG_ANSWER_SEGMENTS` | 设为 `1` 开启长答分段评阅（只能用进程环境变量） | 关闭 |
 | `ZHIQIU_PRICE_INPUT`、`ZHIQIU_PRICE_OUTPUT` | 每百万输入、输出 token 的价格，用于 `metrics`、看板与 trace 中的花费 | 只显示 token，不显示金额 |
 | `ZHIQIU_PRICE_CACHED_INPUT` | 每百万缓存命中输入 token 的价格（如 DeepSeek 的缓存命中价） | 按输入价计 |
@@ -608,7 +622,7 @@ uv run zhiqiu --db .\state.sqlite voice eval .\voice-samples
 uv run --python 3.12 --extra test python -m pytest -q
 ```
 
-测试覆盖迁移与回滚、会话恢复、幂等任务、只读提醒、上下文预算与审计、记忆失效、多题评分与证据校验、待评阅恢复、长答分段、旧讲解排序、工具层（校验、闸门、重试、总时限、审计）、诊断逻辑，以及 V5 的 trace、指标、护栏事件、脱敏、运行契约、端到端场景、回归样例、门禁和看板接口；均使用脚本化模型，不需要密钥。发布前运行 `uv run zhiqiu gate`。
+测试覆盖迁移与回滚、会话恢复、幂等任务、只读提醒、上下文预算与审计、记忆失效、多题评分与证据校验、待评阅恢复、长答分段、旧讲解排序、工具层（校验、闸门、重试、总时限、审计）、诊断逻辑，以及 V5 的 trace、指标、护栏事件、脱敏、运行契约、端到端场景、回归样例、门禁和看板接口，8.0 的 FastAPI 接口与 SSE 事件流（`test_web_stream.py`）、流式解析（`test_model_stream.py`，用 httpx 的 MockTransport）、对话流式与进度（`test_chat_stream.py`）、首字耗时（`test_ttft.py`）；测试默认 `ZHIQIU_LLM_STREAM=0`，流式测试自己打开；均使用脚本化模型，不需要密钥。发布前运行 `uv run zhiqiu gate`。
 
 模型联通、预算与窗口容量用 `check-model` 检查，只发送公开合成文本，不输出密钥、请求正文或模型答复：
 
@@ -654,3 +668,5 @@ uv run --python 3.12 python examples/long_answer_samples.py
 - 同一输入在温度 0 下的评分仍可能相差一档，单次一致率会有波动，评分质量应按多次评分的平均值判断。
 - 单道长答的分段评阅默认关闭：要点较多的长答在汇总步骤可能超出预算，需先实现分批汇总并通过人工样本检查后再启用。
 - `verified` 只是配置声明，不会由程序自动推断；未做满额实测的窗口应保持 `false`。
+- “停止”仍然只作用于等待中的提示，不打断正在进行的模型调用（V7 的决定；流式之后实现起来不难，列为 8.1 候选）。讲解等 JSON 阶段只显示字数，不边写边显示内容。
+- 流式下的 usage 依赖端点在最后一个片段里返回；不返回时这次调用的 token 与花费记为空。

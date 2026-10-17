@@ -42,6 +42,8 @@ nav a .n.live { color: var(--good); font-weight: 600; }
 .navfoot select { font: inherit; color: var(--ink2); background: var(--panel); border: 1px solid var(--line2); border-radius: 6px; padding: 2px 6px; }
 #dbname { font-family: var(--mono); color: var(--ink2); word-break: break-all; }
 #pulse.err { color: var(--bad); }
+.draft > :last-child::after, .draft:empty::after { content: "▍"; color: var(--ink3); animation: draftblink 1s steps(2, start) infinite; }
+@keyframes draftblink { to { visibility: hidden; } }
 main { flex: 1; min-width: 0; height: 100vh; overflow-y: auto; padding: 0 36px 40px; }
 .pagehead { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 24px 0 10px; border-bottom: 1px solid var(--line); margin-bottom: 18px; display: flex; align-items: flex-end; gap: 12px; }
 .pagehead h1 { font-size: 17px; font-weight: 600; }
@@ -401,6 +403,7 @@ async function post(path, body) {
 
 function pulse(error) {
   const node = $("#pulse");
+  if (!error && S.view === "chat" && C.liveText) { node.className = ""; node.textContent = C.liveText; return; }
   node.className = error ? "err" : "";
   node.textContent = error ? `读取失败：${error}` : `已更新 ${new Date().toLocaleTimeString("zh-CN", {hour12: false})}`;
 }
@@ -688,7 +691,7 @@ function renderNode() {
   const cached = S.llm[n.id];
   const head = `<h3>${icon("llm", "k-llm")}${esc(STAGE[n.stage] || n.stage || "模型调用")}<span class="faint mono" style="font-weight:400">${esc(n.model)}</span></h3>
     ${pill(n.error_kind || n.status !== "ok" ? "error" : "ok", n.error_kind || n.status)}
-    ${kv([["耗时", ms(n.latency_ms)], ["输入 token", `${num(n.tokens_in)}${n.tokens_cached ? `（缓存 ${num(n.tokens_cached)}）` : ""}`], ["输出 token", num(n.tokens_out)], ["花费", money(n.cost)]])}`;
+    ${kv([["耗时", ms(n.latency_ms) + (n.ttft_ms != null ? `<span class="faint">（首字 ${ms(n.ttft_ms)}）</span>` : n.streamed === 0 ? '<span class="faint">（非流式）</span>' : "")], ["输入 token", `${num(n.tokens_in)}${n.tokens_cached ? `（缓存 ${num(n.tokens_cached)}）` : ""}`], ["输出 token", num(n.tokens_out)], ["花费", money(n.cost)]])}`;
   if (!cached) {
     box.innerHTML = head + `<div class="faint">加载详情…</div>`;
     api(`/api/llm/${encodeURIComponent(n.id)}`).then((data) => { S.llm[n.id] = data; if (S.selected === "l:" + n.id) renderNode(); })
@@ -782,14 +785,14 @@ async function viewMetrics() {
   const stages = Object.entries(m.by_stage);
   const tools = Object.entries(d.tools.by_tool);
   $("#view").innerHTML = tiles([["模型调用", num(m.calls)], ["错误率", pct(m.error_rate)], ["无效输出率", pct(m.invalid_rate)],
-    ["p50 / p95", `${ms(m.p50_ms)}<span class="faint" style="font-size:12px"> / ${ms(m.p95_ms)}</span>`], ["输入 token", num(m.tokens_in)], ["缓存命中率", pct(m.cache_hit_rate)],
+    ["p50 / p95", `${ms(m.p50_ms)}<span class="faint" style="font-size:12px"> / ${ms(m.p95_ms)}</span>`], ["首字 p50 / p95", ttftCell(m)], ["输入 token", num(m.tokens_in)], ["缓存命中率", pct(m.cache_hit_rate)],
     ["输出 token", num(m.tokens_out)], ["花费", money(m.cost)], ["工具调用", num(d.tools.calls)], ["确认被拒", `${num(d.human.denied_by_user)} / ${num(d.human.confirmations_asked)}`]]) +
     `<h2>每日 token</h2><div class="card">${dailyChart(d.daily)}</div>
     <h2>按阶段</h2><div class="card" style="padding:4px 8px">${stages.length ? `<table><thead><tr><th>阶段</th><th class="num">调用</th><th class="num">错误</th><th class="num">无效</th>
-      <th class="num">p95</th><th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th class="num">花费</th></tr></thead><tbody>` +
+      <th class="num">p95</th><th class="num">首字 p50 / p95</th><th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th class="num">花费</th></tr></thead><tbody>` +
       stages.sort((a, b) => b[1].tokens_in - a[1].tokens_in).map(([k, s]) => `<tr><td>${esc(STAGE[k] || k)} <span class="faint mono">${esc(k)}</span></td><td class="num">${num(s.calls)}</td>
       <td class="num">${s.errors ? `<span style="color:var(--bad)">${num(s.errors)}</span>` : 0}</td><td class="num">${s.invalid_output ? `<span style="color:var(--bad)">${num(s.invalid_output)}</span>` : 0}</td>
-      <td class="num">${ms(s.p95_ms)}</td><td class="num">${num(s.tokens_in)}</td><td class="num">${num(s.tokens_cached)}</td><td class="num">${num(s.tokens_out)}</td><td class="num">${money(s.cost)}</td></tr>`).join("") +
+      <td class="num">${ms(s.p95_ms)}</td><td class="num">${ttftCell(s)}</td><td class="num">${num(s.tokens_in)}</td><td class="num">${num(s.tokens_cached)}</td><td class="num">${num(s.tokens_out)}</td><td class="num">${money(s.cost)}</td></tr>`).join("") +
       "</tbody></table>" : `<div class="empty">没有模型调用。</div>`}</div>
     <div class="grid2"><div><h2>工具</h2><div class="card">${tools.length ? tools.map(([name, t]) => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)"><span class="mono">${esc(name)}</span><span>${Object.entries(t).filter(([k]) => k !== "calls").map(([k, v]) => pill(k === "ok" ? "ok" : k === "denied" ? "warn" : "error", `${k} ${v}`)).join(" ")}</span></div>`).join("") + `<div class="hint">重试率 ${pct(d.tools.retry_rate)} · 已确认执行 ${num(d.tools.confirmed)} 次</div>` : `<div class="empty">无</div>`}</div></div>
     <div><h2>护栏触发</h2><div class="card">${hbars(d.guardrails, (k) => RULE[k] || k)}</div></div>
@@ -1145,8 +1148,10 @@ function md(source) {
 
 // Chat state: the last event seen, the prompt cards by request id, what is waiting now, the conversation
 // whose history is on screen and the sidebar's list.
+// live: null while the SSE stream is used, "fallback" while polling; dirty: events arrived since the
+// panel and the sidebar were last read.
 const C = {mounted: false, after: 0, cards: {}, ask: null, busy: false, pending: [], tick: 0, sending: false,
-  loaded: null, convs: [], renaming: null};
+  loaded: null, convs: [], renaming: null, live: null, streaming: false, dirty: false, liveText: null};
 
 function chatMount() {
   setHead("对话", "加载中…");
@@ -1162,7 +1167,9 @@ function chatMount() {
       <div class="vhint" id="vhint" hidden></div>
       <div class="state" id="cstate"></div></div></div>
     <details class="spanel" id="spanel"${matchMedia("(max-width: 860px)").matches ? "" : " open"}><summary>当前状态（目标、上下文、风险动作、结果）</summary><div id="spbody"><div class="faint">加载中…</div></div></details></div>`;
-  Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: [], loaded: null, convs: [], renaming: null});
+  chatUnmount();
+  Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: [], loaded: null, convs: [], renaming: null,
+    dirty: true, progress: null});
   $("#newchat").addEventListener("click", () => chatControl("/api/chat/new", {}));
   $("#clist").addEventListener("click", (e) => {
     const rename = e.target.closest("[data-rename]");
@@ -1465,9 +1472,50 @@ function voiceUndo(button) {
   if (seg.text.substr(change.at, change.to.length) === change.to && voiceReplace(next)) { change.undone = true; voiceHints(); }
 }
 
+// The section of a bot bubble showing a streamed answer while it arrives (created on its first piece).
+function draftNode(id, create) {
+  let node = [...document.querySelectorAll("#stream .draft")].find((n) => n.dataset.stream === id) || null;
+  if (!node && create) {
+    const last = $("#stream")?.lastElementChild;
+    const html = `<div class="draft" data-stream="${esc(id)}"></div>`;
+    if (last && last.matches(".bubble.bot:not(.old)")) {
+      last.insertAdjacentHTML("beforeend", html);
+      node = last.lastElementChild;
+    } else node = chatAppend(`<div class="bubble bot">${html}</div>`)?.firstElementChild || null;
+  }
+  return node;
+}
+
+function chatDraft(e) {
+  const node = draftNode(e.stream_id, e.kind === "delta");
+  if (!node) return;
+  if (e.kind === "stream_reset") {
+    // The round went on to call tools: its text was not the answer.
+    const bubble = node.parentElement;
+    node.remove();
+    if (bubble && !bubble.children.length) bubble.remove();
+    return;
+  }
+  const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+  node.dataset.raw = (node.dataset.raw || "") + e.text;
+  node.innerHTML = md(node.dataset.raw);
+  if (nearBottom) main.scrollTop = main.scrollHeight;
+}
+
 function chatEvent(e) {
+  // A stage's reply is still arriving; anything said or asked next means it is done.
+  if (e.kind === "progress") { C.progress = e; chatProgress(); return; }
+  if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
+  if (e.kind === "delta" || e.kind === "stream_reset") { chatDraft(e); return; }
   if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}${e.input_source === "voice" ? VOICE_MARK : ""}</div>`);
-  else if (e.kind === "say") {
+  else if (e.kind === "say" && e.stream_id && draftNode(e.stream_id, false)) {
+    // The streamed answer is complete: what was said replaces the draft, word for word as stored.
+    const node = draftNode(e.stream_id, false);
+    node.classList.remove("draft");
+    delete node.dataset.stream;
+    delete node.dataset.raw;
+    node.innerHTML = md(e.text);
+  } else if (e.kind === "say") {
     // Tool call notes and system notes are small print; everything else is the agent talking.
     if (e.say_kind === "tool") chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${esc(e.text)}</span></div>`);
     else if (e.say_kind === "note") chatNote(e.text);
@@ -1617,15 +1665,21 @@ async function chatHistory() {
   chatAppend(`<div class="divider">本次工作台</div>`);
 }
 
-async function chatState() {
-  const waiting = C.pending.length;
-  $("#stop").disabled = !waiting;
+// The composer's buttons, the question bar and the placeholder follow C at once, without a request.
+function chatControls() {
+  if (!$("#stop")) return;
+  $("#stop").disabled = !C.pending.length;
   $("#send").disabled = C.sending || (C.busy && !C.ask);
   const bar = $("#askbar");
   const prompt = C.ask && C.pending.find((p) => p.request_id === C.ask);
   bar.hidden = !prompt;
   bar.textContent = prompt ? `需要你回答：${prompt.prompt}` : "";
   $("#say").placeholder = prompt ? "在这里输入回答（Enter 发送）" : C.busy ? "知秋正在处理上一条…" : "和知秋说点什么（/help 查看命令，Shift+Enter 换行）";
+}
+
+async function chatState() {
+  chatControls();
+  const waiting = C.pending.length;
   let state = "";
   if (waiting) state = `<span class="dot live"></span>等待你${C.pending.some((p) => p.kind === "approval") ? "批准" : "回答"}`;
   else if (C.busy) {
@@ -1635,9 +1689,23 @@ async function chatState() {
       const run = live.running[0];
       if (run) step = run.chain.map(spanLabel).slice(-2).join(" › ") + (progressText(run.chain.at(-1).progress) ? ` · ${progressText(run.chain.at(-1).progress)}` : "");
     } catch (e) { /* the step is only a hint */ }
-    state = `<span class="dot live"></span>知秋正在思考…${step ? ` <span class="mono">${esc(step)}</span>` : ""}`;
+    state = `<span class="dot live"></span>知秋正在思考…${step ? ` <span class="mono">${esc(step)}</span>` : ""}<span id="cprogress"></span>`;
   }
   $("#cstate").innerHTML = state;
+  chatProgress();
+}
+
+const STAGE_NAMES = {teach: "讲解", next_question: "题目", grade: "评阅", grade_segment: "评阅", grade_extract: "评阅",
+  grade_combine: "评阅", clarify: "解答", clarify_chunk: "解答", clarify_combine: "解答", assess: "评估",
+  assess_chunk: "评估", assess_combine: "评估", synthesize: "资料整理", synthesize_batch: "资料整理",
+  classify_turn: "判断", chat_summary: "对话摘要", conversation_title: "标题"};
+
+// "正在生成讲解，已写约 820 字": how much of a stage's JSON reply has arrived (its content shows once checked).
+function chatProgress() {
+  const node = $("#cprogress");
+  if (!node) return;
+  const p = C.progress;
+  node.textContent = p && C.busy ? ` · 正在生成${STAGE_NAMES[p.stage] || p.stage}，已写约 ${p.chars} 字` : "";
 }
 
 const MODE = {chat: "对话", lesson: "讲解", self_test: "自测", review: "复习"};
@@ -1685,23 +1753,53 @@ async function chatPanel() {
     section("风险动作", "guard", risk) + section("验证结果", "shield", result);
 }
 
+// Events arrive on the SSE stream (/api/chat/stream) as they happen. This tick, once a second, only
+// refreshes what is read from the database (the running step, the status panel, the sidebar), starts
+// the stream when it is not running, and polls for events itself when the stream could not be used.
 async function chatTick(force = false) {
   if (!C.mounted) {
     chatMount();
     await chatHistory().catch((e) => chatNote(`读取之前的消息失败：${e.message}`, true));
   }
-  // Every second while something runs or waits; every third second when idle.
   C.tick++;
+  if (C.live === "fallback") {
+    // Polling after the stream failed three times; try the stream again now and then.
+    if (C.tick % 30 === 0) C.live = null;
+    else await chatPoll(force);
+  }
+  if (C.live !== "fallback" && !C.streaming) chatStream();
+  if (!force && !C.busy && !C.pending.length && !C.dirty && C.tick % 3) return;
+  await chatState();
+  // The panel and the sidebar read the database, so they refresh less often than events arrive.
+  if (force || C.dirty || C.tick % 3 === 0) {
+    C.dirty = false;
+    await chatPanel().catch((e) => pulse(e.message));
+    await chatConvs().catch((e) => pulse(e.message));
+  }
+}
+
+async function chatPoll(force) {
+  // Every second while something runs or waits; every third second when idle.
   if (!force && !C.busy && !C.pending.length && !C.expect && C.after && C.tick % 3) return;
   const d = await api(`/api/chat/events?after=${C.after}`);
-  if (d.events.length && d.events[0].seq > C.after + 1 && C.after && d.events[0].kind !== "switched") chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
-  for (const e of d.events) {
+  if (d.lost) chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
+  await chatApply(d.events);
+  C.after = d.next;
+  chatSync(d);
+}
+
+async function chatApply(events) {
+  for (const e of events) {
     if (e.kind === "switched") await chatSwitched(e);
     else chatEvent(e);
     if (e.kind === "idle") C.expect = false;
     C.after = Math.max(C.after, e.seq);
   }
-  C.after = d.next;
+  if (events.length) C.dirty = true;
+}
+
+// Whether a turn runs and what waits for an answer, from the poll or the stream's state frame.
+function chatSync(d) {
   C.busy = d.busy;
   C.pending = d.pending;
   if (C.ask && !C.pending.some((p) => p.request_id === C.ask)) C.ask = null;
@@ -1711,13 +1809,92 @@ async function chatTick(force = false) {
   if ($("#convs")) $("#convs").title = off ? "先回答或停止当前提示" : "";
   const offnote = $("#convsoff");
   if (offnote) offnote.hidden = !off;
+  if (!C.mounted) return;
   chatHead();
-  await chatState();
-  // The panel and the sidebar read the database, so they refresh less often than the event stream.
-  if (force || d.events.length || C.tick % 3 === 0) {
-    await chatPanel().catch((e) => pulse(e.message));
-    await chatConvs().catch((e) => pulse(e.message));
+  chatControls();
+}
+
+// One SSE message: "id: …", "event: …" and "data: …" lines; comments (": ping") have neither.
+function sseParse(block) {
+  const m = {id: null, event: "message", data: []};
+  for (const line of block.split("\n")) {
+    if (!line || line.startsWith(":")) continue;
+    const at = line.indexOf(":");
+    const name = at < 0 ? line : line.slice(0, at);
+    const value = at < 0 ? "" : line.slice(at + 1).replace(/^ /, "");
+    if (name === "id") m.id = Number(value);
+    else if (name === "event") m.event = value;
+    else if (name === "data") m.data.push(value);
   }
+  return {...m, data: m.data.length ? JSON.parse(m.data.join("\n")) : null};
+}
+
+function chatLive(text, error = false) {
+  C.liveText = text;
+  const node = $("#pulse");
+  node.className = error ? "err" : "";
+  node.textContent = text;
+}
+
+// Read the event stream until it ends or the chat is left. fetch rather than EventSource, so the token
+// goes in a header and never into a URL. Reconnects after 1, 2, 4… (at most 10) seconds from the last
+// event seen; after three failures in a row the tick polls instead.
+async function chatStream() {
+  C.streaming = true;
+  const mine = C.gen = (C.gen || 0) + 1;
+  let failures = 0;
+  while (C.gen === mine && C.mounted && S.view === "chat") {
+    const abort = C.abort = new AbortController();
+    try {
+      const response = await fetch(`/api/chat/stream?after=${C.after}`, {cache: "no-store", signal: abort.signal,
+        headers: {"X-Zhiqiu-Token": WB.token, "Accept": "text/event-stream"}});
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+      failures = 0;
+      chatLive("实时连接");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true}).replace(/\r\n/g, "\n");
+        let cut;
+        while ((cut = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          if (C.gen !== mine) return;
+          await chatMessage(sseParse(block));
+        }
+      }
+      throw new Error("连接已断开");
+    } catch (e) {
+      if (C.gen !== mine || e.name === "AbortError") return;
+      failures++;
+      chatLive("重连中…", true);
+      if (failures >= 3) {
+        C.live = "fallback";
+        C.liveText = null;
+        chatNote("实时连接失败，改为每秒查询一次；稍后会再试实时连接。", true);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** (failures - 1), 10000)));
+    }
+  }
+  if (C.gen === mine) C.streaming = false;
+}
+
+async function chatMessage(m) {
+  if (m.event === "hello" || m.event === "state") chatSync(m.data);
+  else if (m.event === "gap") chatNote("（较早的事件已不在内存中，刷新页面可从数据库读取对话）");
+  else if (m.data && m.id !== null) await chatApply([m.data]);
+}
+
+function chatUnmount() {
+  // Leaving the chat (or rebuilding it) ends its stream; showing it again replays from the first event.
+  C.gen = (C.gen || 0) + 1;
+  C.abort?.abort();
+  C.streaming = false;
+  C.liveText = null;
 }
 
 async function chatSend() {
@@ -1753,6 +1930,13 @@ async function chatRespond(button) {
   await chatTick(true).catch((e) => pulse(e.message));
 }
 
+// Time to the first piece of streamed replies: percentiles from five calls on, otherwise how many there are.
+function ttftCell(x) {
+  if (!x.ttft_samples) return '<span class="faint">—</span>';
+  if (x.ttft_p50_ms == null) return `<span class="faint">样本不足（${num(x.ttft_samples)}）</span>`;
+  return `${ms(x.ttft_p50_ms)}<span class="faint" style="font-size:12px"> / ${ms(x.ttft_p95_ms)}</span>`;
+}
+
 async function summary() {
   try {
     const s = await api(`/api/summary?days=${S.days}`);
@@ -1782,6 +1966,7 @@ function route() {
   S.view = view === "trace" ? "traces" : view in VIEWS ? view : DEFAULT_VIEW;
   S.arg = arg ? decodeURIComponent(arg) : null;
   C.mounted = false;  // the chat rebuilds from its events whenever it is shown again
+  chatUnmount();
   main.scrollTop = 0;
   if (view === "trace" && S.arg) {
     let first = true;

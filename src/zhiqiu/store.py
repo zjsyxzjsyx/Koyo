@@ -19,7 +19,7 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 # Review attempts a day may start; the schedule shows the days that would go over it.
 DAILY_REVIEW_LIMIT = 3
 LLM_FAILURE_CHARS = 20_000
@@ -607,6 +607,14 @@ class Store:
                     if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
                         self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
                 self.db.execute("PRAGMA user_version=22")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 23:
+            with self.transaction():
+                # Streamed model calls: when the first piece of the reply arrived (time to first token),
+                # and whether the call was streamed at all. Calls from before stay NULL and 0.
+                for column, kind in (("ttft_ms", "INTEGER"), ("streamed", "INTEGER NOT NULL DEFAULT 0")):
+                    if column not in {row["name"] for row in self.db.execute("PRAGMA table_info(llm_calls)")}:
+                        self.db.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {kind}")
+                self.db.execute("PRAGMA user_version=23")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -907,12 +915,13 @@ class Store:
             self.db.execute("""INSERT INTO llm_calls
                 (id,kp_id,attempt_id,point,model,prompt_hash,latency_ms,tokens_in,tokens_out,status,
                  created_at,context_build_id,stage,session_id,trace_id,parent_span_id,started_at_ns,
-                 tokens_cached,error_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 tokens_cached,error_kind,ttft_ms,streamed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (call_id, details.get("kp_id"), details.get("attempt_id"), details["point"], details["model"],
                              details["prompt_hash"], details["latency_ms"], details.get("tokens_in"),
                              details.get("tokens_out"), details["status"], self._ts(), details.get("context_build_id"),
                              details.get("stage"), details.get("session_id"), trace_id, parent,
-                             details.get("started_at_ns"), details.get("tokens_cached"), details.get("error_kind")))
+                             details.get("started_at_ns"), details.get("tokens_cached"), details.get("error_kind"),
+                             details.get("ttft_ms"), 1 if details.get("streamed") else 0))
             build_id = details.get("context_build_id")
             tokens_in = details.get("tokens_in")
             tokens_out = details.get("tokens_out")

@@ -61,7 +61,8 @@ def resolve(db: sqlite3.Connection, ident: str) -> list[str]:
 
 def _leaf_llm(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in ("id", "stage", "model", "status", "error_kind", "latency_ms", "tokens_in",
-                                      "tokens_out", "tokens_cached", "started_at_ns", "context_build_id")}
+                                      "tokens_out", "tokens_cached", "started_at_ns", "context_build_id",
+                                      "ttft_ms", "streamed")}
     item["cost"] = pricing.cost(row["tokens_in"], row["tokens_out"], row["tokens_cached"])
     return item
 
@@ -303,6 +304,7 @@ def render(data: dict[str, Any]) -> str:
             flag = f"  {call['error_kind']}" if call["error_kind"] else ("" if call["status"] == "ok" else f"  {call['status']}")
             leaves.append((call["started_at_ns"] or 0,
                            f"{pad}  · 模型 {call['stage'] or '-'}  {call['model']}  {_ms(call['latency_ms'])}  "
+                           + (f"首字 {_ms(call['ttft_ms'])}  " if call.get("ttft_ms") is not None else "") +
                            f"{_tokens(call)}{_money(call['cost'], currency)}{flag}"))
         for call in node["tool_calls"]:
             confirm = f"  {approval_label(call)}" if call["confirmed"] is not None else ""

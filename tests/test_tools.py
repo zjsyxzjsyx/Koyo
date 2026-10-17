@@ -260,7 +260,7 @@ def test_v12_database_gains_tool_calls_with_backup(tmp_path):
     store.db.execute("PRAGMA user_version=12")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 12)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert reopened.db.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
     assert reopened.get_knowledge_point(kp)["title"] == "二叉树遍历"
     assert path.with_suffix(".sqlite.pre-v13.bak").exists()

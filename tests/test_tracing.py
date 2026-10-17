@@ -190,7 +190,7 @@ def test_v15_database_gains_spans_and_trace_columns_with_backup(tmp_path):
     store.db.execute("PRAGMA user_version=15")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 14)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert (tmp_path / "state.sqlite.pre-v16.bak").exists()
     assert reopened.get_knowledge_point("红黑树")["id"] == kp
     columns = {row["name"] for row in reopened.db.execute("PRAGMA table_info(llm_calls)")}

@@ -12,7 +12,7 @@ from . import guardrails, lessons, tracing
 from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_VERSION
 from .materials import Material, consent_hash, read_local
 from .memory import LessonSummaryBudgetError
-from .model import Model, ModelContextOverflowError
+from .model import Model, ModelContextOverflowError, accepts
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate, question_shape
 from .files import FileRoots, read_file_spec, write_file_spec
 from .notion import NotionReader, notion_page_spec
@@ -152,6 +152,9 @@ class LearningRuntime:
         # Grading one over-budget original answer in segments stays off until its
         # human-labelled long-answer samples pass; a user must also ask for it.
         self.long_answer_segments = os.getenv("ZHIQIU_LONG_ANSWER_SEGMENTS") == "1"
+        # Told (stage, characters received so far) while a stage's JSON reply streams in. Only the
+        # count leaves here: the content is shown after it has been checked, as before.
+        self.progress: Callable[[str, int], None] | None = None
         # Optional cap on one segment's length; by default the input budget decides.
         self.segment_max_chars: int | None = None
         self._segment_original = False
@@ -216,6 +219,18 @@ class LearningRuntime:
         guardrails.record(self.store, "output_invalid", "rejected", error, stage=stage,
                           kp_id=kp_id, attempt_id=attempt_id)
 
+    def _send(self, sender: Callable[..., dict[str, Any]], request: Any, stage: str) -> dict[str, Any]:
+        progress = self.progress
+        if progress is None or not accepts(sender, "on_delta"):
+            return sender(request)
+        received = 0
+
+        def count(piece: str) -> None:
+            nonlocal received
+            received += len(piece)
+            progress(stage, received)
+        return sender(request, on_delta=count)
+
     def _invoke_stage(self, task: ContextTask, legacy: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         sender = getattr(self.model, "request", None)
         try:
@@ -228,7 +243,7 @@ class LearningRuntime:
             request = self.context.build(task)
         for attempt in range(2):
             try:
-                result = sender(request) if callable(sender) else legacy()
+                result = self._send(sender, request, task.stage) if callable(sender) else legacy()
                 if getattr(self.model, "last_usage_request_build_id", None) == request.build_id:
                     self.context.observe_usage(request, getattr(self.model, "last_usage", {}).get("prompt_tokens"))
                 break

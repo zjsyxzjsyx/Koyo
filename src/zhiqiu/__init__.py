@@ -1,3 +1,3 @@
 """Zhiqiu learning agent."""
 
-__version__ = "7.2.0"
+__version__ = "8.0.0"

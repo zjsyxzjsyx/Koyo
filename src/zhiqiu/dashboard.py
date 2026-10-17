@@ -1,18 +1,22 @@
 """`zhiqiu dashboard`: a local, read-only web view of traces, metrics and learning records;
 `zhiqiu web`: the same pages plus a chat workbench.
 
-One standard-library HTTP server, bound to 127.0.0.1, that opens the database
+One FastAPI app on uvicorn (`zhiqiu.web`), bound to 127.0.0.1, that opens the database
 read-only for each request (the terminal or the workbench may be writing at the same
 time). Every response goes through value-based redaction. The read-only dashboard has no
-write endpoint at all. The workbench adds /api/chat/*, which only answers requests from
-this machine that carry the token embedded in the served page (other sites cannot read
-it), come from the page's own origin and send JSON.
+write endpoint at all. The workbench adds /api/chat/* (with an SSE event stream), which only
+answers requests from this machine that carry the token embedded in the served page (other
+sites cannot read it), come from the page's own origin and send JSON.
+
+This module holds what each route returns and the server object; `zhiqiu.web` holds the routes
+and the checks.
 """
 from __future__ import annotations
 
-import hmac
+import asyncio
 import json
 import secrets
+import socket
 import sqlite3
 import threading
 import time
@@ -20,16 +24,14 @@ import uuid
 from collections import OrderedDict
 from datetime import date, timedelta
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlsplit
 
 from . import contracts, guardrails, metrics, pricing, traces
 from .clock import Clock
 from .queries import due_tasks, open_readonly, schedule as review_schedule, trace as attempt_trace
-from .redact import redact_obj
+from .web.security import TOKEN_HEADER  # noqa: F401  (re-exported for callers and tests)
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -39,7 +41,6 @@ MAX_BODY = 64 * 1024
 # Statistics of this many recent transcriptions are kept in memory for the inputs that follow them.
 VOICE_KEPT = 20
 INPUT_SOURCES = ("text", "voice")
-TOKEN_HEADER = "X-Zhiqiu-Token"
 # A title typed in the sidebar, as /title allows.
 RENAME_CHARS = 30
 
@@ -200,8 +201,10 @@ def chat_events(server: "DashboardServer", query: dict[str, list[str]]) -> dict[
     bench = server.workbench
     after = int(_number(query, "after", 0, 0, 2**62))
     # Nothing from before the latest switch: a reloaded page must not mix in the previous conversation.
+    # lost: events after `after` were dropped from memory (seq may also skip compacted stream deltas).
     return {"events": bench.io.since_switch(after), "next": bench.io.last_seq, "busy": bench.busy,
-            "pending": bench.io.pending(), "conversation_id": bench.conversation_id}
+            "pending": bench.io.pending(), "conversation_id": bench.conversation_id,
+            "lost": bool(after) and bench.io.lost(after)}
 
 
 def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[str, Any]:
@@ -383,10 +386,14 @@ CHAT_GETS: dict[str, Callable[["DashboardServer", dict[str, list[str]]], dict[st
 }
 
 
-class DashboardServer(ThreadingHTTPServer):
-    daemon_threads = True
+class DashboardServer:
+    """The uvicorn server behind both commands, with the interface the 7.2 ThreadingHTTPServer had:
+    the port is bound on construction (port 0 picks a free one), serve_forever() runs until
+    shutdown() (from another thread) or Ctrl+C, server_close() releases the socket."""
 
     def __init__(self, db_path: Path, port: int = DEFAULT_PORT, workbench: Any = None):
+        import uvicorn
+        from .web.app import create_app
         self.db_path = Path(db_path)
         # With a workbench the server also serves /api/chat/*; the token proves a request came from our page.
         self.workbench = workbench
@@ -396,7 +403,64 @@ class DashboardServer(ThreadingHTTPServer):
         self._transcriber: Any = None
         self._voice_lock = threading.Lock()
         self.voice_stats: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        super().__init__((HOST, port), Handler)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.socket.bind((HOST, port))
+            self.socket.listen(64)
+        except OSError:
+            self.socket.close()
+            raise
+        self.server_address = self.socket.getsockname()[:2]
+        self.app = create_app(self)
+        # Open SSE streams notice the shutdown within sse.WAIT_S; uvicorn waits no longer than this.
+        self._uvicorn = uvicorn.Server(uvicorn.Config(self.app, log_level="warning", lifespan="off",
+                                                      server_header=False, timeout_graceful_shutdown=2))
+        self._stopped = threading.Event()
+        self._stopped.set()
+
+    @property
+    def port(self) -> int:
+        return self.server_address[1]
+
+    @property
+    def closing(self) -> bool:
+        return bool(self._uvicorn.should_exit)
+
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
+        """Serve until shutdown(). Ctrl+C stops the server, then surfaces as KeyboardInterrupt."""
+        self._stopped.clear()
+        try:
+            asyncio.run(self._serve(), loop_factory=self._uvicorn.config.get_loop_factory())
+        finally:
+            self._stopped.set()
+
+    async def _serve(self) -> None:
+        # On Windows a page that goes away mid-connection makes the proactor loop print a
+        # ConnectionResetError traceback; nothing is wrong, so the terminal is kept quiet.
+        loop = asyncio.get_running_loop()
+
+        def quiet(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            if not isinstance(context.get("exception"), ConnectionResetError):
+                loop.default_exception_handler(context)
+        loop.set_exception_handler(quiet)
+        await self._uvicorn.serve(sockets=[self.socket])
+
+    def shutdown(self, timeout: float = 10) -> None:
+        self._uvicorn.should_exit = True
+        self._stopped.wait(timeout)
+
+    def server_close(self) -> None:
+        self.socket.close()
+
+    def connect(self) -> sqlite3.Connection:
+        db = open_readonly(self.db_path)
+        db.execute(f"PRAGMA busy_timeout={BUSY_MS}")
+        return db
+
+    async def refuse(self, request: Any, reason: str) -> None:
+        """Leave the GuardrailTriggered record of a refused workbench request, off the event loop."""
+        from fastapi.concurrency import run_in_threadpool
+        await run_in_threadpool(record_refusal, self.db_path, f"{request.method} {request.url.path}：{reason}")
 
     def transcriber(self) -> Any:
         from .voice import Transcriber
@@ -417,314 +481,102 @@ class DashboardServer(ThreadingHTTPServer):
         with self._voice_lock:
             return dict(self.voice_stats[voice_id]) if isinstance(voice_id, str) and voice_id in self.voice_stats else None
 
-    @property
-    def port(self) -> int:
-        return self.server_address[1]
 
-    def connect(self) -> sqlite3.Connection:
-        db = open_readonly(self.db_path)
-        db.execute(f"PRAGMA busy_timeout={BUSY_MS}")
-        return db
+# ----- workbench writes (run on a worker thread of the server; each returns status and JSON) -----
 
-
-class Handler(BaseHTTPRequestHandler):
-    server: DashboardServer
-    server_version = "zhiqiu-dashboard"
-
-    def log_message(self, format: str, *args: Any) -> None:  # keep the terminal quiet
-        pass
-
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        # 'self' scripts: only the fixed /voice-worklet.js, which the microphone recorder needs as a module.
-        self.send_header("Content-Security-Policy",
-                         "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; "
-                         "connect-src 'self'; img-src 'self' data:")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _json(self, status: int, data: Any) -> None:
-        body = json.dumps(redact_obj(data), ensure_ascii=False, default=str).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8")
-
-    def _host_ok(self) -> bool:
-        # A page on another site cannot reach this server through DNS rebinding: the Host must be local.
-        host = self.headers.get("Host", "")
-        return host in (f"127.0.0.1:{self.server.port}", f"localhost:{self.server.port}")
-
-    def do_GET(self) -> None:
-        if not self._host_ok():
-            self._json(HTTPStatus.FORBIDDEN, {"error": "只接受来自本机地址的请求"})
-            return
-        parts = urlsplit(self.path)
-        if parts.path in ("/", "/index.html"):
-            self._send(HTTPStatus.OK, page(self.server.token), "text/html; charset=utf-8")
-            return
-        if parts.path == "/voice-worklet.js" and self.server.workbench is not None:
-            self._send(HTTPStatus.OK, resources.files("zhiqiu").joinpath("voice-worklet.js").read_bytes(),
-                       "text/javascript; charset=utf-8")
-            return
-        query = parse_qs(parts.query)
-        if parts.path in CHAT_GETS and self.server.workbench is not None:
-            # Chat events are conversation content: only our page, which holds the token, may read them.
-            if not self._token_ok():
-                self._json(HTTPStatus.FORBIDDEN, {"error": "缺少或错误的工作台令牌"})
-                return
-            try:
-                self._json(HTTPStatus.OK, CHAT_GETS[parts.path](self.server, query))
-            except LookupError as exc:
-                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
-            except (ValueError, sqlite3.Error) as exc:
-                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"数据库暂时繁忙：{exc}"})
-            return
-        handler = ROUTES.get(parts.path)
-        detail = next(((prefix, item) for prefix, item in DETAIL_ROUTES.items() if parts.path.startswith(prefix)), None)
-        if handler is None and detail is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "没有这个接口"})
-            return
+def transcribe(server: DashboardServer, audio: bytes) -> tuple[int, dict[str, Any]]:
+    """Speech to text, on a server thread: a quiz waiting for its answer is exactly when it is needed,
+    and nothing here touches the agent. The audio is dropped as soon as it is transcribed."""
+    from . import voice
+    state = voice.status()
+    if not state["available"]:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"语音输入不可用：{voice.REASONS[state['reason']]}",
+                                                "reason": state["reason"]}
+    try:
+        result = server.transcriber().transcribe(audio)
+    except voice.VoiceError as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    except voice.Busy as exc:
+        return HTTPStatus.CONFLICT, {"error": str(exc)}
+    finally:
+        del audio
+    try:
+        db = server.connect()
         try:
-            db = self.server.connect()
-        except (ValueError, sqlite3.Error) as exc:
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
-            return
-        try:
-            if handler is not None:
-                data = handler(db, query)
-            else:
-                prefix, item = detail  # type: ignore[misc]
-                data = item(db, parts.path[len(prefix):])
-            self._json(HTTPStatus.OK, data)
-        except LookupError as exc:
-            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
-        except BadRequest as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except sqlite3.OperationalError as exc:
-            # e.g. the terminal holds the write lock a moment longer than busy_timeout; the page retries.
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"数据库暂时繁忙：{exc}"})
+            known = voice.terms(db)
         finally:
             db.close()
+    except (ValueError, sqlite3.Error):
+        known = []
+    text, replacements = voice.correct(result["raw"], known)
+    voice_id = server.remember_voice({"duration_ms": result["duration_ms"], "elapsed_ms": result["elapsed_ms"],
+                                      "replacements": len(replacements)})
+    return HTTPStatus.OK, {"text": text, "raw": result["raw"], "replacements": replacements,
+                           "duration_ms": result["duration_ms"], "elapsed_ms": result["elapsed_ms"],
+                           "voice_id": voice_id}
 
-    def _refuse(self) -> None:
-        self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "看板只读，只接受 GET"})
 
-    do_PUT = do_PATCH = do_DELETE = _refuse  # type: ignore[assignment]
+def roots_change(server: DashboardServer, action: str, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Preview, add or remove a root. Checked here (the file system read-only); the worker writes it
+    between turns, so a change never lands in the middle of one."""
+    from .files import RootRefused, _key, _real, check_root
+    bench = server.workbench
+    kind, raw = data.get("kind"), data.get("path")
+    try:
+        roots, listing = _roots_now(server)
+    except (ValueError, sqlite3.Error) as exc:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"数据库暂时繁忙：{exc}"}
+    items = listing[kind]
+    if action == "remove":
+        if not isinstance(raw, str) or not raw:
+            return HTTPStatus.BAD_REQUEST, {"error": "path 必须是非空字符串"}
+        item = next((item for item in items if item["path"] == raw), None)
+        if item is None and any(_key(_real(env)) == _key(_real(raw)) for env in roots.env[kind]):
+            item = {"source": "env"}
+        if item is None:
+            return HTTPStatus.NOT_FOUND, {"error": f"白名单里没有这个目录：{raw}"}
+        if item["source"] == "env":
+            return HTTPStatus.BAD_REQUEST, {"error": "这个目录来自环境变量，请在 .env 中修改"}
+        if bench.control(("roots", "remove", kind, raw, 0, False)):
+            return HTTPStatus.ACCEPTED, {"accepted": True}
+        return HTTPStatus.CONFLICT, {"error": "等这一轮结束再改"}
+    stored = sum(item["source"] == "workbench" for item in items)
+    try:
+        preview = check_root(kind, raw, [item["path"] for item in items], stored)
+    except RootRefused as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    if action == "preview":
+        return HTTPStatus.OK, preview.as_dict()
+    if bench.control(("roots", "add", kind, preview.path, preview.files, preview.truncated)):
+        return HTTPStatus.ACCEPTED, {"accepted": True, "preview": preview.as_dict()}
+    return HTTPStatus.CONFLICT, {"error": "等这一轮结束再改"}
 
-    # ----- workbench writes ---------------------------------------------------------------
 
-    def _token_ok(self) -> bool:
-        sent = self.headers.get(TOKEN_HEADER, "")
-        return bool(self.server.token) and hmac.compare_digest(sent.encode("utf-8"), self.server.token.encode("utf-8"))
-
-    def _origin_ok(self) -> bool:
-        # Browsers send Origin on POST; a page on another site cannot fake ours. Tools like curl send none.
-        origin = self.headers.get("Origin")
-        return origin is None or origin in (f"http://127.0.0.1:{self.server.port}", f"http://localhost:{self.server.port}")
-
-    def _deny(self, status: HTTPStatus, reason: str) -> None:
-        record_refusal(self.server.db_path, f"{self.command} {urlsplit(self.path).path}：{reason}")
-        self._json(status, {"error": reason})
-
-    def _raw(self, content_type: str, limit: int) -> bytes | None:
-        """The request body after every workbench check (host, token, origin, type, size); None if refused."""
-        if not self._host_ok():
-            self._deny(HTTPStatus.FORBIDDEN, "只接受来自本机地址的请求")
-        elif not self._token_ok():
-            self._deny(HTTPStatus.FORBIDDEN, "缺少或错误的工作台令牌")
-        elif not self._origin_ok():
-            self._deny(HTTPStatus.FORBIDDEN, "请求来自其他网站")
-        elif self.headers.get_content_type() != content_type:
-            self._deny(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, f"只接受 {content_type}")
-        else:
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = -1
-            if length < 0 or length > limit:
-                self._deny(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"请求体超过 {limit} 字节或长度无效")
-                return None
-            return self.rfile.read(length)
-        return None
-
-    def _body(self) -> dict[str, Any] | None:
-        """The JSON object sent, after every workbench check; None when the request was refused."""
-        raw = self._raw("application/json", MAX_BODY)
-        if raw is None:
-            return None
+def conversation_control(server: DashboardServer, action: str, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Switch, start or rename a conversation. Checked here, then done by the worker between turns."""
+    from .conversations import clean_title
+    bench = server.workbench
+    conversation_id = data.get("conversation_id")
+    if action != "new":
+        if not isinstance(conversation_id, str) or not conversation_id:
+            return HTTPStatus.BAD_REQUEST, {"error": "conversation_id 必须是非空字符串"}
+        db = server.connect()
         try:
-            data = json.loads(raw or b"{}")
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict):
-            return data
-        self._json(HTTPStatus.BAD_REQUEST, {"error": "请求体必须是 JSON 对象"})
-        return None
-
-    def _source(self, data: dict[str, Any]) -> tuple[str, dict[str, Any] | None] | None:
-        """How the text was entered (and, for voice, the numbers of its transcription); None after a 400."""
-        source = data.get("input_source", "text")
-        if source not in INPUT_SOURCES:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "input_source 只能是 text 或 voice"})
-            return None
-        return source, self.server.voice_meta(data.get("voice_id")) if source == "voice" else None
-
-    def _transcribe(self) -> None:
-        """Speech to text, on this HTTP thread: a quiz waiting for its answer is exactly when it is needed,
-        and nothing here touches the agent. The audio is dropped as soon as it is transcribed."""
-        from . import voice
-        audio = self._raw("audio/wav", voice.MAX_WAV_BYTES)
-        if audio is None:
-            return
-        state = voice.status()
-        if not state["available"]:
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"语音输入不可用：{voice.REASONS[state['reason']]}",
-                                                        "reason": state["reason"]})
-            return
-        try:
-            result = self.server.transcriber().transcribe(audio)
-        except voice.VoiceError as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            return
-        except voice.Busy as exc:
-            self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
-            return
+            known = db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone()
         finally:
-            del audio
-        try:
-            db = self.server.connect()
-            try:
-                known = voice.terms(db)
-            finally:
-                db.close()
-        except (ValueError, sqlite3.Error):
-            known = []
-        text, replacements = voice.correct(result["raw"], known)
-        voice_id = self.server.remember_voice({"duration_ms": result["duration_ms"], "elapsed_ms": result["elapsed_ms"],
-                                               "replacements": len(replacements)})
-        self._json(HTTPStatus.OK, {"text": text, "raw": result["raw"], "replacements": replacements,
-                                   "duration_ms": result["duration_ms"], "elapsed_ms": result["elapsed_ms"],
-                                   "voice_id": voice_id})
-
-    def do_POST(self) -> None:
-        bench = self.server.workbench
-        if bench is None:
-            self._refuse()
-            return
-        path = urlsplit(self.path).path
-        if path == "/api/chat/transcribe":
-            self._transcribe()
-            return
-        data = self._body()
-        if data is None:
-            return
-        if path == "/api/chat/input":
-            text = data.get("text")
-            source = self._source(data)
-            if source is None:
-                return
-            if not isinstance(text, str) or not text.strip() or len(text) > MAX_BODY:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "text 必须是非空字符串"})
-            elif bench.submit(text, *source):
-                self._json(HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq})
-            else:
-                self._json(HTTPStatus.CONFLICT, {"error": "上一轮还没结束"})
-        elif path == "/api/chat/respond":
-            source = self._source(data)
-            if source is None:
-                return
-            try:
-                bench.io.respond(str(data.get("request_id", "")), data.get("value"), str(data.get("origin") or "chat"),
-                                 *source)
-            except LookupError as exc:
-                self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
-            except ValueError as exc:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            else:
-                self._json(HTTPStatus.OK, {"answered": True})
-        elif path == "/api/chat/stop":
-            self._json(HTTPStatus.OK, {"stopped": bench.io.stop()})
-        elif path in ("/api/chat/switch", "/api/chat/new", "/api/chat/rename"):
-            self._conversation_control(bench, path.rsplit("/", 1)[1], data)
-        elif path in ("/api/roots/preview", "/api/roots/add", "/api/roots/remove"):
-            self._roots_change(bench, path.rsplit("/", 1)[1], data)
-        else:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "没有这个接口"})
-
-
-    def _roots_change(self, bench: Any, action: str, data: dict[str, Any]) -> None:
-        """Preview, add or remove a root. Checked here (the file system read-only); the worker writes it
-        between turns, so a change never lands in the middle of one."""
-        from .files import RootRefused, _key, _real, check_root
-        kind, raw = data.get("kind"), data.get("path")
-        if kind not in ("read", "write"):
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "kind 只能是 read 或 write"})
-            return
-        try:
-            roots, listing = _roots_now(self.server)
-        except (ValueError, sqlite3.Error) as exc:
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"数据库暂时繁忙：{exc}"})
-            return
-        items = listing[kind]
-        if action == "remove":
-            if not isinstance(raw, str) or not raw:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "path 必须是非空字符串"})
-                return
-            item = next((item for item in items if item["path"] == raw), None)
-            if item is None and any(_key(_real(env)) == _key(_real(raw)) for env in roots.env[kind]):
-                item = {"source": "env"}
-            if item is None:
-                self._json(HTTPStatus.NOT_FOUND, {"error": f"白名单里没有这个目录：{raw}"})
-            elif item["source"] == "env":
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "这个目录来自环境变量，请在 .env 中修改"})
-            elif bench.control(("roots", "remove", kind, raw, 0, False)):
-                self._json(HTTPStatus.ACCEPTED, {"accepted": True})
-            else:
-                self._json(HTTPStatus.CONFLICT, {"error": "等这一轮结束再改"})
-            return
-        stored = sum(item["source"] == "workbench" for item in items)
-        try:
-            preview = check_root(kind, raw, [item["path"] for item in items], stored)
-        except RootRefused as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            return
-        if action == "preview":
-            self._json(HTTPStatus.OK, preview.as_dict())
-        elif bench.control(("roots", "add", kind, preview.path, preview.files, preview.truncated)):
-            self._json(HTTPStatus.ACCEPTED, {"accepted": True, "preview": preview.as_dict()})
-        else:
-            self._json(HTTPStatus.CONFLICT, {"error": "等这一轮结束再改"})
-
-    def _conversation_control(self, bench: Any, action: str, data: dict[str, Any]) -> None:
-        """Switch, start or rename a conversation. Checked here, then done by the worker between turns."""
-        from .conversations import clean_title
-        conversation_id = data.get("conversation_id")
-        if action != "new":
-            if not isinstance(conversation_id, str) or not conversation_id:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "conversation_id 必须是非空字符串"})
-                return
-            db = self.server.connect()
-            try:
-                known = db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone()
-            finally:
-                db.close()
-            if not known:
-                self._json(HTTPStatus.NOT_FOUND, {"error": f"没有这段对话：{conversation_id}"})
-                return
-        if action == "rename":
-            title = clean_title(data.get("title")) if isinstance(data.get("title"), str) else ""
-            if not title or len(title) > RENAME_CHARS:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": f"标题清洗后须为 1 到 {RENAME_CHARS} 字"})
-                return
-            command: tuple[Any, ...] = ("rename", conversation_id, title)
-        else:
-            command = ("switch", conversation_id) if action == "switch" else ("new",)
-        if bench.control(command):
-            self._json(HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq})
-        else:
-            self._json(HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再切换"})
+            db.close()
+        if not known:
+            return HTTPStatus.NOT_FOUND, {"error": f"没有这段对话：{conversation_id}"}
+    if action == "rename":
+        title = clean_title(data.get("title")) if isinstance(data.get("title"), str) else ""
+        if not title or len(title) > RENAME_CHARS:
+            return HTTPStatus.BAD_REQUEST, {"error": f"标题清洗后须为 1 到 {RENAME_CHARS} 字"}
+        command: tuple[Any, ...] = ("rename", conversation_id, title)
+    else:
+        command = ("switch", conversation_id) if action == "switch" else ("new",)
+    if bench.control(command):
+        return HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq}
+    return HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再切换"}
 
 
 def record_refusal(db_path: Path, reason: str) -> None:

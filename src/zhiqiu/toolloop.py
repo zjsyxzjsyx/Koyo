@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable
 from . import guardrails, tracing
 from .context import ContextManager, ModelRequest
 from .materials import Material
+from .model import accepts
 from .tools import ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec
 
 MAX_ROUNDS = 5
@@ -30,6 +31,29 @@ QUERY_MAX_CHARS = 200
 _URL = re.compile(r"https?://\S+")
 STOP_REASONS = {"done": "模型结束", "max_rounds": "达到轮数上限", "budget": "上下文预算即将用完",
                 "deadline": "超过循环总时限", "proposal": "模型提出了建议，等待用户确认"}
+
+
+class Draft:
+    """The text of the round being received, shown to the user as it streams in.
+
+    A round may still end in tool calls, and then its text is not the answer (7.2 never showed it):
+    the draft is withdrawn and the next round starts a new one. The answer that is finally said
+    carries `stream_id`, so the page replaces the draft with it."""
+
+    def __init__(self, io: Any):
+        self.io = io
+        self.stream_id = uuid.uuid4().hex
+        self.shown = False
+
+    def piece(self, text: str) -> None:
+        self.shown = True
+        self.io.stream(self.stream_id, text)
+
+    def withdraw(self) -> None:
+        if self.shown:
+            self.io.stream_reset(self.stream_id)
+        self.stream_id = uuid.uuid4().hex
+        self.shown = False
 
 
 @dataclass(frozen=True)
@@ -116,7 +140,7 @@ class ToolLoop:
 
     def run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope,
             require_final: bool = False, final_instruction: str | None = None,
-            stop_on: frozenset[str] = frozenset()) -> LoopResult:
+            stop_on: frozenset[str] = frozenset(), draft: Draft | None = None) -> LoopResult:
         """require_final: when the rounds or the time run out, ask once more for the answer with tools off.
 
         stop_on: a successful call to one of these tools ends the loop at once (status "proposal");
@@ -126,11 +150,12 @@ class ToolLoop:
         """
         store = getattr(self.context, "store", None)
         if store is None:
-            return self._run(request, tool_names, scope, require_final, final_instruction, stop_on, str(uuid.uuid4()))
+            return self._run(request, tool_names, scope, require_final, final_instruction, stop_on, str(uuid.uuid4()),
+                             draft)
         loop_id = str(uuid.uuid4())
         with tracing.span(store, "loop", request.stage or "tool_loop") as span:
             span.set(loop_id=loop_id, max_rounds=self.max_rounds)
-            result = self._run(request, tool_names, scope, require_final, final_instruction, stop_on, loop_id)
+            result = self._run(request, tool_names, scope, require_final, final_instruction, stop_on, loop_id, draft)
             span.set(end_reason=result.status, rounds=result.rounds)
             if result.status in ("max_rounds", "deadline", "budget"):
                 guardrails.record(store, "loop_limit", "stopped", result.reason, stage=request.stage,
@@ -138,8 +163,12 @@ class ToolLoop:
             return result
 
     def _run(self, request: ModelRequest, tool_names: list[str], scope: ToolScope, require_final: bool,
-             final_instruction: str | None, stop_on: frozenset[str], loop_id: str) -> LoopResult:
+             final_instruction: str | None, stop_on: frozenset[str], loop_id: str,
+             draft: Draft | None = None) -> LoopResult:
         deadline = self.clock() + self.deadline_s
+        # A model that cannot stream (scripted ones in tests) is called exactly as before.
+        listen = ({"on_delta": draft.piece} if draft is not None and accepts(self.model.tool_round, "on_delta")
+                  else {})
         tools = self.registry.openai_schema(tool_names)
         messages: list[dict[str, Any]] = [dict(message) for message in request.messages]
         materials: dict[tuple[str, str], Material] = {}
@@ -157,9 +186,11 @@ class ToolLoop:
             rounds = round_number
             tracing.progress(round=round_number, max_rounds=self.max_rounds, tool=None)
             sent = list(messages)
-            message = self.model.tool_round(request, messages, tools, timeout_s=min(MODEL_CALL_SECONDS, left))
+            message = self.model.tool_round(request, messages, tools, timeout_s=min(MODEL_CALL_SECONDS, left), **listen)
             self._observe(request, sent)
             calls = message.get("tool_calls") or []
+            if calls and draft is not None:
+                draft.withdraw()
             if not calls:
                 status, final, text = "done", _parse_final(message), (message.get("content") or "").strip()
                 break
@@ -204,6 +235,6 @@ class ToolLoop:
             if limit is None or estimate <= limit:
                 tracing.progress(tool=None, closing=True)
                 closing_message = self.model.tool_round(request, messages, tools, tool_choice="none",
-                                                        timeout_s=GRACE_SECONDS)
+                                                        timeout_s=GRACE_SECONDS, **listen)
                 final, text = _parse_final(closing_message), (closing_message.get("content") or "").strip()
         return LoopResult(status, rounds, loop_id, tuple(materials.values()), final, text, stopped_by)

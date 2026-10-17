@@ -139,7 +139,7 @@ def test_v19_database_gains_title_and_feedback_columns_with_backup(tmp_path):
     store.close()
 
     reopened = store_at(tmp_path)
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert (tmp_path / "state.sqlite.pre-v20.bak").exists()
     after = reopened.db.execute("""SELECT review_id,dimension,score,rationale FROM dimension_scores
         ORDER BY dimension""").fetchall()
@@ -154,7 +154,7 @@ def test_v19_database_gains_title_and_feedback_columns_with_backup(tmp_path):
 def test_new_database_has_v20_columns_defaulting_to_empty(tmp_path):
     from zhiqiu.conversations import Conversations
     store = store_at(tmp_path)
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 22
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 23
     columns = {table: {row["name"]: row for row in store.db.execute(f"PRAGMA table_info({table})")}
                for table in ("conversations", "dimension_scores")}
     for table, column in (("conversations", "title"), ("conversations", "title_source"),
@@ -177,7 +177,7 @@ def test_v20_database_gains_file_roots_with_backup(tmp_path):
     store.close()
 
     reopened = store_at(tmp_path)
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert (tmp_path / "state.sqlite.pre-v21.bak").exists()
     assert reopened.roots("read") == [] and "file_roots" in reopened.export_json()
     assert reopened.db.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 1
@@ -217,7 +217,7 @@ def test_v21_database_gains_skill_and_input_source_columns_with_backup(tmp_path)
     store.close()
 
     reopened = store_at(tmp_path)
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert (tmp_path / "state.sqlite.pre-v22.bak").exists()
     assert {row["input_source"] for row in reopened.db.execute("SELECT input_source FROM answers")} == {"text"}
     row = reopened.db.execute("SELECT skill,skill_source,skill_at FROM knowledge_points WHERE id=?", (kp,)).fetchone()

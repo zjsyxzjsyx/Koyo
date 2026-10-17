@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import inspect
 import time
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
@@ -90,6 +91,7 @@ class OpenAICompatibleModel:
         self.kp_id: str | None = None
         self.attempt_id: str | None = None
         self.point = ""
+        self._stream_refused = False
 
     def set_trace_context(self, kp_id: str | None, attempt_id: str | None) -> None:
         self.kp_id = kp_id
@@ -99,10 +101,18 @@ class OpenAICompatibleModel:
         return self._chat_messages([{"role": "system", "content": instruction},
                                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], tools)
 
+    def streaming(self) -> bool:
+        """Whether calls ask for a streamed reply: on unless ZHIQIU_LLM_STREAM=0, or until the endpoint
+        refused it once in this process."""
+        return os.getenv("ZHIQIU_LLM_STREAM", "1").strip() != "0" and not self._stream_refused
+
     def _chat_messages(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                        request: ModelRequest | None = None, max_tokens: int | None = None,
                        thinking: str | None = None, timeout_seconds: float = 60,
-                       tool_choice: str = "auto") -> dict[str, Any]:
+                       tool_choice: str = "auto", on_delta: Callable[[str], None] | None = None,
+                       stream: bool | None = None) -> dict[str, Any]:
+        """One chat completion. Streamed unless turned off: on_delta then sees each piece of the reply's
+        text as it arrives, and the returned message is the same as a non-streamed one."""
         body: dict[str, Any] = {"model": self.model, "temperature": 0,
             "messages": messages}
         if tools:
@@ -113,41 +123,39 @@ class OpenAICompatibleModel:
             body["max_tokens"] = output_cap
         if thinking is not None:
             body["thinking"] = {"type": thinking}
+        # Taken before the stream fields: the same request has the same fingerprint streamed or not.
         fingerprint = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        stream = self.streaming() if stream is None else stream
         started_at_ns = time.time_ns()
         began = time.perf_counter()
-        usage: dict[str, Any] = {}
-        choices: list[Any] = []
+        reply = _Reply(began, on_delta)
         status = "error"
         error_kind: str | None = None
         self.last_usage = {}
         self.last_usage_request_build_id = None
         self.last_response_model = None
         try:
-            with httpx.Client(timeout=timeout_seconds) as client:
-                response = client.post(f"{self.endpoint}/chat/completions", json=body,
-                                       headers={"Authorization": f"Bearer {self.api_key}"})
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    if _is_context_overflow(response):
-                        status = "context_overflow"
-                        raise ModelContextOverflowError("模型服务报告上下文窗口溢出") from exc
-                    raise
-                data = response.json()
-                choices = data.get("choices", [])
-                raw_usage = data.get("usage") or {}
-                usage = raw_usage if isinstance(raw_usage, dict) else {}
-                self.last_usage = usage
-                if request and type(usage.get("prompt_tokens")) is int and usage["prompt_tokens"] > 0:
-                    self.last_usage_request_build_id = request.build_id
-                reported_model = data.get("model")
-                self.last_response_model = reported_model if isinstance(reported_model, str) else None
+            # Streamed, the read timeout is the longest gap between two pieces, as it was the longest
+            # wait for the whole reply before; the connection itself gets 10 seconds.
+            with httpx.Client(timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds))) as client:
+                if stream:
+                    self._post_streamed(client, body, reply)
+                else:
+                    reply.whole(self._post(client, body))
+            usage = reply.usage
+            self.last_usage = usage
+            if request and type(usage.get("prompt_tokens")) is int and usage["prompt_tokens"] > 0:
+                self.last_usage_request_build_id = request.build_id
+            self.last_response_model = reply.model
             status = "ok"
+        except ModelContextOverflowError:
+            status = error_kind = "context_overflow"
+            raise
         except BaseException as exc:
-            error_kind = "context_overflow" if status == "context_overflow" else type(exc).__name__
+            error_kind = type(exc).__name__
             raise
         finally:
+            usage = reply.usage
             if self.audit:
                 self.audit({"kp_id": request.kp_id if request else self.kp_id,
                             "attempt_id": request.attempt_id if request else self.attempt_id,
@@ -161,17 +169,50 @@ class OpenAICompatibleModel:
                             "session_id": request.session_id if request else None,
                             "started_at_ns": started_at_ns, "tokens_cached": cached_tokens(usage),
                             "error_kind": error_kind,
+                            "ttft_ms": reply.ttft_ms if status == "ok" else None, "streamed": reply.streamed,
                             # The store keeps these only when ZHIQIU_TRACE_CONTENT=1.
-                            "request_messages": messages, "response_text": _reply_text(choices)})
-        if not choices:
+                            "request_messages": messages, "response_text": _reply_text(reply.choices)})
+        if not reply.choices:
             raise ValueError("模型没有返回结果")
-        return choices[0]["message"]
+        return reply.choices[0]["message"]
+
+    def _post(self, client: httpx.Client, body: dict[str, Any]) -> dict[str, Any]:
+        response = client.post(f"{self.endpoint}/chat/completions", json=body,
+                               headers={"Authorization": f"Bearer {self.api_key}"})
+        _raise_for_status(response)
+        return response.json()
+
+    def _post_streamed(self, client: httpx.Client, body: dict[str, Any], reply: "_Reply") -> None:
+        """Ask for a stream. An endpoint that refuses `stream_options` gets the request once more without
+        it; one that refuses streaming altogether is asked without streaming, and if that works it is
+        not asked to stream again in this process."""
+        attempts = [{**body, "stream": True, "stream_options": {"include_usage": True}}, {**body, "stream": True}]
+        for streamed in attempts:
+            with client.stream("POST", f"{self.endpoint}/chat/completions", json=streamed,
+                               headers={"Authorization": f"Bearer {self.api_key}"}) as response:
+                if response.status_code == 400:
+                    response.read()
+                    if _is_context_overflow(response):
+                        _raise_for_status(response)
+                    continue
+                _raise_for_status(response, read=True)
+                if "text/event-stream" not in response.headers.get("content-type", ""):
+                    # The endpoint ignored `stream` and answered at once.
+                    response.read()
+                    reply.whole(response.json())
+                    return
+                reply.read(response.iter_lines())
+                return
+        data = self._post(client, body)
+        self._stream_refused = True
+        reply.whole(data)
+
 
     def probe(self, messages: list[dict[str, str]], max_tokens: int = 64,
               timeout_seconds: float = 60, thinking_mode: str = "disabled") -> dict[str, Any]:
         """Send synthetic input through the normal adapter and return provider usage only."""
         thinking = thinking_mode if urlsplit(self.endpoint).hostname == "api.deepseek.com" else None
-        message = self._chat_messages(messages, max_tokens=max_tokens, thinking=thinking,
+        message = self._chat_messages(messages, max_tokens=max_tokens, thinking=thinking, stream=False,
                                       timeout_seconds=timeout_seconds)
         if not isinstance(message.get("content"), str) or not message["content"].strip():
             raise ValueError("模型探测未返回文本")
@@ -195,21 +236,25 @@ class OpenAICompatibleModel:
             raise ValueError("模型必须返回 JSON 对象")
         return data
 
-    def request(self, request: ModelRequest) -> dict[str, Any]:
+    def request(self, request: ModelRequest, on_delta: Callable[[str], None] | None = None) -> dict[str, Any]:
+        """on_delta: sees the JSON reply's text as it streams in (the runtime only counts it)."""
         reserve = request.budget.get("output_reserve_tokens")
         max_tokens = reserve if type(reserve) is int and reserve > 0 else None
-        message = self._chat_messages(list(request.messages), request=request, max_tokens=max_tokens)
+        message = self._chat_messages(list(request.messages), request=request, max_tokens=max_tokens,
+                                      on_delta=on_delta)
         # Kept so an answer that fails parsing or validation can be stored for a regression case.
         self.last_output = message.get("content") or ""
         return self._parse_json_message(message)
 
     def tool_round(self, request: ModelRequest, messages: list[dict[str, Any]],
-                   tools: list[dict[str, Any]], tool_choice: str = "auto", timeout_s: float = 60) -> dict[str, Any]:
+                   tools: list[dict[str, Any]], tool_choice: str = "auto", timeout_s: float = 60,
+                   on_delta: Callable[[str], None] | None = None) -> dict[str, Any]:
         """One round of a bounded tool loop; returns the raw assistant message."""
         reserve = request.budget.get("output_reserve_tokens")
         max_tokens = reserve if type(reserve) is int and reserve > 0 else None
         return self._chat_messages(messages, tools, request=request, max_tokens=max_tokens,
-                                   tool_choice=tool_choice, timeout_seconds=timeout_s)
+                                   tool_choice=tool_choice, timeout_seconds=timeout_s, on_delta=on_delta)
+
 
     def summarize(self, lesson: str, corrections: list[str]) -> str:
         response = self._json("为跨天追问生成有来源的简明讲解摘要。保留已确认要点、纠正和不确定项；不推断用户已理解。返回 summary 字符串。",
@@ -233,3 +278,111 @@ class OpenAICompatibleModel:
                 except (KeyError, TypeError, json.JSONDecodeError):
                     pass
         return None
+
+
+def _raise_for_status(response: httpx.Response, read: bool = False) -> None:
+    """raise_for_status, telling a context overflow apart; read: load a streamed error body first."""
+    if read and response.status_code >= 400:
+        response.read()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        if _is_context_overflow(response):
+            raise ModelContextOverflowError("模型服务报告上下文窗口溢出") from exc
+        raise
+
+
+class _Reply:
+    """A reply being received: from one JSON body, or put together from the pieces of a stream."""
+
+    def __init__(self, began: float, on_delta: Callable[[str], None] | None):
+        self.began = began
+        self.on_delta = on_delta
+        self.choices: list[Any] = []
+        self.usage: dict[str, Any] = {}
+        self.model: str | None = None
+        self.ttft_ms: int | None = None
+        self.streamed = False
+
+    def whole(self, data: dict[str, Any]) -> None:
+        self.choices = data.get("choices") or []
+        raw_usage = data.get("usage") or {}
+        self.usage = raw_usage if isinstance(raw_usage, dict) else {}
+        reported = data.get("model")
+        self.model = reported if isinstance(reported, str) else None
+
+    def _first(self) -> None:
+        if self.ttft_ms is None:
+            self.ttft_ms = int((time.perf_counter() - self.began) * 1000)
+
+    def read(self, lines: Any) -> None:
+        """Chat Completions chunks: text and reasoning pieces are joined, tool calls are put together
+        by index (id, name and argument pieces), usage comes with the last chunk if at all. The first
+        piece of any of them is the first token."""
+        self.streamed = True
+        text: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        role, chunks = "assistant", 0
+        for line in lines:
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            if not payload:
+                continue
+            chunk = json.loads(payload)
+            if not isinstance(chunk, dict):
+                continue
+            chunks += 1
+            if isinstance(chunk.get("usage"), dict):
+                self.usage = chunk["usage"]
+            if isinstance(chunk.get("model"), str):
+                self.model = chunk["model"]
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                role = delta.get("role") or role
+                if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
+                    # A reasoning model's first tokens are its reasoning: they count for time to first token.
+                    self._first()
+                    reasoning.append(delta["reasoning_content"])
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    self._first()
+                    text.append(piece)
+                    if self.on_delta is not None:
+                        try:
+                            self.on_delta(piece)
+                        except Exception:
+                            # Showing the text is best effort; the reply itself must not depend on it.
+                            pass
+                for call in delta.get("tool_calls") or []:
+                    self._first()
+                    slot = calls.setdefault(int(call.get("index", 0)),
+                                            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    if call.get("type"):
+                        slot["type"] = call["type"]
+                    function = call.get("function") or {}
+                    slot["function"]["name"] += function.get("name") or ""
+                    slot["function"]["arguments"] += function.get("arguments") or ""
+        if not chunks:
+            return
+        message: dict[str, Any] = {"role": role, "content": "".join(text) if text or not calls else None}
+        if reasoning:
+            message["reasoning_content"] = "".join(reasoning)
+        if calls:
+            message["tool_calls"] = [calls[index] for index in sorted(calls)]
+        self.choices = [{"index": 0, "message": message}]
+
+
+def accepts(function: Any, name: str) -> bool:
+    """Whether a model method takes the keyword `name`; scripted test models often do not."""
+    try:
+        return name in inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False

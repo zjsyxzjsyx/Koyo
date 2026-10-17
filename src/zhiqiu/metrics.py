@@ -20,6 +20,16 @@ def _window(days: float) -> tuple[int, str]:
     return int(since.timestamp() * 10**9), since.isoformat()
 
 
+TTFT_MIN = 5
+
+
+def _ttft(values: list[int]) -> dict[str, Any]:
+    """First-token percentiles of streamed calls; None (shown as 样本不足) below TTFT_MIN samples."""
+    enough = len(values) >= TTFT_MIN
+    return {"ttft_samples": len(values), "ttft_p50_ms": _percentile(values, 0.5) if enough else None,
+            "ttft_p95_ms": _percentile(values, 0.95) if enough else None}
+
+
 def _percentile(values: list[int], share: float) -> int | None:
     if not values:
         return None
@@ -48,7 +58,8 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
     messages = db.execute("""SELECT kind,payload_json FROM conversation_messages
         WHERE kind IN ('proposal','memory_proposal') AND created_at>=?""", (since_iso,)).fetchall()
 
-    # Model calls, by stage.
+    # Model calls, by stage. Time to first token only over streamed calls that succeeded; fewer than
+    # TTFT_MIN of them is too few to read a percentile from.
     stages: dict[str, dict[str, Any]] = {}
     grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for row in llm:
@@ -60,13 +71,16 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
         cached = sum(row["tokens_cached"] or 0 for row in rows)
         errors = sum(1 for row in rows if row["status"] != "ok")
         invalid = sum(1 for row in rows if row["error_kind"] == "invalid_output")
+        ttft = [row["ttft_ms"] for row in rows if row["streamed"] and row["ttft_ms"] is not None]
         stages[stage] = {"calls": len(rows), "errors": errors, "error_rate": _rate(errors, len(rows)),
+                         **_ttft(ttft),
                          "invalid_output": invalid, "invalid_rate": _rate(invalid, len(rows)),
                          "context_overflow": sum(1 for row in rows if row["status"] == "context_overflow"),
                          "p50_ms": _percentile(latencies, 0.5), "p95_ms": _percentile(latencies, 0.95),
                          "tokens_in": tin, "tokens_out": tout, "tokens_cached": cached,
                          "cost": pricing.cost(tin, tout, cached)}
     all_latencies = [row["latency_ms"] for row in llm]
+    all_ttft = [row["ttft_ms"] for row in llm if row["streamed"] and row["ttft_ms"] is not None]
     total_in = sum(row["tokens_in"] or 0 for row in llm)
     total_out = sum(row["tokens_out"] or 0 for row in llm)
     total_cached = sum(row["tokens_cached"] or 0 for row in llm)
@@ -137,6 +151,7 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
         "model": {"calls": len(llm), "errors": llm_errors, "error_rate": _rate(llm_errors, len(llm)),
                   "invalid_output": llm_invalid, "invalid_rate": _rate(llm_invalid, len(llm)),
                   "p50_ms": _percentile(all_latencies, 0.5), "p95_ms": _percentile(all_latencies, 0.95),
+                  **_ttft(all_ttft), "streamed": sum(1 for row in llm if row["streamed"]),
                   "tokens_in": total_in, "tokens_out": total_out, "tokens_cached": total_cached,
                   "cache_hit_rate": _rate(total_cached, total_in),
                   "cost": pricing.cost(total_in, total_out, total_cached), "by_stage": stages},
@@ -169,12 +184,13 @@ def render(data: dict[str, Any]) -> str:
     model = data["model"]
     lines = [f"最近 {data['days']:g} 天" + ("" if data["priced"] else "（未配置 ZHIQIU_PRICE_INPUT/OUTPUT，只显示 token）"),
              f"模型调用 {model['calls']} 次  错误率 {_pct(model['error_rate'])}  无效输出率 {_pct(model['invalid_rate'])}  "
-             f"p50 {model['p50_ms'] or '-'}ms  p95 {model['p95_ms'] or '-'}ms",
+             f"p50 {model['p50_ms'] or '-'}ms  p95 {model['p95_ms'] or '-'}ms  " + _ttft_text(model),
              f"  token：输入 {model['tokens_in']}（缓存命中 {model['tokens_cached']}，{_pct(model['cache_hit_rate'])}）  "
              f"输出 {model['tokens_out']}{money(model['cost'])}"]
     for stage, item in model["by_stage"].items():
         lines.append(f"  {stage:<16} {item['calls']:>4} 次  错误 {item['errors']}  无效 {item['invalid_output']}  "
-                     f"p95 {item['p95_ms']}ms  in {item['tokens_in']} out {item['tokens_out']}{money(item['cost'])}")
+                     f"p95 {item['p95_ms']}ms  {_ttft_text(item)}  in {item['tokens_in']} out {item['tokens_out']}"
+                     f"{money(item['cost'])}")
     tools = data["tools"]
     lines.append(f"工具调用 {tools['calls']} 次  重试率 {_pct(tools['retry_rate'])}  状态 {json.dumps(tools['by_status'], ensure_ascii=False)}")
     for name, item in tools["by_tool"].items():
@@ -192,3 +208,11 @@ def render(data: dict[str, Any]) -> str:
                  f"评分延期 {data['grading']['deferred']} 次")
     lines.append("护栏触发：" + ("  ".join(f"{rule} {count}" for rule, count in sorted(data["guardrails"].items())) or "无"))
     return "\n".join(lines)
+
+
+def _ttft_text(item: dict[str, Any]) -> str:
+    if not item["ttft_samples"]:
+        return "首字 -"
+    if item["ttft_p50_ms"] is None:
+        return f"首字 样本不足（{item['ttft_samples']} 次）"
+    return f"首字 p50 {item['ttft_p50_ms']}ms p95 {item['ttft_p95_ms']}ms"

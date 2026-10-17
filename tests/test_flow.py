@@ -177,7 +177,7 @@ def test_v13_database_backfills_lesson_state_and_keeps_pending_lessons(tmp_path)
     store.db.execute("PRAGMA user_version=13")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 2)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 22
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
     assert path.with_suffix(".sqlite.pre-v14.bak").exists()
     states = dict(reopened.db.execute("""SELECT k.title,s.lesson_state FROM sessions s
         JOIN knowledge_points k ON k.id=s.kp_id"""))

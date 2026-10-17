@@ -203,9 +203,19 @@ def skills_recorded(db: sqlite3.Connection, since_ns: int, since_iso: str) -> di
     return _result("skills_recorded", len(rows), problems, "讲解和澄清的每次上下文都记下了所用 Skill 的名称、版本和摘要")
 
 
+def stream_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
+    """Every streamed model call that succeeded knows when its first piece arrived, within the call's time."""
+    rows = db.execute("""SELECT id,stage,trace_id,ttft_ms,latency_ms FROM llm_calls WHERE streamed=1 AND status='ok'
+        AND (started_at_ns>=? OR (started_at_ns IS NULL AND created_at>=?))""", (since_ns, since_iso)).fetchall()
+    problems = [{"trace_id": row["trace_id"], "llm_call": row["id"], "stage": row["stage"], "ttft_ms": row["ttft_ms"],
+                 "latency_ms": row["latency_ms"]}
+                for row in rows if row["ttft_ms"] is None or not 0 <= row["ttft_ms"] <= row["latency_ms"]]
+    return _result("stream_consistent", len(rows), problems, "流式模型调用都记下了首字耗时，且不超过整次调用的耗时")
+
+
 CHECKS: tuple[Callable[[sqlite3.Connection, int, str], dict[str, Any]], ...] = (
     loop_rounds, tool_round_bound, proposal_stops_round, confirmed_side_effects, approvals_consistent,
-    state_replay, trace_linked, spans_closed, skills_recorded)
+    state_replay, trace_linked, spans_closed, skills_recorded, stream_consistent)
 
 
 def check(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:

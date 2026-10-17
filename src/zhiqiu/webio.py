@@ -27,6 +27,12 @@ KEEP_EVENTS = 2000
 PROMPTS = {"ask": str, "confirm": bool, "approval": bool}
 # Where on the page an answer was given: the chat card, or the approvals page for a waiting approval.
 ORIGINS = ("chat", "approvals")
+# Pieces of a streamed answer are sent together: at most every this many seconds, or once this many
+# characters wait, so a reply is tens of events rather than one per token.
+DELTA_S = 0.05
+DELTA_CHARS = 40
+# A stage's "characters received" is reported at most this often.
+PROGRESS_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -51,14 +57,21 @@ class WebIO:
         self.wait_s = wait_s
         self.keep = keep
         self._lock = threading.Lock()
+        # Notified on every new event and on close; the SSE stream waits on it.
+        self._changed = threading.Condition(self._lock)
         self._events: list[dict[str, Any]] = []
         self._seq = 0
+        # The newest seq dropped to keep the log at `keep`: a reader behind it has lost events.
+        self._trimmed = 0
         self._waiting: dict[str, tuple[str, queue.Queue[Any]]] = {}
         self._origins: dict[str, str] = {}
         # How each text answer was entered (typed or a confirmed voice transcript), and the latest one.
         self._sources: dict[str, tuple[str, dict[str, Any] | None]] = {}
         self._last_source: tuple[str, dict[str, Any] | None] = ("text", None)
         self._closed = False
+        # Per stream: text not sent yet, and when a delta was last sent; per stage, the last progress.
+        self._drafts: dict[str, tuple[list[str], float]] = {}
+        self._progressed: dict[str, float] = {}
 
     # ----- events ----------------------------------------------------------------------
 
@@ -67,8 +80,32 @@ class WebIO:
             self._seq += 1
             event = {"seq": self._seq, "kind": kind, "at_ns": time.time_ns(), **data}
             self._events.append(event)
-            del self._events[:-self.keep]
+            self._trim()
+            self._changed.notify_all()
             return event
+
+    def _trim(self) -> None:
+        if len(self._events) > self.keep:
+            self._trimmed = self._events[-self.keep - 1]["seq"]
+            del self._events[:-self.keep]
+
+    def wait_after(self, after: int, timeout: float) -> bool:
+        """Block until there is an event newer than `after` (True), or the timeout passes or the
+        IO closes (False). Called by the SSE stream, off the event loop."""
+        with self._lock:
+            if self._seq <= after and not self._closed:
+                self._changed.wait(timeout)
+            return self._seq > after and not self._closed
+
+    def lost(self, after: int) -> bool:
+        """Whether a reader that saw everything up to `after` has missed events dropped from memory."""
+        with self._lock:
+            return after < self._trimmed
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
     def events(self, after: int = 0) -> list[dict[str, Any]]:
         with self._lock:
@@ -131,6 +168,7 @@ class WebIO:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._changed.notify_all()
         self.stop()
 
     # ----- FlowIO (worker thread) --------------------------------------------------------
@@ -165,7 +203,44 @@ class WebIO:
         return self._last_source[0]
 
     def say(self, text: str, kind: str = "text", **meta: Any) -> None:
-        self.emit("say", text=text, say_kind=kind, meta=meta)
+        """One line of output. With stream_id it is the answer that was streamed under that id: the
+        page replaces the draft with it, and the log keeps it instead of the draft's deltas."""
+        stream_id = meta.pop("stream_id", None)
+        if stream_id:
+            self._forget(stream_id)
+        self.emit("say", text=text, say_kind=kind, meta=meta, **({"stream_id": stream_id} if stream_id else {}))
+
+    # ----- streaming (worker thread) ------------------------------------------------------
+
+    def stream(self, stream_id: str, text: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            pending, last = self._drafts.get(stream_id, ([], 0.0))
+            pending.append(text)
+            if now - last < DELTA_S and sum(map(len, pending)) < DELTA_CHARS:
+                self._drafts[stream_id] = (pending, last)
+                return
+            self._drafts[stream_id] = ([], now)
+        self.emit("delta", stream_id=stream_id, text="".join(pending))
+
+    def stream_reset(self, stream_id: str) -> None:
+        """The streamed text was not the answer (the round went on to call tools): take it back."""
+        self._forget(stream_id)
+        self.emit("stream_reset", stream_id=stream_id)
+
+    def _forget(self, stream_id: str) -> None:
+        with self._lock:
+            self._drafts.pop(stream_id, None)
+            self._events = [event for event in self._events
+                            if not (event["kind"] == "delta" and event.get("stream_id") == stream_id)]
+
+    def progress(self, stage: str, chars: int) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._progressed.get(stage, -PROGRESS_S) < PROGRESS_S:
+                return
+            self._progressed[stage] = now
+        self.emit("progress", stage=stage, chars=chars)
 
     def ask(self, prompt: str) -> str:
         answer = self._wait("ask", prompt=prompt)
