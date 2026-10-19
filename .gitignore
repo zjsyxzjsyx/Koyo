@@ -8,6 +8,9 @@ __pycache__/
 # Migration backups and temporary copies (state.sqlite.pre-v17.bak, *.migrating) hold user data.
 *.sqlite.*
 .env
+# A config.toml kept next to the project (zhiqiu --config) holds keys too; the examples are versioned.
+config.toml
+config.toml.bak
 
 # labels/ keeps only the sample inputs; reports, labels and run results stay local.
 labels/**

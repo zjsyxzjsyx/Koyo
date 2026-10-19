@@ -1,6 +1,7 @@
 """Local voice input: SenseVoice-Small through sherpa-onnx on the CPU, never a cloud service.
 
-Optional (`uv sync --extra voice`, model files downloaded by hand). The workbench sends a 16 kHz mono WAV,
+Installed with the base dependencies since 9.0; the model is downloaded by voice_install (the workbench
+asks on first use, or `zhiqiu voice install`). The workbench sends a 16 kHz mono WAV,
 gets the transcript back and shows it in the input box; nothing is sent until the user does. Audio stays in
 memory and is dropped after transcribing. SenseVoice has no hotwords, so terms from the user's own knowledge
 points fix same-sounding mistakes afterwards (中续 → 中序), each shown and undoable.
@@ -75,8 +76,11 @@ def threads() -> int:
 def status(directory: Path | None = None) -> dict[str, Any]:
     """Whether voice input can be offered, without loading the model."""
     directory = directory or model_dir()
+    from . import voice_install
     if importlib.util.find_spec("sherpa_onnx") is None or importlib.util.find_spec("numpy") is None:
         reason = "not_installed"
+    elif voice_install.JOB.running:
+        reason = "downloading"
     elif not all((directory / name).is_file() for name in MODEL_FILES):
         reason = "model_missing"
     else:
@@ -89,7 +93,8 @@ def status(directory: Path | None = None) -> dict[str, Any]:
             "max_seconds": MAX_SECONDS}
 
 
-REASONS = {"not_installed": "未安装（uv sync --extra voice）", "model_missing": "未找到模型目录",
+REASONS = {"not_installed": "依赖未安装（在项目目录运行 uv sync）", "model_missing": "还没有下载语音模型",
+           "downloading": "正在下载语音模型",
            "bad_language": "ZHIQIU_VOICE_LANGUAGE 取值无效", "ok": "可用"}
 
 

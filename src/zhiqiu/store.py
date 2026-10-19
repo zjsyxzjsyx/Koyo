@@ -19,7 +19,7 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 # Review attempts a day may start; the schedule shows the days that would go over it.
 DAILY_REVIEW_LIMIT = 3
 LLM_FAILURE_CHARS = 20_000
@@ -615,6 +615,18 @@ class Store:
                     if column not in {row["name"] for row in self.db.execute("PRAGMA table_info(llm_calls)")}:
                         self.db.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {kind}")
                 self.db.execute("PRAGMA user_version=23")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 24:
+            with self.transaction():
+                # Request fields an endpoint refused (stream, tools, thinking...): sent no more from then on.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS endpoint_capabilities (
+                    endpoint TEXT NOT NULL, model TEXT NOT NULL, feature TEXT NOT NULL,
+                    supported INTEGER NOT NULL, evidence TEXT NOT NULL DEFAULT '', detected_at TEXT NOT NULL,
+                    PRIMARY KEY(endpoint, model, feature))""")
+                # A path asked for in a conversation: allowed once, added as a root, or refused.
+                for column in ("grant", "root_path"):
+                    if column not in {row["name"] for row in self.db.execute("PRAGMA table_info(approval_requests)")}:
+                        self.db.execute(f'ALTER TABLE approval_requests ADD COLUMN "{column}" TEXT')
+                self.db.execute("PRAGMA user_version=24")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -960,6 +972,31 @@ class Store:
 
     # ----- approval requests: one row each time a tool asks the user, whatever interface answers -----
 
+    # ----- endpoint capabilities -----------------------------------------------------------------
+
+    def refused_features(self, endpoint: str, model: str) -> set[str]:
+        return {row["feature"] for row in self.db.execute(
+            "SELECT feature FROM endpoint_capabilities WHERE endpoint=? AND model=? AND supported=0", (endpoint, model))}
+
+    def record_refused_feature(self, endpoint: str, model: str, feature: str, evidence: str) -> None:
+        with self.transaction():
+            self.db.execute("""INSERT INTO endpoint_capabilities(endpoint,model,feature,supported,evidence,detected_at)
+                VALUES(?,?,?,0,?,?) ON CONFLICT(endpoint,model,feature) DO UPDATE SET supported=0,
+                evidence=excluded.evidence, detected_at=excluded.detected_at""",
+                (endpoint, model, feature, redact(evidence)[:500], self._ts()))
+
+    def capabilities(self, endpoint: str | None = None, model: str | None = None) -> list[dict[str, Any]]:
+        where, args = "", ()
+        if endpoint is not None and model is not None:
+            where, args = " WHERE endpoint=? AND model=?", (endpoint, model)
+        return [dict(row) for row in self.db.execute(
+            f"SELECT * FROM endpoint_capabilities{where} ORDER BY endpoint, model, feature", args)]
+
+    def clear_capabilities(self, endpoint: str, model: str) -> int:
+        with self.transaction():
+            return self.db.execute("DELETE FROM endpoint_capabilities WHERE endpoint=? AND model=?",
+                                   (endpoint, model)).rowcount
+
     def open_approval(self, tool: str, permission: str, title: str, summary: Any,
                       conversation_id: str | None) -> str:
         request_id = new_id()
@@ -972,11 +1009,13 @@ class Store:
                  tracing.now_ns(), self._ts()))
         return request_id
 
-    def decide_approval(self, request_id: str, approved: bool, via: str) -> None:
+    def decide_approval(self, request_id: str, approved: bool, via: str, *, grant: str | None = None,
+                        root_path: str | None = None) -> None:
+        """grant: for a path asked for in a conversation, once / root (added as a root) / denied."""
         with self.transaction():
-            self.db.execute("""UPDATE approval_requests SET status=?,decided_via=?,decided_at_ns=?
+            self.db.execute("""UPDATE approval_requests SET status=?,decided_via=?,decided_at_ns=?,"grant"=?,root_path=?
                 WHERE id=? AND status='pending'""", ("approved" if approved else "denied", via, tracing.now_ns(),
-                                                     request_id))
+                                                     grant, root_path, request_id))
 
     def cancel_approval(self, request_id: str) -> None:
         """The prompt went away unanswered (interrupted, or the interface closed)."""
@@ -1003,7 +1042,7 @@ class Store:
     def roots(self, kind: str) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM file_roots WHERE kind=? ORDER BY added_at,rowid", (kind,)).fetchall()
 
-    def add_root(self, kind: str, path: str, files: int, truncated: bool) -> None:
+    def add_root(self, kind: str, path: str, files: int, truncated: bool, via: str = "web") -> None:
         if kind not in ROOT_KINDS:
             raise ValueError(f"unknown root kind: {kind}")
         with self.transaction():
@@ -1012,7 +1051,7 @@ class Store:
             self.db.execute("INSERT INTO file_roots VALUES(?,?,?,?,?)", (kind, path, files, int(truncated), self._ts()))
             # Only the path and a file count: never the names or contents of what it holds.
             self._event(None, None, "RootsChanged", {"action": "add", "kind": kind, "path": path, "files": files,
-                                                     "truncated": bool(truncated), "via": "web"})
+                                                     "truncated": bool(truncated), "via": via})
 
     def remove_root(self, kind: str, path: str) -> None:
         with self.transaction():
@@ -1587,7 +1626,8 @@ class Store:
                   "answer_segments", "review_revisions", "fsrs_cycles", "fsrs_logs", "review_tasks",
                   "attempt_tasks", "notes", "consents", "receipts", "events", "llm_calls",
                   "search_calls", "tool_calls", "metrics", "conversations", "conversation_messages", "chat_summaries",
-                  "spans", "llm_failures", "llm_contents", "approval_requests", "file_roots")
+                  "spans", "llm_failures", "llm_contents", "approval_requests", "file_roots",
+                  "endpoint_capabilities")
         return {table: [dict(r) for r in self.db.execute(f"SELECT * FROM {table}")] for table in tables}
 
     def forget(self, kp_id: str) -> None:

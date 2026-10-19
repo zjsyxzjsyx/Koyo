@@ -170,9 +170,13 @@ def approvals_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) 
             problem = "等待超过 30 分钟仍未取消"
         elif row["status"] in ("approved", "denied") and call is None:
             problem = "已回答却没有关联的工具调用"
-        elif row["status"] == "approved" and (call["confirmed"] != 1 or call["approval_source"] != "user"):
+        # A file outside the roots is granted inside the read itself (9.0), not at the confirmation gate,
+        # so its call carries no confirmation; a refusal still must not have read anything.
+        elif (row["status"] == "approved" and row["permission"] != "read_path"
+              and (call["confirmed"] != 1 or call["approval_source"] != "user")):
             problem = f"批准了，调用却记为 confirmed={call['confirmed']}、approval_source={call['approval_source']}"
-        elif row["status"] == "denied" and (call["confirmed"] != 0 or call["status"] == "ok"):
+        elif row["status"] == "denied" and (call["status"] == "ok" or (
+                row["permission"] != "read_path" and call["confirmed"] != 0)):
             problem = f"拒绝了，调用却记为 confirmed={call['confirmed']}、status={call['status']}"
         elif row["status"] == "cancelled" and call is not None and call["status"] == "ok":
             problem = "已取消，调用却执行了"

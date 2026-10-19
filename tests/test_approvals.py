@@ -226,7 +226,7 @@ def test_v18_database_gains_approval_columns_with_backup(tmp_path):
     store.db.execute("PRAGMA user_version=18")
     store.close()
     reopened = Store(path, FixedClock(date(2026, 10, 15)))
-    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
+    assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 24
     assert (tmp_path / "state.sqlite.pre-v19.bak").exists()
     assert reopened.get_knowledge_point("红黑树")["id"] == kp
     row = reopened.db.execute("SELECT confirmed,approval_source FROM tool_calls WHERE id='old'").fetchone()

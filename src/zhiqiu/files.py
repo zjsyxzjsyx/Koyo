@@ -8,10 +8,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from . import texttypes
 from .materials import Material, read_local
 from .tools import ToolError, ToolSpec
 
-TEXT_SUFFIXES = (".md", ".txt")
+# Notes are written only as .md or .txt; reading takes what texttypes reads (documents and code).
+TEXT_SUFFIXES = texttypes.WRITE_SUFFIXES
 ADD_ROOT_HINT = "请先在工作台“目录白名单”页（或 ZHIQIU_READ_ROOTS）中加入这个目录"
 WRITE_MAX_CHARS = 100_000
 PREVIEW_CHARS = 300
@@ -21,6 +23,16 @@ READ_FILE_PARAMS = {"type": "object", "additionalProperties": False, "required":
 WRITE_FILE_PARAMS = {"type": "object", "additionalProperties": False, "required": ["path", "content"],
                      "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 1000},
                                     "content": {"type": "string", "minLength": 1, "maxLength": WRITE_MAX_CHARS}}}
+
+
+class OutsideRoots(ToolError):
+    """A path that passed every other check but lies outside the roots: the chat may ask the user for it.
+    Without someone to ask it is the 8.0 refusal (same kind, rule and message)."""
+
+    def __init__(self, message: str, path: Path, access: str):
+        super().__init__("denied", message, rule=f"{access}_root")
+        self.path = path
+        self.access = access
 
 
 def _roots_from_env(name: str) -> list[Path]:
@@ -60,22 +72,26 @@ def read_file_spec(readable: Callable[[], Iterable[str]]) -> ToolSpec:
 
 
 def read_target(path_arg: str, roots: list[Path]) -> Path:
-    """Resolve a chat read request; it must be an existing md/txt file inside one of the read roots."""
-    if not roots:
-        raise ToolError("denied", f"还没有可读目录，对话中不能读文件；{ADD_ROOT_HINT}", rule="read_root")
+    """Resolve a chat read request; it must be an existing text file inside one of the read roots."""
     path = Path(path_arg).expanduser()
     if not path.is_absolute():
+        if not roots:
+            raise ToolError("denied", f"还没有可读目录，对话中不能读文件；{ADD_ROOT_HINT}", rule="read_root")
         path = roots[0] / path
     if ".." in path.parts:
         raise ToolError("denied", f"路径中不能含 ..：{path_arg}", rule="read_root")
-    if path.suffix.lower() not in TEXT_SUFFIXES:
-        raise ToolError("invalid_args", "只能读 .md 或 .txt 文件")
+    if not texttypes.readable(path):
+        raise ToolError("invalid_args", f"不支持的文件类型：{path.name}（可读：{texttypes.describe_readable()}）")
     for part in (path, *path.parents):
         if part.is_symlink():
             raise ToolError("denied", f"路径中含符号链接：{part}", rule="read_root")
     resolved = path.resolve()
     if not any(resolved.is_relative_to(root.resolve()) for root in roots):
-        raise ToolError("denied", f"不在可读目录白名单内：{path_arg}；{ADD_ROOT_HINT}", rule="read_root")
+        message = (f"不在可读目录白名单内：{path_arg}；{ADD_ROOT_HINT}" if roots
+                   else f"还没有可读目录，对话中不能读文件；{ADD_ROOT_HINT}")
+        if resolved.is_file():
+            raise OutsideRoots(message, resolved, "read")
+        raise ToolError("denied", message, rule="read_root")
     if not resolved.is_file():
         raise ToolError("not_found", f"文件不存在：{path_arg}")
     return resolved
@@ -92,17 +108,25 @@ def _provider(roots: Roots) -> Callable[[], list[Path]]:
     return lambda: fixed
 
 
-def read_root_file_spec(roots: Roots, on_read: Callable[[Material], None] | None = None) -> ToolSpec:
-    """Chat-time read_file: any md/txt file under the configured read roots, no per-call prompt.
+def read_root_file_spec(roots: Roots, on_read: Callable[[Material], None] | None = None,
+                        grant: Callable[[OutsideRoots], bool] | None = None) -> ToolSpec:
+    """Chat-time read_file: any text file under the configured read roots, no per-call prompt.
 
     Configuring a root is the user's consent to send its files to the model endpoint. The roots
-    are listed in the chat context each turn, so the description does not repeat them.
+    are listed in the chat context each turn, so the description does not repeat them. With `grant`,
+    a file outside them is asked for (grant raises ToolError when the user or the policy says no).
     """
     current = _provider(roots)
 
     def handler(args: dict) -> str:
         try:
-            material = read_local(read_target(args["path"], current()))[0]
+            try:
+                target = read_target(args["path"], current())
+            except OutsideRoots as exc:
+                if grant is None or not grant(exc):
+                    raise
+                target = exc.path
+            material = read_local(target)[0]
         except ValueError as exc:
             if isinstance(exc, ToolError):
                 raise
@@ -112,21 +136,29 @@ def read_root_file_spec(roots: Roots, on_read: Callable[[Material], None] | None
         return material.content
 
     def precheck(args: dict) -> None:
-        read_target(args["path"], current())
+        try:
+            read_target(args["path"], current())
+        except OutsideRoots:
+            if grant is None:
+                raise
 
-    return ToolSpec("read_file", "Read one .md or .txt file under the user's readable directories "
-                    "(listed in the context as 可读目录). Relative paths are taken from the first directory.",
+    description = ("Read one text file (notes, code or configuration) under the user's readable directories "
+                   "(listed in the context as 可读目录). Relative paths are taken from the first directory.")
+    if grant is not None:
+        description += (" An absolute path outside them may be requested too: Zhiqiu asks the user first, "
+                        "so call it directly instead of asking in words.")
+    return ToolSpec("read_file", description,
                     READ_FILE_PARAMS, "read", handler, source="zhiqiu.files", max_output_chars=20_000,
                     precheck=precheck)
 
 
 def write_target(path_arg: str, roots: list[Path]) -> Path:
     """Resolve a requested note path; it must be a md/txt file inside one of the write roots."""
-    if not roots:
-        raise ToolError("denied", "还没有可写目录，不能写文件（在工作台“目录白名单”页或 ZHIQIU_WRITE_ROOTS 中添加）",
-                        rule="write_root")
+    no_roots = "还没有可写目录，不能写文件（在工作台“目录白名单”页或 ZHIQIU_WRITE_ROOTS 中添加）"
     path = Path(path_arg).expanduser()
     if not path.is_absolute():
+        if not roots:
+            raise ToolError("denied", no_roots, rule="write_root")
         path = roots[0] / path
     if path.suffix.lower() not in TEXT_SUFFIXES:
         raise ToolError("invalid_args", "只能写 .md 或 .txt 文件")
@@ -136,23 +168,41 @@ def write_target(path_arg: str, roots: list[Path]) -> Path:
             raise ToolError("denied", f"路径中含符号链接：{part}", rule="write_root")
     resolved = path.resolve()
     if not any(resolved.is_relative_to(root.resolve()) for root in roots):
-        raise ToolError("denied", f"超出可写目录：{path_arg}", rule="write_root")
+        message = f"超出可写目录：{path_arg}" if roots else no_roots
+        if resolved.parent.is_dir() and not (resolved.exists() and not resolved.is_file()):
+            raise OutsideRoots(message, resolved, "write")
+        raise ToolError("denied", message, rule="write_root")
     if resolved.exists() and not resolved.is_file():
         raise ToolError("invalid_args", f"目标不是文件：{path_arg}")
     return resolved
 
 
-def write_file_spec(roots: Roots) -> ToolSpec:
+def write_file_spec(roots: Roots, granted: Callable[[Path], bool] | None = None) -> ToolSpec:
+    """With `granted`, a path outside the roots is written when granted(path) says the user allowed it
+    (the chat asks in its confirmation, see ChatAgent._confirm_tool)."""
     current = _provider(roots)
 
+    def target_of(args: dict) -> Path:
+        try:
+            return write_target(args["path"], current())
+        except OutsideRoots as exc:
+            if granted is None:
+                raise
+            return exc.path
+
     def describe(args: dict) -> str:
-        target = write_target(args["path"], current())
+        target = target_of(args)
         action = "覆盖（原文件先备份为 .bak）" if target.exists() else "新建"
         preview = args["content"][:PREVIEW_CHARS] + ("…" if len(args["content"]) > PREVIEW_CHARS else "")
         return f"写入文件：{target}\n操作：{action}，共 {len(args['content'])} 字\n内容预览：\n{preview}"
 
     def handler(args: dict) -> dict:
-        target = write_target(args["path"], current())
+        try:
+            target = write_target(args["path"], current())
+        except OutsideRoots as exc:
+            if granted is None or not granted(exc.path):
+                raise
+            target = exc.path
         existed = target.exists()
         if existed:
             shutil.copy2(target, target.with_name(target.name + ".bak"))
@@ -162,7 +212,7 @@ def write_file_spec(roots: Roots) -> ToolSpec:
                 "chars": len(args["content"])}
 
     def precheck(args: dict) -> None:
-        write_target(args["path"], current())
+        target_of(args)
 
     return ToolSpec("write_file", "Write a Markdown or text note (new or overwrite, never delete) under the "
                     "user's writable directories (listed in the context as 可写目录). Relative paths are placed "
@@ -182,7 +232,7 @@ _KIND_NAMES = {"read": "可读", "write": "可写"}
 _POSIX_SYSTEM = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/var", "/proc", "/sys", "/dev", "/boot", "/private",
                  "/System", "/Library", "/Applications")
 _NOTICES = {
-    "read": "其中有 {files} 个 .md/.txt 文件；添加后，对话中知秋可以读取这些文件，内容会发送到模型端点。",
+    "read": "其中有 {files} 个可读的文本文件（笔记、代码等）；添加后，对话中知秋可以读取这些文件，内容会发送到模型端点。",
     "write": "添加后，知秋可以在这个目录下新建或覆盖 .md/.txt 文件（覆盖前先备份为 .bak）；每次写入都要你批准。",
 }
 
@@ -297,13 +347,13 @@ def check_root(kind: str, raw: Any, existing: Sequence[Path | str], stored: int,
     elif files > BIG_ROOT_FILES:
         warnings.append("目录很大，建议选更具体的子目录")
     if kind == "read" and files == 0 and not truncated:
-        warnings.append("这个目录里没有 .md/.txt 文件")
+        warnings.append("这个目录里没有可读的文本文件")
     notice = _NOTICES[kind].format(files=f"至少 {files}" if truncated else files)
     return RootPreview(kind, str(resolved), text, files, truncated, samples, warnings, notice)
 
 
 def _count_texts(top: Path) -> tuple[int, bool, list[str]]:
-    """md/txt files under a directory without following links, within an entry and a time budget."""
+    """Readable text files under a directory without following links, within an entry and a time budget."""
     deadline = time.monotonic() + SCAN_SECONDS
     files, entries, samples = 0, 0, []
     for folder, dirs, names in os.walk(top, followlinks=False):
@@ -313,13 +363,61 @@ def _count_texts(top: Path) -> tuple[int, bool, list[str]]:
             entries += 1
             if entries > SCAN_MAX_ENTRIES or time.monotonic() > deadline:
                 return files, True, samples
-            if name.lower().endswith(TEXT_SUFFIXES):
+            if texttypes.readable(name):
                 files += 1
                 if len(samples) < ROOT_SAMPLES:
                     samples.append(str((Path(folder) / name).relative_to(top)))
         if entries > SCAN_MAX_ENTRIES or time.monotonic() > deadline:
             return files, True, samples
     return files, False, samples
+
+
+def zhiqiu_dirs() -> list[Path]:
+    """Zhiqiu's own data and settings: never readable or writable from a conversation."""
+    from .config import default_path
+    local = os.getenv("LOCALAPPDATA")
+    data = (Path(local) if local else Path.home() / ".local" / "share") / "zhiqiu"
+    return [_real(data), _real(default_path().parent)]
+
+
+def refused_location(path: Path, access: str, system: Sequence[Path] | None = None) -> str | None:
+    """Why a path outside the roots may not even be asked for in a conversation, or None."""
+    resolved = _real(path)
+    if any(part.startswith(".") for part in resolved.parts[1:]):
+        return "隐藏目录或文件（以 . 开头）"
+    for blocked in (system if system is not None else system_dirs()):
+        if _within(resolved, _real(blocked)):
+            return f"系统目录 {blocked}"
+    if any(_within(resolved, own) for own in zhiqiu_dirs()):
+        return "知秋自己的数据或配置目录"
+    if access == "write":
+        from .skills import skills_dir
+        if _within(resolved, _real(skills_dir())):
+            return "Skill 目录"
+    return None
+
+
+GRANT_LEVELS = 3
+
+
+def grant_folders(access: str, path: Path, existing: Sequence[Path | str], stored: int,
+                  system: Sequence[Path] | None = None) -> list[dict[str, Any]]:
+    """The folders a path asked for could add as a root: its own folder, then up to two parents, each
+    checked like the roots page does; the first that may not become a root ends the list (with why)."""
+    folders: list[dict[str, Any]] = []
+    current = _real(path).parent
+    for _ in range(GRANT_LEVELS):
+        try:
+            preview = check_root(access, str(current), existing, stored, system=system)
+        except RootRefused as exc:
+            folders.append({"path": str(current), "refused": str(exc)})
+            break
+        folders.append({"path": preview.path, "files": preview.files, "truncated": preview.truncated,
+                        "warnings": preview.warnings})
+        if current.parent == current:
+            break
+        current = current.parent
+    return folders
 
 
 def merge_roots(*groups: Iterable[Path | str]) -> list[Path]:

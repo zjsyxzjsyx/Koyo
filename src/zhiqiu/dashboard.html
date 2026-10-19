@@ -86,6 +86,7 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--soft); }
 .chain .c.last { border-color: var(--accent); color: var(--accent); }
 .chain .sep { color: var(--ink3); }
 .filters { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.acard select[data-grant-root] { font: inherit; font-size: 12.5px; max-width: 100%; width: 100%; margin-top: 4px; padding: 3px 6px; border: 1px solid var(--line2); border-radius: 6px; background: var(--panel); color: var(--ink); }
 .filters input, .filters select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 9px; }
 .filters input { flex: 1; min-width: 160px; }
 .minibar { position: relative; height: 6px; background: var(--soft); border-radius: 3px; min-width: 80px; }
@@ -368,6 +369,7 @@ const WB = {on: meta("zhiqiu-mode") === "workbench", token: meta("zhiqiu-token")
 if (WB.on) VIEWS.chat = "对话";
 const DEFAULT_VIEW = WB.on ? "chat" : "live";
 const APPROVAL = {pending: ["running", "待审批"], approved: ["ok", "已批准"], denied: ["warn", "已拒绝"], cancelled: ["interrupted", "已取消"]};
+const GRANT = {once: "只允许这一次", root: "已加入白名单", denied: "拒绝"};
 const VIA = {terminal: "终端", web: "网页"};
 
 const S = {view: "live", arg: null, days: 7, currency: "", trees: null, selected: null, collapsed: new Set(), timer: null, llm: {}, states: false};
@@ -440,6 +442,8 @@ function setHead(title, sub = "", act = "") {
 document.addEventListener("click", (event) => {
   const respond = event.target.closest("[data-respond]");
   if (respond) { chatRespond(respond); return; }
+  const vinstall = event.target.closest("[data-vinstall]");
+  if (vinstall) { if (vinstall.dataset.vinstall === "go") voiceInstall(); else voiceHint(""); return; }
   const vundo = event.target.closest("[data-vundo],[data-vraw]");
   if (vundo) { voiceUndo(vundo); return; }
   const dgtext = event.target.closest("[data-dgtext]");
@@ -839,7 +843,7 @@ async function viewApprovals() {
     d.approvals.map((a) => { const [cls, label] = APPROVAL[a.status] || ["", a.status];
       return `<tr><td class="faint" ${nw}>${clock(a.created_at_ns)}</td><td class="mono" ${nw}>${esc(a.tool)}<div class="faint" style="font-size:11px">${esc(a.permission || "")}</div></td>
       <td style="max-width:0;width:100%"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.title)}">${esc(a.title)}</div></td>
-      <td ${nw}>${pill(cls, label)}</td><td ${nw}>${esc(VIA[a.decided_via] || "—")}</td><td class="num" ${nw}>${a.wait_ms == null ? "—" : ms(a.wait_ms)}</td>
+      <td ${nw}>${pill(cls, label)}${a.grant ? `<div class="faint" style="font-size:11px">${esc(GRANT[a.grant] || a.grant)}</div>` : ""}</td><td ${nw}>${esc(VIA[a.decided_via] || "—")}</td><td class="num" ${nw}>${a.wait_ms == null ? "—" : ms(a.wait_ms)}</td>
       <td ${nw}>${a.trace_id ? `<a class="lnk" data-trace="${esc(a.trace_id)}">trace →</a>` : ""}</td></tr>` + approvalAnswer(a, here[a.id]); }).join("") +
     "</tbody></table>" : `<div class="empty">这段时间没有需要审批的动作。策略自动放行的调用不在这里，见 Trace 中的“策略放行”。</div>`}</div>
     <div class="err" id="apperr" style="color:var(--bad);font-size:12.5px;margin-top:6px"></div>
@@ -983,7 +987,7 @@ function rootRows(kind, items) {
   return items.map((r) => {
     const src = r.source === "env" ? `<span class="src" title="在 .env 中修改">环境变量</span>`
       : `<span class="src wb">工作台添加 · ${esc((r.added_at || "").slice(5, 10))}</span>`;
-    const count = r.files == null ? "" : `添加时 ${r.truncated ? "至少 " : ""}${num(r.files)} 个 .md/.txt 文件`;
+    const count = r.files == null ? "" : `添加时 ${r.truncated ? "至少 " : ""}${num(r.files)} 个文本文件`;
     const gone = r.exists ? "" : `<span style="color:var(--bad)">目录不存在</span>`;
     const remove = r.source === "workbench" ? `<button class="btn danger" data-root-remove="${esc(kind)}" data-path="${esc(r.path)}">移除</button>` : "";
     return `<div class="rrow"><div class="rp">${esc(r.path)}</div>${remove}<div class="rm">${src}${[count, gone].filter(Boolean).join(" · ")}</div></div>`;
@@ -1007,7 +1011,7 @@ async function viewRoots() {
     <div class="rlist">${rootRows(kind, d[kind])}</div>
     <div class="addline"><input id="root-in-${kind}" placeholder="粘贴绝对路径，例如 D:\\notes\\算法" autocomplete="off" spellcheck="false"><button class="btn" data-root-preview="${kind}">预览</button></div>
     <div class="pvbox">${rootPreview(kind)}</div><div class="err">${esc(ROOTS.msg[kind] || "")}</div></div>`;
-  $("#view").innerHTML = section("read", "对话中知秋可以读取这些目录里的 .md/.txt 文件，读到的内容会发送到模型端点。") +
+  $("#view").innerHTML = section("read", "对话中知秋可以读取这些目录里的笔记、代码等文本文件，读到的内容会发送到模型端点。") +
     section("write", "知秋可以在这些目录里新建或覆盖 .md/.txt 笔记。每次写入仍需你批准；审批策略不能把写文件设为自动。") +
     `<div class="hint">改动在两轮对话之间生效，不用重启。环境变量（ZHIQIU_READ_ROOTS / ZHIQIU_WRITE_ROOTS）里的目录只能在 .env 中修改。每次改动都记一条审计事件（只记路径和文件数）。知秋自己没有任何办法改动这份名单。工作台最多添加 ${num(d.limits.max)} 个可读目录和 ${num(d.limits.max)} 个可写目录。</div>`;
 }
@@ -1204,7 +1208,21 @@ function chatNote(text, error = false) {
   chatAppend(`<div class="note${error ? " err" : ""}">${esc(text)}</div>`);
 }
 
+function grantCard(e) {
+  const ok = (e.folders || []).filter((f) => !f.refused);
+  const refused = (e.folders || []).find((f) => f.refused);
+  const pick = ok.length ? `<select data-grant-root>${ok.map((f) => `<option value="${esc(f.path)}">${esc(f.path)}（${f.truncated ? "至少 " : ""}${num(f.files)} 个文本文件）</option>`).join("")}</select>`
+    : `<span class="faint">${esc(refused ? refused.refused : "没有可以加入白名单的目录")}</span>`;
+  const button = (value, label, cls) => `<button class="btn ${cls}" data-respond="${esc(e.request_id)}" data-grant-value="${value}"${value === "root" && !ok.length ? " disabled" : ""}>${label}</button>`;
+  return `<div class="acard" data-card="${esc(e.request_id)}" data-grant="1"><div class="head">${icon("guard", "k-guard")}知秋想${e.access === "write" ? "写入" : "读取"}白名单外的文件</div>
+    <div class="path mono">${esc(e.path)}</div><div class="faint">文件内容会发送到模型端点 ${esc(e.endpoint || "")}</div>
+    ${e.preview ? `<pre class="code">${esc(e.preview)}</pre>` : ""}
+    <div style="margin:6px 0">加入白名单的目录：<br>${pick}</div>
+    <div class="acts">${button("once", "只允许这一次", "primary")}${button("root", "允许并加入白名单", "")}${button("denied", "拒绝", "danger")}</div></div>`;
+}
+
 function promptCard(e) {
+  if (e.kind === "grant") return grantCard(e);
   const buttons = (yes, no) => `<div class="acts"><button class="btn primary" data-respond="${esc(e.request_id)}" data-value="true">${yes}</button>
     <button class="btn danger" data-respond="${esc(e.request_id)}" data-value="false">${no}</button></div>`;
   if (e.kind === "approval") {
@@ -1219,13 +1237,15 @@ function promptCard(e) {
 
 function resolveCard(e) {
   const card = document.querySelector(`[data-card="${CSS.escape(e.request_id)}"]`);
-  const kind = card ? (card.classList.contains("acard") ? (card.querySelector(".k-guard") ? "approval" : "confirm") : "ask") : null;
+  const kind = card ? (card.dataset.grant ? "grant" : card.classList.contains("acard") ? (card.querySelector(".k-guard") ? "approval" : "confirm") : "ask") : null;
   const stopped = {stopped: "已停止", timeout: "超时未回答，已停止"}[e.reason];
   if (card && kind !== "ask") {
     card.classList.add("done");
     card.querySelector(".acts")?.remove();
+    card.querySelector("[data-grant-root]")?.setAttribute("disabled", "");
     const where = e.origin === "approvals" ? "审批页" : "网页";
-    const label = stopped || (kind === "approval" ? (e.value ? `已批准（${where}）` : `已拒绝（${where}）`) : (e.value ? "是" : "否"));
+    const granted = typeof e.value === "string" ? (e.value === "once" ? "只允许这一次" : e.value.startsWith("root:") ? `已加入白名单：${e.value.slice(5)}` : "已拒绝") : "";
+    const label = stopped || (kind === "grant" ? granted : kind === "approval" ? (e.value ? `已批准（${where}）` : `已拒绝（${where}）`) : (e.value ? "是" : "否"));
     card.insertAdjacentHTML("beforeend", `<div class="result">${esc(label)} · ${clock(e.at_ns)}</div>`);
   } else if (stopped) {
     chatNote(stopped);
@@ -1346,14 +1366,58 @@ function sectionHtml(text, d, dtext) {
 }
 
 // ----- voice input: hold the mic, release, the local transcript lands in the box; nothing is sent by itself -----
-const V = {available: false, max: 60, reason: "", rec: null, voiced: false, voiceId: null, seg: null};
+const V = {available: false, max: 60, reason: "", rec: null, voiced: false, voiceId: null, seg: null,
+           installable: false, auto: "ask", install: null};
 const VOICE_MARK = `<span class="vmark" title="语音转写，发送前已确认">${icon("mic")}语音</span>`;
 function voiceState(v) {
   V.available = !!(v && v.available);
   V.max = (v && v.max_seconds) || 60;
   V.reason = (v && v.reason_text) || "";
+  V.installable = !!(v && v.installable);
+  V.auto = (v && v.auto_download) || "ask";
+  if (v && v.install && !(V.install && V.install.stage === "done" && v.install.stage !== "done")) V.install = v.install;
   const mic = $("#mic");
-  if (mic) mic.hidden = !V.available;
+  // Without the model the microphone stays: pressing it offers to download the model (9.0).
+  if (mic) mic.hidden = !(V.available || V.installable);
+}
+const INSTALL_STAGES = {download: "下载", verify: "校验", extract: "解压"};
+function voiceInstallText(s) {
+  if (!s) return "";
+  if (s.stage === "download") {
+    const pct = s.total ? Math.floor(s.done * 100 / s.total) : 0;
+    return `<span class="dot live"></span>正在下载语音模型 ${(s.done / 1e6).toFixed(1)} / ${(s.total / 1e6).toFixed(0)} MB（${pct}%）`;
+  }
+  if (INSTALL_STAGES[s.stage]) return `<span class="dot live"></span>正在${INSTALL_STAGES[s.stage]}语音模型…`;
+  return "";
+}
+function voiceOffer() {
+  const s = V.install;
+  if (s && INSTALL_STAGES[s.stage]) { voiceHint(voiceInstallText(s)); return; }
+  if (!V.installable) { voiceHint(esc(V.reason || "语音输入不可用"), true); return; }
+  if (V.auto === "always") { voiceInstall(); return; }
+  const where = s ? `从 ${esc(s.source)} 下载约 ${num(s.size_mb)} MB 到 <span class="mono">${esc(s.target)}</span>` : "下载约 163 MB";
+  voiceHint(`语音模型还没下载：将${where}，只下载公开的模型文件，不上传任何内容。
+    <button class="btn primary" data-vinstall="go">下载</button> <button class="btn" data-vinstall="cancel">取消</button>`);
+}
+async function voiceInstall() {
+  voiceHint(`<span class="dot live"></span>开始下载语音模型…`);
+  try {
+    await post("/api/voice/install", {});
+  } catch (e) {
+    voiceHint(`没有开始下载：${esc(e.message)}`, true);
+  }
+}
+function voiceInstallEvent(e) {
+  V.install = {...(V.install || {}), ...e};
+  if (e.stage === "done") {
+    V.available = true;
+    voiceHint("语音模型已就绪：按住麦克风说话。");
+    chatTick(true).catch(() => {});
+  } else if (e.stage === "error") {
+    voiceHint(`${esc(e.error || "下载失败")} <button class="btn" data-vinstall="go">重试</button>`, true);
+  } else {
+    voiceHint(voiceInstallText(e));
+  }
 }
 function voiceHint(html, error = false) {
   const hint = $("#vhint");
@@ -1377,7 +1441,8 @@ function encodeWav(samples) {
   return new Blob([buffer], {type: "audio/wav"});
 }
 async function micStart(event) {
-  if (V.rec || !V.available) return;
+  if (V.rec) return;
+  if (!V.available) { event.preventDefault(); voiceOffer(); return; }
   event.preventDefault();
   const mic = $("#mic");
   mic.setPointerCapture?.(event.pointerId);
@@ -1505,7 +1570,7 @@ function chatDraft(e) {
 function chatEvent(e) {
   // A stage's reply is still arriving; anything said or asked next means it is done.
   if (e.kind === "progress") { C.progress = e; chatProgress(); return; }
-  if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
+  if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, grant: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
   if (e.kind === "delta" || e.kind === "stream_reset") { chatDraft(e); return; }
   if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}${e.input_source === "voice" ? VOICE_MARK : ""}</div>`);
   else if (e.kind === "say" && e.stream_id && draftNode(e.stream_id, false)) {
@@ -1538,10 +1603,11 @@ function chatEvent(e) {
         box.dataset.centred = "1";
       });
     }
-  } else if (e.kind in {ask: 1, confirm: 1, approval: 1}) {
+  } else if (e.kind in {ask: 1, confirm: 1, approval: 1, grant: 1}) {
     chatAppend(promptCard(e));
     if (e.kind === "ask") C.ask = e.request_id;
   } else if (e.kind === "resolved") resolveCard(e);
+  else if (e.kind === "voice_install") voiceInstallEvent(e);
   else if (e.kind === "status") chatNote(e.text);
   else if (e.kind === "error") chatNote(e.text, true);
 }
@@ -1721,11 +1787,13 @@ async function chatPanel() {
   const goal = g ? `<div class="big">${esc(MODE[g.mode] || g.mode)}</div>
     ${g.goal ? `<div>${esc(g.goal)}</div>` : `<div class="faint">没有进行中的流程</div>`}${g.step && g.step !== g.mode ? `<div class="faint">步骤：${esc(MODE[g.step] || g.step)}</div>` : ""}` : `<span class="faint">没有对话</span>`;
   const c = d.context;
-  const context = `<dl class="kv"><dt>可读</dt><dd>${list(c.read_roots, "未配置，不能读文件")}</dd><dt>可写</dt><dd>${list(c.write_roots, "未配置，不能写文件")}</dd>
+  const outside = c.path_grants ? "；其他位置的文件会先请你授权" : "";
+  const context = `<dl class="kv"><dt>可读</dt><dd>${list(c.read_roots, c.path_grants ? `未配置${outside}` : "未配置，不能读文件")}</dd><dt>可写</dt><dd>${list(c.write_roots, c.path_grants ? `未配置${outside}` : "未配置，不能写文件")}</dd>
     <dt></dt><dd><a class="lnk" data-view="roots">管理目录 →</a></dd>
     <dt>记忆</dt><dd>${num(c.memories)} 条（本段对话开始时的快照）</dd><dt>摘要</dt><dd>${c.summarized ? "较早的对话已摘要" : "无"}</dd>
     <dt>联网</dt><dd>${c.network ? "可用" : "已关闭（--offline）"}</dd>
-    ${d.voice ? `<dt>语音</dt><dd>${d.voice.available ? "可用：按住麦克风说话，本地识别" : `<span class="faint">${esc(d.voice.reason_text)}</span>`}</dd>` : ""}
+    ${c.tools === false ? `<dt>工具</dt><dd class="warnc">端点不支持工具调用：本段对话只用纯文本回答</dd>` : ""}
+    ${d.voice ? `<dt>语音</dt><dd>${d.voice.available ? "可用：按住麦克风说话，本地识别" : voiceInstallText(d.voice.install) || `<span class="faint">${esc(d.voice.reason_text)}${d.voice.installable ? "：点麦克风即可下载" : ""}</span>`}</dd>` : ""}
     ${d.skills ? `<dt>Skill</dt><dd>${num(d.skills.count)} 个可用：${d.skills.names.map((s) => esc(s.title)).join("、")}${d.skills.errors.length ? `<details><summary class="warnc">${num(d.skills.errors.length)} 个用户 Skill 有错误</summary>${d.skills.errors.map((e) => `<div class="path">${esc(e)}</div>`).join("")}</details>` : ""}</dd>` : ""}</dl>`;
   const running = d.running.length ? d.running.map((run) => {
     const last = run.chain.at(-1);
@@ -1735,10 +1803,10 @@ async function chatPanel() {
   }).join("") : `<span class="faint">${d.pending ? "等待你回答" : "空闲"}</span>`;
   const r = d.risk;
   const risk = `<div>${esc(r.policy_text || "—")}</div>
-    ${r.pending.length ? r.pending.map((p) => `<div class="li"><span class="dot live"></span><span>${p.kind === "approval" ? `待批准 <span class="mono">${esc(p.tool)}</span>` : esc(p.text)}</span></div>`).join("") : ""}
+    ${r.pending.length ? r.pending.map((p) => `<div class="li"><span class="dot live"></span><span>${p.kind === "approval" || p.kind === "grant" ? `待批准 <span class="mono">${esc(p.tool)}</span>` : esc(p.text)}</span></div>`).join("") : ""}
     ${r.recent.length ? `<div class="faint" style="margin-top:6px">最近的审批</div>` + r.recent.map((a) => {
       const [cls, label] = APPROVAL[a.status] || ["", a.status];
-      return `<div class="li">${pill(cls, label)}<span class="mono">${esc(a.tool)}</span><span class="faint" style="margin-left:auto">${clock(a.created_at_ns).slice(-8)}</span></div>`;
+      return `<div class="li">${pill(cls, label)}<span class="mono">${esc(a.tool)}</span>${a.grant ? `<span class="faint">${esc(GRANT[a.grant] || a.grant)}</span>` : ""}<span class="faint" style="margin-left:auto">${clock(a.created_at_ns).slice(-8)}</span></div>`;
     }).join("") : `<div class="faint" style="margin-top:4px">本段对话还没有询问过你</div>`}`;
   const res = d.result;
   const result = (res ? `${res.total != null ? `<div class="big">${res.total}<span class="faint" style="font-size:12px"> / 100</span></div>` : ""}
@@ -1921,8 +1989,10 @@ async function chatSend() {
 async function chatRespond(button) {
   const card = button.closest(".acard");
   card?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  const grant = button.dataset.grantValue;
+  const value = grant ? (grant === "root" ? `root:${card.querySelector("[data-grant-root]").value}` : grant) : button.dataset.value === "true";
   try {
-    await post("/api/chat/respond", {request_id: button.dataset.respond, value: button.dataset.value === "true"});
+    await post("/api/chat/respond", {request_id: button.dataset.respond, value});
   } catch (e) {
     chatNote(`回答失败：${e.message}`, true);
     card?.querySelectorAll("button").forEach((b) => { b.disabled = false; });

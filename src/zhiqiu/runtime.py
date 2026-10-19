@@ -8,9 +8,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import guardrails, lessons, tracing
+from . import guardrails, lessons, pricing, tracing
 from .context import ContextBudgetError, ContextManager, ContextTask, TEMPLATE_VERSION
-from .materials import Material, consent_hash, read_local
+from .materials import Material, Scan, check_total, consent_hash, scan_local
 from .memory import LessonSummaryBudgetError
 from .model import Model, ModelContextOverflowError, accepts
 from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calculate, question_shape
@@ -404,8 +404,9 @@ class LearningRuntime:
         if notion_pages and not self.tools.get("notion_page"):
             raise ValueError("读取 Notion 页面需要 ZHIQIU_NOTION_TOKEN")
         can_gather = not offline and not force_local and bool(self._gather_tools())
-        materials = (read_local(path, allow_empty=bool(urls or notion_pages) or can_gather)
-                     if path is not None else [])
+        scan = (scan_local(path, allow_empty=bool(urls or notion_pages) or can_gather)
+                if path is not None else Scan([]))
+        materials = scan.materials
         # One confirmation covers everything this preparation may send out, before any request.
         remote = [f"经 Exa 获取网页正文：{url}" for url in urls]
         remote += [f"经 Notion API 读取页面：{page}" for page in notion_pages]
@@ -419,7 +420,34 @@ class LearningRuntime:
                     servers.setdefault(spec.source[4:], []).append(name.split("__", 1)[-1])
             remote.extend(f"本地资料不足时，可调用外部 MCP 服务 {server} 的工具：{'、'.join(tools)}"
                           for server, tools in servers.items())
-        return Outbound(materials, remote, self.model.endpoint)
+        return Outbound(materials, remote + self._scale(scan), self.model.endpoint)
+
+    def _scale(self, scan: Scan) -> list[str]:
+        """What reading the local material costs, for the consent text: the split into parts when it is
+        too large for one request, the input price when prices are set, and the files left out.
+        Depends only on the files and the settings, so the same files give the same lines."""
+        size = sum(len(item.content.encode("utf-8")) for item in scan.materials)
+        lines = []
+        try:
+            limit = self.context._input_limit()
+        except ValueError:
+            limit = None
+        if limit and size > limit:
+            # The assessment splits material too large for one request; each part is one call, then one combine.
+            segments = -(-size // max(1, int(limit * 0.8)))
+            lines.append(f"资料超出一次请求的上限，预计分约 {segments} 段检查，约 {segments + 2} 次模型调用")
+        table = pricing.prices()
+        if table and size:
+            # Input only, sent about twice (assessment and lesson); UTF-8 bytes / 3 approximates tokens.
+            cost = size / 3 * 2 * table["input"] / 1_000_000
+            lines.append(f"预计输入花费约 {pricing.currency()}{cost:.2f}（不含输出）")
+        if scan.skipped:
+            reasons: dict[str, int] = {}
+            for _, reason in scan.skipped:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            lines.append(f"已跳过 {len(scan.skipped)} 个文件（不发送）："
+                         + "、".join(f"{reason} {count} 个" for reason, count in sorted(reasons.items())))
+        return lines
 
     def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
                 offline: bool = False, force_web: bool = False, force_local: bool = False,
@@ -435,8 +463,7 @@ class LearningRuntime:
             materials.extend(self.executor.run("fetch_url", {"url": url}, fetch_scope).value)
         for page in notion_pages:
             materials.extend(self.executor.run("notion_page", {"page": page}, fetch_scope).value)
-        if sum(len(item.content) for item in materials) > 100_000:
-            raise ValueError("本地、网页与 Notion 资料总文本超过 100,000 字符；请指定更小的范围")
+        check_total(materials, "本地、网页与 Notion 资料")
         self.skills.refresh()
         assessment, teaching_sources = self._assess_materials(point, materials)
         if force_web or (not assessment["sufficient"] and not force_local):

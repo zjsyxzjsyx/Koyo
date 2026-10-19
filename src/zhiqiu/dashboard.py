@@ -220,7 +220,7 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
         summaries = db.execute("SELECT COUNT(*) FROM chat_summaries WHERE conversation_id=?",
                                (conversation_id,)).fetchone()[0]
         running = [run for run in traces.live(db) if run["chain"][0].get("conversation_id") == conversation_id]
-        approvals = [dict(item) for item in db.execute("""SELECT tool,status,decided_via,title,created_at_ns
+        approvals = [dict(item) for item in db.execute("""SELECT tool,status,decided_via,title,created_at_ns,"grant",root_path
             FROM approval_requests WHERE conversation_id=? ORDER BY created_at_ns DESC LIMIT 5""", (conversation_id,))]
         result = _latest_result(db, conversation_id)
         verification = _conversation_contracts(db, conversation_id)
@@ -233,7 +233,8 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
                  "active_kind": row["active_kind"], "active_id": row["active_id"]} if row else None,
         "context": {"read_roots": context.get("read_roots", []), "write_roots": context.get("write_roots", []),
                     "memories": len(json.loads(row["memory_snapshot_json"] or "[]")) if row else 0,
-                    "summarized": summaries > 0, "network": not context.get("offline", False)},
+                    "summarized": summaries > 0, "network": not context.get("offline", False),
+                    "tools": context.get("tools", True), "path_grants": context.get("path_grants", False)},
         "running": [{"trace_id": run["trace_id"], "chain": run["chain"], "elapsed_ms": run["elapsed_ms"],
                      "llm_calls": run["llm_calls"]} for run in running],
         "risk": {"policy": context.get("policy"), "policy_text": context.get("policy_text", ""),
@@ -252,10 +253,14 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
 
 
 def _voice_state() -> dict[str, Any]:
-    from . import voice
+    from . import voice, voice_install
     state = voice.status()
+    mode = voice_install.auto_download()
     return {"available": state["available"], "reason": state["reason"], "reason_text": voice.REASONS[state["reason"]],
-            "max_seconds": state["max_seconds"]}
+            "max_seconds": state["max_seconds"], "auto_download": mode,
+            # Missing model, deps in place: the microphone offers to download it (unless never).
+            "installable": state["reason"] in ("model_missing", "downloading") and mode != "never",
+            "install": {**voice_install.JOB.snapshot(), **voice_install.describe()}}
 
 
 def _latest_result(db: sqlite3.Connection, conversation_id: str | None) -> dict[str, Any] | None:
@@ -462,6 +467,11 @@ class DashboardServer:
         from fastapi.concurrency import run_in_threadpool
         await run_in_threadpool(record_refusal, self.db_path, f"{request.method} {request.url.path}：{reason}")
 
+    def reset_transcriber(self) -> None:
+        """A model installed while running: the next transcription loads it."""
+        with self._voice_lock:
+            self._transcriber = None
+
     def transcriber(self) -> Any:
         from .voice import Transcriber
         with self._voice_lock:
@@ -483,6 +493,27 @@ class DashboardServer:
 
 
 # ----- workbench writes (run on a worker thread of the server; each returns status and JSON) -----
+
+def voice_install(server: DashboardServer) -> tuple[int, dict[str, Any]]:
+    """Start downloading the voice model in the background; progress goes out as voice_install events."""
+    from . import voice, voice_install as installer
+    state = voice.status()
+    if state["reason"] == "ok":
+        return HTTPStatus.CONFLICT, {"error": "语音模型已经装好了"}
+    if state["reason"] == "not_installed":
+        return HTTPStatus.SERVICE_UNAVAILABLE, {"error": voice.REASONS["not_installed"]}
+    if installer.auto_download() == "never":
+        return HTTPStatus.BAD_REQUEST, {"error": f"配置为不自动下载（voice.auto_download = never）；请手动下载 {voice.MODEL_URL}"}
+
+    def changed(snapshot: dict[str, Any]) -> None:
+        if snapshot["stage"] == "done":
+            server.reset_transcriber()
+        server.workbench.io.emit("voice_install", **snapshot)
+
+    if not installer.JOB.start(changed):
+        return HTTPStatus.CONFLICT, {"error": "已经在下载语音模型了"}
+    return HTTPStatus.ACCEPTED, {"started": True, **installer.describe()}
+
 
 def transcribe(server: DashboardServer, audio: bytes) -> tuple[int, dict[str, Any]]:
     """Speech to text, on a server thread: a quiz waiting for its answer is exactly when it is needed,

@@ -183,6 +183,13 @@ def _workbench_routes(app: FastAPI, server: Any, query: Callable[[Request], dict
         body = await json_body(request, server, data.MAX_BODY)
         return body if isinstance(body, Response) else _parse(model, body)
 
+    @app.post("/api/voice/install")
+    async def voice_install(request: Request) -> Response:
+        body = await json_body(request, server, data.MAX_BODY)
+        if isinstance(body, Response):
+            return body
+        return json_response(*await run_in_threadpool(data.voice_install, server))
+
     @app.post("/api/chat/input")
     async def chat_input(request: Request) -> Response:
         item = await body_of(request, ChatInput)

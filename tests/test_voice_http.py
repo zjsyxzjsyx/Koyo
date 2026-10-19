@@ -69,10 +69,12 @@ def test_without_the_model_transcribe_is_unavailable(served, monkeypatch):
     monkeypatch.setattr(voice, "status", lambda directory=None: {
         "available": False, "reason": "not_installed", "model": "x", "language": "auto", "max_seconds": 60})
     status, data = transcribe(server, wav_bytes())
-    assert status == 503 and data["reason"] == "not_installed" and "uv sync --extra voice" in data["error"]
+    assert status == 503 and data["reason"] == "not_installed" and "uv sync" in data["error"]
     state = call(server, "/api/chat/state")[1]["voice"]
-    assert state == {"available": False, "reason": "not_installed", "reason_text": "未安装（uv sync --extra voice）",
-                     "max_seconds": 60}
+    # 9.0: the dependencies come with uv sync; without them nothing can be downloaded either.
+    assert {key: state[key] for key in ("available", "reason", "reason_text", "max_seconds", "installable")} == {
+        "available": False, "reason": "not_installed", "reason_text": "依赖未安装（在项目目录运行 uv sync）",
+        "max_seconds": 60, "installable": False}
 
 
 def test_the_worklet_is_served_and_allowed_by_the_page_policy(served):

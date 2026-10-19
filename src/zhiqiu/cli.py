@@ -12,11 +12,12 @@ import click
 import httpx
 import typer
 
+from . import config as user_config
 from . import contracts, gate, metrics, regressions, traces, tracing
 from .conversations import Conversations
 from .flows import FlowInterrupted, resume_lesson, resume_target, run_lesson, run_quiz, short_id, show_outcome
 from .notion import NotionReader
-from .diagnostics import check_capacity, check_model
+from .diagnostics import check_capabilities, check_capacity, check_model
 from .files import read_roots_from_env, write_roots_from_env
 from .local_env import load_local_env
 from .memory import MemoryService
@@ -37,6 +38,8 @@ failures_app = typer.Typer(help="失败分类与沉淀为回归样例")
 app.add_typer(failures_app, name="failures")
 voice_app = typer.Typer(help="本地语音输入（SenseVoice + sherpa-onnx，可选依赖）的自检与评估")
 app.add_typer(voice_app, name="voice")
+config_app = typer.Typer(help="用户配置文件 config.toml：生成、查看来源")
+app.add_typer(config_app, name="config")
 
 
 # Observation commands print only what was asked for (often JSON), never the status preamble.
@@ -44,7 +47,21 @@ app.add_typer(voice_app, name="voice")
 OBSERVE_COMMANDS = ("traces", "metrics", "check", "failures", "dashboard", "gate", "web", "skills", "voice")
 
 
+def load_settings(config_file: Path | None = None) -> Path | None:
+    """Process environment, then the project .env, then config.toml; each fills only what is unset."""
+    user_config.mark_environment()
+    user_config.mark(load_local_env() or (), ".env")
+    return user_config.load(config_file)
+
+
+# The database the desktop shortcut used before 9.0 (scripts/zhiqiu-web.ps1); `config init` offers to keep it.
+PROJECT_DB = Path(__file__).resolve().parents[2] / "state.sqlite"
+
+
 def default_db() -> Path:
+    configured = os.getenv("ZHIQIU_DB", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     root = os.getenv("LOCALAPPDATA")
     return (Path(root) if root else Path.home() / ".local" / "share") / "zhiqiu" / "state.sqlite"
 
@@ -81,7 +98,7 @@ def _mcp_tools(store: Store) -> list[Any]:
 
 
 def runtime(store: Store, mcp: bool = False) -> LearningRuntime:
-    model = OpenAICompatibleModel(audit=store.record_llm_call)
+    model = OpenAICompatibleModel(audit=store.record_llm_call, capabilities=store)
     exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
     notion = NotionReader() if os.getenv("ZHIQIU_NOTION_TOKEN") else None
     return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [], notion)
@@ -114,13 +131,19 @@ def show_status(store: Store, full: bool = False) -> None:
 
 @app.callback(invoke_without_command=True)
 def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", help="SQLite 状态文件")] = None,
-         offline: Annotated[bool, typer.Option("--offline", help="禁止 Web 搜索")] = False) -> None:
+         offline: Annotated[bool, typer.Option("--offline", help="禁止 Web 搜索")] = False,
+         config_file: Annotated[Path | None, typer.Option("--config", help="配置文件 config.toml（默认位置见 zhiqiu config path）")] = None) -> None:
+    if ctx.invoked_subcommand == "config":
+        # The config commands load (or repair) the settings themselves and never open the database.
+        ctx.obj = {"config": config_file}
+        return
     try:
-        load_local_env()
+        load_settings(config_file)
+        offline = offline or user_config.env_flag("ZHIQIU_OFFLINE", False)
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from None
     if ctx.invoked_subcommand in ("check-model", "gate"):
-        ctx.obj = {"offline": offline}
+        ctx.obj = {"offline": offline, "db": db}
         return
     if ctx.invoked_subcommand == "mcp":
         # The MCP server opens the database read-only and must keep stdout for the protocol.
@@ -130,6 +153,10 @@ def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", hel
     # Spans left running by a process that died are closed as interrupted.
     tracing.reconcile(store)
     ctx.obj = {"store": store, "offline": offline}
+    if ctx.invoked_subcommand is None and os.getenv("ZHIQIU_DEFAULT_COMMAND", "").strip() == "web":
+        # config.toml asked for the workbench: `zhiqiu` alone opens it with the [web] defaults.
+        ctx.invoke(web_command, ctx)
+        return
     if ctx.invoked_subcommand is None:
         show_status(store, True)
         # Scripts and pipes keep the old behaviour: status only, no conversation.
@@ -157,10 +184,16 @@ def mcp_command(ctx: typer.Context) -> None:
 
 
 @app.command("check-model")
-def check_model_command(calibrate: Annotated[bool, typer.Option("--calibrate", help="用公开合成文本对配置的输入预算取样校准")] = False,
+def check_model_command(ctx: typer.Context,
+                        calibrate: Annotated[bool, typer.Option("--calibrate", help="用公开合成文本对配置的输入预算取样校准")] = False,
                         boundary: Annotated[bool, typer.Option("--boundary", help="向已配置模型发送至多 6 MB 合成文本，检查接近输入上限的请求")] = False,
-                        capacity: Annotated[bool, typer.Option("--capacity", help="生成满额输出预留，并在接近输入上限时再生成一次，验证窗口；消耗接近整个窗口的 token")] = False) -> None:
+                        capacity: Annotated[bool, typer.Option("--capacity", help="生成满额输出预留，并在接近输入上限时再生成一次，验证窗口；消耗接近整个窗口的 token")] = False,
+                        capabilities: Annotated[bool, typer.Option("--capabilities", help="重新探测端点支持哪些可选字段（流式、工具调用等，约 4 次很小的调用），结果记进数据库")] = False,
+                        reset: Annotated[bool, typer.Option("--reset", help="清除记住的端点不支持的字段（不调用模型）")] = False) -> None:
     """用本地环境变量检查真实模型 API 与预算，不读取学习资料。"""
+    if capabilities or reset:
+        _endpoint_capabilities(ctx, probe=capabilities)
+        return
     missing = [f"ZHIQIU_LLM_{name}" for name in ("BASE_URL", "MODEL", "API_KEY")
                if not os.getenv(f"ZHIQIU_LLM_{name}")]
     if missing:
@@ -192,6 +225,26 @@ def check_model_command(calibrate: Annotated[bool, typer.Option("--calibrate", h
             return {key: redact(item) for key, item in value.items()}
         return value
     typer.echo(json.dumps(redact(result), ensure_ascii=False, indent=2))
+
+
+def _endpoint_capabilities(ctx: typer.Context, probe: bool) -> None:
+    store = Store(ctx.obj.get("db") or default_db())
+    try:
+        try:
+            model = OpenAICompatibleModel(audit=store.record_llm_call, capabilities=store)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
+        cleared = store.clear_capabilities(model.endpoint, model.model)
+        if not probe:
+            typer.echo(json.dumps({"endpoint": model.endpoint, "model": model.model, "cleared": cleared},
+                                  ensure_ascii=False))
+            return
+        result = check_capabilities(model)
+        result["cleared_before_probe"] = cleared
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2).replace(model.api_key, "[REDACTED]"))
+    finally:
+        store.close()
 
 
 def _memory_point(store: Store, point: str | None) -> str | None:
@@ -319,11 +372,41 @@ class TerminalIO:
         typer.echo(spec.describe(args) if spec.describe else f"工具 {spec.name}：{args}")
         return self.confirm("允许执行吗？")
 
+    def grant_path(self, offer: dict[str, Any], request_id: str | None = None) -> str:
+        """y: only this time; a: also add a folder as a root; anything else (or Ctrl+C): no."""
+        self._clear_progress()
+        verb = "读取" if offer["access"] == "read" else "写入"
+        typer.echo(f"知秋想{verb}白名单外的文件：{offer['path']}")
+        typer.echo(f"文件内容会发送到模型端点 {offer.get('endpoint', '')}")
+        if offer.get("preview"):
+            typer.echo(offer["preview"])
+        folders = [item for item in offer["folders"] if not item.get("refused")]
+        refused = next((item["refused"] for item in offer["folders"] if item.get("refused")), "")
+        if not folders and refused:
+            typer.echo(typer.style(f"（不能加入白名单：{refused}）", dim=True))
+        try:
+            answer = input("y 只允许这一次" + (" / a 允许并加入白名单" if folders else "") + " / n 拒绝：").strip().lower()
+            if answer == "y":
+                return "once"
+            if answer != "a" or not folders:
+                return "denied"
+            if len(folders) == 1:
+                return "root:" + folders[0]["path"]
+            for number, item in enumerate(folders, 1):
+                typer.echo(f"  {number}. {item['path']}（{'至少 ' if item['truncated'] else ''}{item['files']} 个文本文件）")
+            pick = input("加入哪个目录（回车选 1）：").strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("")
+            return "denied"
+        if pick.isdigit() and 1 <= int(pick) <= len(folders):
+            return "root:" + folders[int(pick) - 1]["path"]
+        return "denied"
+
 
 @app.command()
 @traced("learn")
 def learn(ctx: typer.Context, point: Annotated[str, typer.Argument(help="一个具体知识点")],
-          source: Annotated[Path | None, typer.Option("--from", help="本地 md/txt 文件或目录")] = None,
+          source: Annotated[Path | None, typer.Option("--from", help="本地资料文件或目录（笔记、代码、配置等文本文件）")] = None,
           urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复；经 Exa 获取正文")] = None,
           notion_pages: Annotated[list[str] | None, typer.Option("--notion", help="Notion 页面链接或 ID，可重复")] = None) -> None:
     """阅读本地、网页或 Notion 资料，确认学完后开始首次自测。"""
@@ -635,6 +718,130 @@ def list_skills(ctx: typer.Context, as_json: Annotated[bool, typer.Option("--jso
         typer.echo(f"错误：{error}")
 
 
+def _config_loaded(ctx: typer.Context) -> Path | None:
+    try:
+        return load_settings(ctx.obj["config"])
+    except (OSError, ValueError) as exc:
+        typer.echo(f"配置有误：{exc}", err=True)
+        raise typer.Exit(1) from None
+
+
+def _shown(value: Any) -> str:
+    if value is None or value == []:
+        return "—"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "、".join(map(str, value))
+    return str(value)
+
+
+@config_app.command("path")
+def config_path_command(ctx: typer.Context) -> None:
+    """打印配置文件的位置（文件不一定已存在）。"""
+    typer.echo(str(user_config.config_path(ctx.obj["config"])))
+
+
+@config_app.command("show")
+def config_show(ctx: typer.Context, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    """列出每一项的实际取值与来源（环境变量、.env、config.toml 或默认）；密钥只显示末 4 位。"""
+    loaded = _config_loaded(ctx)
+    path = user_config.config_path(ctx.obj["config"])
+    rows = user_config.rows()
+    if as_json:
+        typer.echo(json.dumps({"path": str(path), "exists": loaded is not None, "settings": rows},
+                              ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"配置文件：{path}" + ("" if loaded else "（不存在，运行 zhiqiu config init 生成）"))
+    for row in rows:
+        typer.echo(f"  {row['key']:<28} {_shown(row['value'])}  ← {row['source']}")
+
+
+@config_app.command("get")
+def config_get(ctx: typer.Context, name: Annotated[str, typer.Argument(help="配置项，例如 web.port")]) -> None:
+    """输出一项的实际取值，供脚本使用；密钥不输出。"""
+    _config_loaded(ctx)
+    try:
+        value = user_config.get(name)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    typer.echo("" if value is None else _shown(value) if isinstance(value, bool) else
+               os.pathsep.join(value) if isinstance(value, list) else str(value))
+
+
+def _existing_values(path: Path) -> dict[str, Any]:
+    """Known keys of a file about to be rewritten, so `config init` keeps what the user edited by hand."""
+    try:
+        import tomllib
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return {f"{section}.{key}": value for section, table in data.items() if isinstance(table, dict)
+            for key, value in table.items() if f"{section}.{key}" in user_config.BY_NAME}
+
+
+@config_app.command("init")
+def config_init(ctx: typer.Context) -> None:
+    """交互生成 config.toml：模型端点、模型名、API Key（输入不显示）、可读目录与启动方式。"""
+    path = user_config.config_path(ctx.obj["config"])
+    if path.exists() and not typer.confirm(f"{path} 已存在，要覆盖吗？（原文件另存为 {path.name}.bak）", default=False):
+        raise typer.Exit(0)
+    values = _existing_values(path)
+    try:
+        # Values already in effect (environment, .env, the old file) are the defaults of the questions.
+        load_settings(ctx.obj["config"] if path.exists() else None)
+    except (OSError, ValueError):
+        user_config.mark_environment()
+    while True:
+        base_url = typer.prompt("模型端点（API 根路径，例如 https://api.deepseek.com/v1）",
+                                default=os.getenv("ZHIQIU_LLM_BASE_URL") or None).strip().rstrip("/")
+        if base_url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+            break
+        typer.echo("远程端点必须用 https://（本机服务可以用 http://localhost）")
+    model_name = typer.prompt("模型名", default=os.getenv("ZHIQIU_LLM_MODEL") or None).strip()
+    existing_key = os.getenv("ZHIQIU_LLM_API_KEY", "")
+    while True:
+        api_key = typer.prompt("API Key（输入不显示" + ("；直接回车沿用现有的" if existing_key else "") + "）",
+                               default="" if existing_key else None, show_default=False, hide_input=True).strip()
+        api_key = api_key or existing_key
+        if api_key:
+            break
+    roots = typer.prompt("对话中可读的笔记目录（多个用 ; 分隔，可留空）", default=os.getenv("ZHIQIU_READ_ROOTS", ""),
+                         show_default=bool(os.getenv("ZHIQIU_READ_ROOTS")))
+    read_roots = [item.strip() for item in roots.replace(os.pathsep, ";").split(";") if item.strip()]
+    for item in read_roots:
+        if not Path(item).is_dir():
+            typer.echo(f"提醒：目录不存在：{item}（仍会写入，创建后即可使用）")
+    port = typer.prompt("工作台端口", default=user_config.get("web.port"), type=int)
+    open_web = typer.confirm("以后直接运行 zhiqiu 就打开工作台吗？（否则只显示状态）", default=True)
+    open_browser = typer.confirm("启动工作台时自动打开浏览器吗？", default=True)
+    if not os.getenv("ZHIQIU_DB") and PROJECT_DB.exists() and typer.confirm(
+            f"项目目录里有数据库 {PROJECT_DB}（桌面快捷方式一直在用它），以后都用它吗？", default=True):
+        values["web.db"] = str(PROJECT_DB)
+    values.update({"model.base_url": base_url, "model.model": model_name, "model.api_key": api_key,
+                   "roots.read": read_roots, "web.port": port, "web.open": open_browser,
+                   "web.default_command": "web" if open_web else "status"})
+    backup = user_config.write(path, values)
+    typer.echo(f"已写入 {path}" + (f"（原文件另存为 {backup.name}）" if backup else ""))
+    if not user_config.restrict(path):
+        typer.echo("提醒：没能把文件权限收紧为只有当前用户可读，请自行检查。")
+    if os.getenv("ZHIQIU_LLM_API_KEY") and os.getenv("ZHIQIU_LLM_API_KEY") != api_key:
+        typer.echo("提醒：环境变量或 .env 里也设置了 API Key，它们优先于 config.toml。")
+    from . import voice
+    if voice.status()["reason"] == "model_missing" and typer.confirm(
+            "现在下载语音模型吗？（约 163 MB，以后在工作台第一次点麦克风时也可以下载）", default=False):
+        _install_voice_model(ask=False)
+    if typer.confirm("现在检查模型联通吗？（只发一小段公开合成文本，花费不到 ¥0.001）", default=False):
+        try:
+            result = check_model(OpenAICompatibleModel(base_url, model_name, api_key))
+        except Exception as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            typer.echo(f"没有联通：{type(exc).__name__}" + (f"（HTTP {status}）" if status else ""))
+        else:
+            typer.echo("联通正常。" if result.get("connection_verified") else "没有联通，请检查端点、模型名与 Key。")
+
+
 @voice_app.command("check")
 def voice_check() -> None:
     """检查依赖与模型，用模型自带的示例音频转写一次，打印文字和实时率（RTF）。"""
@@ -644,7 +851,8 @@ def voice_check() -> None:
     typer.echo(f"模型目录：{state['model']}")
     typer.echo(f"识别语言：{state['language']}；线程：{voice.threads()}")
     if not state["available"]:
-        typer.echo(f"语音输入不可用：{voice.REASONS[state['reason']]}。模型下载：{voice.MODEL_URL}", err=True)
+        hint = "运行 zhiqiu voice install 下载" if state["reason"] == "model_missing" else f"模型下载：{voice.MODEL_URL}"
+        typer.echo(f"语音输入不可用：{voice.REASONS[state['reason']]}。{hint}", err=True)
         raise typer.Exit(1)
     sample = Path(state["model"]) / "test_wavs" / "zh.wav"
     if not sample.is_file():
@@ -654,6 +862,49 @@ def voice_check() -> None:
     typer.echo(f"示例音频 {result['duration_ms'] / 1000:.1f} 秒，识别用时 {result['elapsed_ms'] / 1000:.2f} 秒"
                f"（含加载模型），RTF {result['elapsed_ms'] / max(1, result['duration_ms']):.3f}")
     typer.echo(f"识别结果：{result['raw']}")
+
+
+def _install_voice_model(ask: bool) -> bool:
+    """Download the model with a progress line; False when not wanted or not possible."""
+    from . import voice, voice_install
+    state = voice.status()
+    if state["reason"] == "not_installed":
+        typer.echo(voice.REASONS["not_installed"], err=True)
+        return False
+    if voice_install.installed():
+        typer.echo(f"语音模型已经在 {voice.model_dir()}")
+        return True
+    about = voice_install.describe()
+    if ask and not typer.confirm(f"从 {about['source']} 下载语音模型（约 {about['size_mb']} MB）到 {about['target']}？",
+                                 default=True):
+        return False
+
+    def report(stage: str, done: int, total: int) -> None:
+        if stage == "download":
+            share = f"（{done * 100 // total}%）" if total else ""
+            sys.stdout.write(f"\r下载语音模型 {done / 1_000_000:.1f} / {total / 1_000_000:.0f} MB{share}   ")
+            sys.stdout.flush()
+        elif stage == "verify":
+            typer.echo("\n校验 SHA-256…")
+        elif stage == "extract":
+            typer.echo("解压…")
+
+    try:
+        voice_install.install(report=report)
+    except voice_install.InstallError as exc:
+        typer.echo("")
+        typer.echo(f"没有装好：{exc}", err=True)
+        return False
+    typer.echo(f"语音模型已装到 {voice.model_dir()}")
+    return True
+
+
+@voice_app.command("install")
+def voice_install_command(yes: Annotated[bool, typer.Option("--yes", "-y", help="不再询问，直接下载")] = False) -> None:
+    """下载并解压语音模型（约 163 MB，校验 SHA-256，可断点续传），然后转写示例音频自检。"""
+    if not _install_voice_model(ask=not yes):
+        raise typer.Exit(1)
+    voice_check()
 
 
 @voice_app.command("eval")
@@ -748,10 +999,15 @@ def dashboard_command(ctx: typer.Context,
 
 @app.command("web")
 def web_command(ctx: typer.Context,
-                port: Annotated[int, typer.Option("--port", help="本机端口")] = 8765,
-                open_browser: Annotated[bool, typer.Option("--open", help="启动后用默认浏览器打开")] = False,
+                port: Annotated[int | None, typer.Option("--port", help="本机端口（默认取 web.port，8765）")] = None,
+                open_browser: Annotated[bool | None, typer.Option("--open/--no-open", help="启动后用默认浏览器打开（默认取 web.open）")] = None,
                 resume: Annotated[str | None, typer.Option("--resume", help="回到指定的旧对话")] = None) -> None:
     """本地网页工作台：在浏览器里对话、学习、批准动作，并查看看板（只绑定 127.0.0.1）。"""
+    try:
+        port = port if port is not None else user_config.env_int("ZHIQIU_WEB_PORT", 8765)
+        open_browser = open_browser if open_browser is not None else user_config.env_flag("ZHIQIU_WEB_OPEN", False)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
     from .agent import ChatAgent
     from .approvals import ApprovalPolicy
     from .dashboard import serve

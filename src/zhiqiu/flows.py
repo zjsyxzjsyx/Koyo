@@ -76,11 +76,27 @@ class FlowResult:
     outcome: dict[str, Any] | None = None
 
 
+# A long file list is folded: the first files by name, then counts by type.
+LISTED_FILES = 20
+FOLD_AFTER = 30
+
+
 def outbound_lines(materials: list[Material], endpoint: str, remote: list[str] | None = None) -> list[str]:
     """The consent text for one preparation: the endpoint, then each local file and remote item."""
-    return ([f"将把以下资料发送到模型端点 {endpoint}："]
-            + [f"  {material.source}" for material in materials if material.kind == "local"]
-            + [f"  {item}" for item in remote or []])
+    local = [material for material in materials if material.kind == "local"]
+    shown = local if len(local) <= FOLD_AFTER else local[:LISTED_FILES]
+    lines = [f"将把以下资料发送到模型端点 {endpoint}："] + [f"  {material.source}" for material in shown]
+    if len(shown) < len(local):
+        kinds: dict[str, int] = {}
+        for material in local[LISTED_FILES:]:
+            suffix = Path(material.source).suffix.lower() or Path(material.source).name
+            kinds[suffix] = kinds.get(suffix, 0) + 1
+        lines.append(f"  ……另有 {len(local) - len(shown)} 个文件（"
+                     + "、".join(f"{suffix} {count} 个" for suffix, count in sorted(kinds.items(), key=lambda kv: -kv[1]))
+                     + "）")
+    if len(local) > 1:
+        lines.append(f"  （合计 {len(local)} 个本地文件、约 {sum(len(m.content) for m in local):,} 字）")
+    return lines + [f"  {item}" for item in remote or []]
 
 
 def approver(io: FlowIO) -> Callable[..., bool]:

@@ -230,3 +230,36 @@ def check_capacity(model: OpenAICompatibleModel, *, timeout_seconds: float = 180
         "full output reserve and near-limit input with full output passed" if result["window_size_verified"]
         else "capacity not established")
     return result
+
+
+CAPABILITY_PROBE = [{"role": "user", "content": "请只回复一个字：好"}]
+CAPABILITY_TOOL = {"type": "function", "function": {
+    "name": "zhiqiu_probe", "description": "Synthetic probe; never called.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}
+
+
+def check_capabilities(model: OpenAICompatibleModel) -> dict[str, Any]:
+    """Which optional request fields the endpoint takes, from four or five tiny synthetic calls. The
+    adapter itself works around and records any field refused; this only provokes each one once."""
+    from urllib.parse import urlsplit
+
+    from .capabilities import FEATURES
+    model.forget_refusals()
+    probes = [("stream", dict(stream=True)),
+              ("tools", dict(tools=[CAPABILITY_TOOL], tool_choice="auto", stream=False)),
+              ("tool_choice", dict(tools=[CAPABILITY_TOOL], tool_choice="none", stream=False))]
+    if urlsplit(model.endpoint).hostname == "api.deepseek.com":
+        probes.append(("thinking", dict(thinking="disabled", stream=False)))
+    errors: dict[str, str] = {}
+    for name, options in probes:
+        try:
+            model._chat_messages(list(CAPABILITY_PROBE), max_tokens=16, timeout_seconds=30, **options)
+        except Exception as exc:
+            errors[name] = getattr(exc, "kind", None) or type(exc).__name__
+    refused = model.refused_features()
+    tested = {"stream", "stream_options", "tools", "tool_choice", "max_tokens"} | (
+        {"thinking"} if any(name == "thinking" for name, _ in probes) else set())
+    features = {feature: ("refused" if feature in refused else "supported" if feature in tested else "untested")
+                for feature in FEATURES}
+    return {"endpoint": model.endpoint, "model": model.model, "features": features,
+            "refused": sorted(refused), "probe_errors": errors}

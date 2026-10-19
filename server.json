@@ -3,7 +3,7 @@
   "name": "io.github.zjsyxzjsyx/zhiqiu",
   "title": "知秋",
   "description": "Read-only access to a local zhiqiu learning agent: due reviews, knowledge points, traces.",
-  "version": "8.0.0",
+  "version": "9.0.0",
   "repository": {
     "url": "https://github.com/zjsyxzjsyx/Koyo",
     "source": "github"
@@ -13,13 +13,13 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "zhiqiu",
-      "version": "8.0.0",
+      "version": "9.0.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "zhiqiu[mcp]==8.0.0",
+          "value": "zhiqiu[mcp]==9.0.0",
           "description": "The MCP server needs the optional mcp extra"
         }
       ],

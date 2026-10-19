@@ -1,17 +1,40 @@
 ﻿# 打开知秋网页工作台：服务没在运行就先启动（最小化的“知秋工作台服务”窗口，关掉它即停止），
 # 再用 Edge 的独立窗口打开；没有 Edge 时用默认浏览器。服务已在运行时只打开窗口。
+# 端口和数据库不传时取配置（zhiqiu config get web.port、web.db）；配置里没写数据库、项目目录里又有
+# state.sqlite 时继续用它（9.0 之前快捷方式一直用这个库）。
 param(
-    [int]$Port = 8765,
-    [string]$Db = (Join-Path (Split-Path $PSScriptRoot) 'state.sqlite')
+    [int]$Port = 0,
+    [string]$Db = ''
 )
 
 $root = Split-Path $PSScriptRoot
-$url = "http://127.0.0.1:$Port/"
 $title = '知秋工作台'
 
 function Show-Message([string]$text) {
     (New-Object -ComObject WScript.Shell).Popup($text, 0, $title, 48) | Out-Null
 }
+
+$uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
+if (-not $uv) { $uv = Join-Path $env:USERPROFILE '.local\bin\uv.exe' }
+if (-not (Test-Path $uv)) {
+    Show-Message '找不到 uv，请先安装 uv 并在项目目录运行 uv sync。'
+    exit 1
+}
+
+function Get-Setting([string]$name) {
+    Push-Location $root
+    try { return (& $uv run --no-sync zhiqiu config get $name 2>$null | Select-Object -First 1) } finally { Pop-Location }
+}
+
+if (-not $Port) {
+    $Port = [int](Get-Setting 'web.port')
+    if (-not $Port) { $Port = 8765 }
+}
+if (-not $Db) {
+    $projectDb = Join-Path $root 'state.sqlite'
+    if (-not (Get-Setting 'web.db') -and (Test-Path $projectDb)) { $Db = $projectDb }
+}
+$url = "http://127.0.0.1:$Port/"
 
 function Get-Mode {
     # workbench：工作台已在运行；dashboard：只读看板占着端口；other：别的程序；$null：没有服务。
@@ -42,13 +65,9 @@ if ($mode -eq 'other') {
     exit 1
 }
 if (-not $mode) {
-    $uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
-    if (-not $uv) { $uv = Join-Path $env:USERPROFILE '.local\bin\uv.exe' }
-    if (-not (Test-Path $uv)) {
-        Show-Message '找不到 uv，请先安装 uv 并在项目目录运行 uv sync。'
-        exit 1
-    }
-    $command = "title 知秋工作台服务（关闭本窗口即停止） & `"$uv`" run zhiqiu --db `"$Db`" web --port $Port" +
+    $dbArgument = if ($Db) { "--db `"$Db`" " } else { '' }
+    # --no-open：窗口由本脚本打开（Edge 独立窗口），不再让服务另开一个浏览器标签。
+    $command = "title 知秋工作台服务（关闭本窗口即停止） & `"$uv`" run zhiqiu $dbArgument" + "web --port $Port --no-open" +
                " || (echo. & echo 工作台没有启动，原因见上方。 & pause)"
     $server = Start-Process cmd.exe -ArgumentList '/c', $command -WorkingDirectory $root -WindowStyle Minimized -PassThru
     $deadline = (Get-Date).AddSeconds(60)

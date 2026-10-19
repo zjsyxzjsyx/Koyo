@@ -4,13 +4,21 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zhiqiu"
-version = "8.0.0"
+version = "9.0.0"
 description = "A local-first CLI learning agent with durable review tasks"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
+  # Local voice input (SenseVoice-Small via sherpa-onnx, Apache-2.0; pypinyin, MIT), in the base install since
+  # 9.0 so the workbench only has to download the model. sherpa-onnx-core is listed too: resolved from the sdist
+  # the lock misses it, and Windows then loads the system's older onnxruntime.dll instead of the one it ships.
+  "sherpa-onnx>=1.12,<2",
+  "sherpa-onnx-core>=1.12,<2",
+  "numpy>=1.26",
+  "pypinyin>=0.51,<1",
   "fsrs==6.3.2",
   "httpx>=0.27,<1",
+  "pathspec>=0.12,<1",
   "typer>=0.12,<1",
   "uvicorn>=0.30,<1",
 ]
@@ -19,10 +27,8 @@ dependencies = [
 test = ["pytest>=8,<9"]
 # Official MCP Python SDK (MIT); only needed for `zhiqiu mcp` and MCP client tools.
 mcp = ["mcp>=1.10,<2"]
-# Local voice input (SenseVoice-Small via sherpa-onnx, Apache-2.0; pypinyin, MIT); model files are downloaded by hand.
-# sherpa-onnx-core is listed too: resolved from the sdist the lock misses it, and Windows then loads the
-# system's older onnxruntime.dll instead of the one it ships.
-voice = ["sherpa-onnx>=1.12,<2", "sherpa-onnx-core>=1.12,<2", "numpy>=1.26", "pypinyin>=0.51,<1"]
+# Kept so `uv sync --extra voice` still works; the voice dependencies are in the base install since 9.0.
+voice = []
 
 [project.scripts]
 zhiqiu = "zhiqiu.cli:app"

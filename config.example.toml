@@ -1,0 +1,66 @@
+# 知秋的用户配置。环境变量和项目目录的 .env 优先于这里；zhiqiu config show 显示每一项实际从哪里来。
+# 密钥只保存在本机这个文件里，不要提交或分享。
+
+# 模型端点（OpenAI 风格的 Chat Completions）
+[model]
+base_url = ""  # API 根路径，例如 https://api.deepseek.com/v1
+model = ""  # 模型名
+api_key = ""  # 必填；也可以只写在 .env 或环境变量里
+stream = true  # 流式输出
+# window = 131072  # 上下文窗口（token），不填不做超限判断
+# output_reserve = 8192  # 输出预留，也是请求的 max_tokens
+# margin = 2048  # 余量
+# window_verified = false  # 窗口已实测（只记入审计）
+# budgets = { "deepseek-chat" = { window = 131072, output_reserve = 8192, margin = 2048 } }  # 按模型配置预算，键为模型名或“端点|模型名”
+
+# 启动：不带参数运行 zhiqiu 与 zhiqiu web 的默认值
+[web]
+port = 8765  # 工作台端口
+open = true  # 启动后打开浏览器
+db = ""  # 数据库文件；留空用 %LOCALAPPDATA%\zhiqiu\state.sqlite
+default_command = "web"  # 不带参数运行 zhiqiu 时：web 打开工作台，status 只看状态
+
+# 学习
+[learn]
+offline = false  # 禁止联网搜索，相当于每次都加 --offline
+
+# 学习资料的范围与上限
+[materials]
+max_chars = 500000  # 一次学习的资料合计字数上限
+max_file_bytes = 2000000  # 单个文件的大小上限（字节）
+max_files = 500  # 一个目录最多读多少个文件
+code_files = true  # 读代码、配置等文本文件；false 时只读 .md 和 .txt
+extra_suffixes = []  # 另外要读的扩展名，例如 [".kt", ".lua"]
+respect_gitignore = true  # 扫描目录时跳过 .gitignore 里的文件
+
+# 对话中可读、可写的目录（与工作台“目录白名单”页添加的合并）
+[roots]
+read = []  # 对话中可以直接读取的目录
+write = []  # 对话中可以写笔记的目录（每次写入仍要批准）
+skills = ""  # 自己的教学 Skill 目录；留空用 %LOCALAPPDATA%\zhiqiu\skills
+
+# 本地语音输入
+[voice]
+auto_download = "ask"  # 缺少语音模型时：ask 先问再下载，always 直接下载，never 不下载
+mirror_url = ""  # 语音模型的下载地址；留空从 GitHub 下载
+model = ""  # 语音模型目录；留空用 %LOCALAPPDATA%\zhiqiu\voice 下的默认目录
+language = "auto"  # 识别语言
+# threads = 4  # 识别用的 CPU 线程数，不填为 min(4, CPU 核数)
+
+# 其他服务
+[services]
+exa_api_key = ""  # Exa 联网搜索
+notion_token = ""  # Notion 内部集成令牌（learn --notion）
+mcp_config = ""  # 外部 MCP 工具配置文件
+approval_config = ""  # 对话审批策略文件
+
+# 花费统计：每百万 token 的价格（不填只显示 token）
+[price]
+# input = 2  # 输入
+# cached_input = 0.5  # 缓存命中的输入，不填按输入价
+# output = 8  # 输出
+currency = ""  # 金额前缀，例如 ¥ 或 $
+
+# 观测
+[trace]
+content = false  # 保存每次模型调用的请求与回复正文（脱敏、截断）

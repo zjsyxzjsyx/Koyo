@@ -5,22 +5,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .config import ENV_NAMES
 
 PROJECT_ENV = Path(__file__).resolve().parents[2] / ".env"
-ALLOWED_KEYS = {
-    "ZHIQIU_LLM_BASE_URL", "ZHIQIU_LLM_MODEL", "ZHIQIU_LLM_API_KEY",
-    "ZHIQIU_MODEL_BUDGETS", "ZHIQIU_LLM_WINDOW", "ZHIQIU_LLM_OUTPUT_RESERVE",
-    "ZHIQIU_LLM_MARGIN", "ZHIQIU_LLM_WINDOW_VERIFIED", "ZHIQIU_EXA_API_KEY",
-    "ZHIQIU_WRITE_ROOTS", "ZHIQIU_READ_ROOTS", "ZHIQIU_MCP_CONFIG", "ZHIQIU_NOTION_TOKEN",
-    "ZHIQIU_PRICE_INPUT", "ZHIQIU_PRICE_OUTPUT", "ZHIQIU_PRICE_CACHED_INPUT", "ZHIQIU_PRICE_CURRENCY",
-    "ZHIQIU_TRACE_CONTENT", "ZHIQIU_APPROVAL_CONFIG",
-}
+# Every variable config.toml can set; ZHIQIU_LONG_ANSWER_SEGMENTS stays process-only on purpose.
+ALLOWED_KEYS = frozenset(ENV_NAMES)
 
 
-def load_local_env(path: Path = PROJECT_ENV) -> None:
-    """Read a simple KEY=VALUE file; process environment has precedence."""
+def load_local_env(path: Path = PROJECT_ENV) -> list[str]:
+    """Read a simple KEY=VALUE file; process environment has precedence. Returns the names it set."""
     if not path.exists():
-        return
+        return []
     parsed: dict[str, str] = {}
     for number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = raw.strip()
@@ -37,6 +32,9 @@ def load_local_env(path: Path = PROJECT_ENV) -> None:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
         parsed[key] = value
+    loaded = []
     for key, value in parsed.items():
         if value and not os.environ.get(key):
             os.environ[key] = value
+            loaded.append(key)
+    return loaded

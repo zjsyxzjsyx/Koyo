@@ -29,11 +29,11 @@ def test_a_good_directory_is_previewed_with_its_text_files(tree):
     preview = check(tree, str(tree["notes"] / "算法"))
     assert preview.path == str((tree["notes"] / "算法").resolve()) and preview.files == 2
     assert not preview.truncated and sorted(preview.samples) == ["二叉树.md", "堆.TXT"]
-    assert preview.notice.startswith("其中有 2 个 .md/.txt 文件") and "发送到模型端点" in preview.notice
+    assert preview.notice.startswith("其中有 2 个可读的文本文件") and "发送到模型端点" in preview.notice
     assert preview.warnings == []
     write = check(tree, str(tree["notes"] / "empty"), kind="write")
     assert "每次写入都要你批准" in write.notice and write.warnings == []
-    assert "没有 .md/.txt 文件" in check(tree, str(tree["notes"] / "empty")).warnings[0]
+    assert "没有可读的文本文件" in check(tree, str(tree["notes"] / "empty")).warnings[0]
 
 
 @pytest.mark.parametrize("raw, reason", [

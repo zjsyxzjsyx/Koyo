@@ -24,7 +24,7 @@ WAIT_S = 30 * 60
 # Events kept in memory; older ones are dropped (the page reloads history from the database).
 KEEP_EVENTS = 2000
 # Kinds of prompt that wait for an answer, and the type of answer each accepts.
-PROMPTS = {"ask": str, "confirm": bool, "approval": bool}
+PROMPTS = {"ask": str, "confirm": bool, "approval": bool, "grant": str}
 # Where on the page an answer was given: the chat card, or the approvals page for a waiting approval.
 ORIGINS = ("chat", "approvals")
 # Pieces of a streamed answer are sent together: at most every this many seconds, or once this many
@@ -148,6 +148,8 @@ class WebIO:
             kind, answers = waiting
             if not isinstance(value, PROMPTS[kind]):
                 raise ValueError(f"这个提示需要{'文字' if PROMPTS[kind] is str else '是或否'}")
+            if kind == "grant" and not (value in ("once", "denied") or value.startswith("root:")):
+                raise ValueError("路径授权只能回答 once、denied 或 root:目录")
             if origin == "approvals" and kind != "approval":
                 raise ValueError("审批页只能回答工具审批")
             del self._waiting[request_id]
@@ -253,6 +255,17 @@ class WebIO:
 
     def confirm_tool(self, spec: Any, args: dict[str, Any]) -> bool:
         return self.confirm_request(spec, args, None)
+
+    def grant_path(self, offer: dict[str, Any], approval_request_id: str | None = None) -> str:
+        """A path outside the roots: the card offers once, adding one of the offered folders, or no."""
+        verb = "读取" if offer["access"] == "read" else "写入"
+        answer = self._wait("grant", tool=f"{offer['access']}_file", permission=f"{offer['access']}_path",
+                            text=f"{verb}白名单外的文件：{offer['path']}", access=offer["access"],
+                            path=offer["path"], folders=offer["folders"], preview=offer.get("preview"),
+                            endpoint=offer.get("endpoint", ""), approval_request_id=approval_request_id)
+        if answer is _STOPPED:
+            raise FlowInterrupted
+        return answer
 
     def confirm_request(self, spec: Any, args: dict[str, Any], approval_request_id: str | None) -> bool:
         """confirm_tool with the id of the approval request the agent recorded for it.
@@ -371,6 +384,7 @@ class Workbench:
                 "policy": policy.summary() if policy else None,
                 "policy_text": policy.text() if policy else ""}
             self._roots_context(agent)
+            self._tools_context(agent)
         except BaseException as exc:
             self._error = exc
             self._ready.set()
@@ -403,7 +417,9 @@ class Workbench:
                 finally:
                     # /new switches conversations; the page follows the agent.
                     self.conversation_id = agent.conversation_id
-                    self._skills_context(agent)
+                    # A folder granted in the conversation became a root during the turn.
+                    self._roots_context(agent)
+                    self._tools_context(agent)
                     with self._lock:
                         self._busy = False
                     self.io.emit("idle", conversation_id=self.conversation_id)
@@ -415,6 +431,12 @@ class Workbench:
                         "read_roots": [str(root) for root in getattr(agent, "read_roots", [])],
                         "write_roots": [str(root) for root in getattr(agent, "write_roots", [])]}
         self._skills_context(agent)
+
+    def _tools_context(self, agent: Any) -> None:
+        available = getattr(agent, "tools_available", None)
+        policy = getattr(agent, "policy", None)
+        self.context = {**self.context, "tools": available() if callable(available) else True,
+                        "path_grants": bool(policy is not None and policy.path_grants())}
 
     def _skills_context(self, agent: Any) -> None:
         """The Skills the next lesson can use and the user's broken ones, read on the worker."""

@@ -191,11 +191,14 @@ def test_stream_options_refused_once_is_retried_without_them(monkeypatch):
 
 
 def test_a_400_for_another_reason_still_reaches_the_caller(monkeypatch):
-    refused = (400, "application/json", b'{"error": {"message": "tools not supported"}}')
-    Server(monkeypatch, refused, refused, refused)
+    # 9.0: a refusal that names a field the request carried (e.g. "tools not supported") is worked
+    # around (test_capabilities.py); one about something else still fails after the streaming retries.
+    refused = (400, "application/json", b'{"error": {"message": "messages: roles must alternate"}}')
+    server = Server(monkeypatch, refused, refused, refused)
     adapter, calls = model()
     with pytest.raises(httpx.HTTPStatusError):
         adapter.tool_round(REQUEST, list(REQUEST.messages), [{"type": "function"}])
+    assert all("tools" in body for body in server.bodies)
     # The endpoint never answered without streaming either, so streaming stays on.
     assert adapter.streaming() is True and calls[0]["status"] == "error"
 

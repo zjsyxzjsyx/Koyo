@@ -1,5 +1,6 @@
 import os
 
+from zhiqiu.approvals import ApprovalPolicy
 from zhiqiu.files import FileRoots, merge_roots
 
 from test_agent import make_agent, say, tool, tool_rows
@@ -56,9 +57,11 @@ def test_roots_do_not_change_in_the_middle_of_a_turn(tmp_path):
 
 
 def test_write_file_is_offered_only_while_a_write_root_exists(tmp_path):
+    # 9.0: with path grants on (the default) write_file is offered without a root too, since a path
+    # outside the roots is asked for in the conversation; with read_path=deny it is 8.0's behaviour.
     out = tmp_path / "out"
     out.mkdir()
-    store, model, io, agent = make_agent(tmp_path, [say("好")])
+    store, model, io, agent = make_agent(tmp_path, [say("好")], policy=ApprovalPolicy({"read_path": "deny"}))
     agent.handle("你好")
     assert "write_file" not in offered(model) and "未配置，不能写文件" in agent._context()
 

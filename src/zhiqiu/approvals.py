@@ -15,11 +15,15 @@ from typing import Any, Iterable
 
 DECISIONS = ("allow", "ask", "deny")
 GOVERNED = ("network", "external_mcp", "write_file")
-DEFAULTS = {"network": "allow", "external_mcp": "ask", "write_file": "ask"}
+# Not a tool's permission class: whether the chat may ask for a path outside the read and write roots
+# (ask, the default) or refuses such paths outright as 8.0 did (deny). It can never be allow.
+PATH_GRANTS = "read_path"
+DEFAULTS = {"network": "allow", "external_mcp": "ask", "write_file": "ask", PATH_GRANTS: "ask"}
 ENV = "ZHIQIU_APPROVAL_CONFIG"
 _WRITE_ALLOW = "写文件必须由用户批准，不能配置为 allow"
+_PATH_ALLOW = "对话中读写白名单外的路径必须由用户批准，不能配置为 allow"
 _LABELS = {"allow": "自动执行", "ask": "每次需用户批准", "deny": "已禁止"}
-_CLASS_NAMES = {"network": "联网", "external_mcp": "外部 MCP", "write_file": "写文件"}
+_CLASS_NAMES = {"network": "联网", "external_mcp": "外部 MCP", "write_file": "写文件", PATH_GRANTS: "白名单外路径"}
 
 
 def _decision(value: Any, where: str) -> str:
@@ -33,11 +37,13 @@ class ApprovalPolicy:
         permissions = dict(permissions or {})
         tools = dict(tools or {})
         for name, value in permissions.items():
-            if name not in GOVERNED:
-                raise ValueError(f"审批策略的权限类别只能是 {', '.join(GOVERNED)}：{name}")
+            if name not in GOVERNED + (PATH_GRANTS,):
+                raise ValueError(f"审批策略的权限类别只能是 {', '.join(GOVERNED + (PATH_GRANTS,))}：{name}")
             _decision(value, f"permissions.{name}")
         if permissions.get("write_file") == "allow":
             raise ValueError(_WRITE_ALLOW)
+        if permissions.get(PATH_GRANTS) == "allow":
+            raise ValueError(_PATH_ALLOW)
         for name, value in tools.items():
             if not isinstance(name, str) or not name:
                 raise ValueError("审批策略的工具名不能为空")
@@ -100,12 +106,16 @@ class ApprovalPolicy:
     def summary(self) -> dict[str, Any]:
         return {"permissions": dict(self.permissions), "tools": dict(sorted(self.tools.items()))}
 
+    def path_grants(self) -> bool:
+        """Whether a path outside the roots may be asked for in the conversation."""
+        return self.permissions[PATH_GRANTS] == "ask"
+
     def describe(self, permission: str) -> str:
         return _LABELS[self.permissions[permission]]
 
     def text(self) -> str:
         """One line for the status panel, e.g. 联网：自动执行；外部 MCP：每次需用户批准；写文件：每次需用户批准."""
-        parts = [f"{_CLASS_NAMES[name]}：{_LABELS[self.permissions[name]]}" for name in GOVERNED]
+        parts = [f"{_CLASS_NAMES[name]}：{_LABELS[self.permissions[name]]}" for name in GOVERNED + (PATH_GRANTS,)]
         if self.tools:
             parts.append("单独设置：" + "、".join(f"{name}={value}" for name, value in sorted(self.tools.items())))
         return "；".join(parts)

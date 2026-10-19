@@ -22,7 +22,7 @@ from . import history as history_search
 from .approvals import ApprovalPolicy
 from .context import ContextBudgetError, ContextTask
 from .conversations import Conversations, clean_title
-from .files import ADD_ROOT_HINT, FileRoots, read_root_file_spec
+from .files import ADD_ROOT_HINT, FileRoots, OutsideRoots, grant_folders, read_root_file_spec, refused_location, write_file_spec, write_target
 from .flow import IllegalTransition
 from .flows import (MIN_PREFIX, FlowInterrupted, FlowIO, change_skill, describe_skills, outbound_lines, preapproved,
                     resolve_prefix, skills_of,
@@ -45,6 +45,8 @@ MEMORY_ITEM_CHARS = 300
 MEMORY_TOTAL_CHARS = 2000
 # Once the user allows one of these tools in a turn, its later calls in the same turn run without asking again.
 TURN_APPROVAL_PERMISSIONS = frozenset({"network"})
+# Paths outside the roots one turn may ask for; more and the user is pointed to the roots page.
+GRANTS_PER_TURN = 5
 # How the context describes network access under each approval decision for the network class.
 NETWORK_TEXT = {"allow": "可用，自动执行", "ask": "可用，每次需用户批准", "deny": "已被审批策略禁止"}
 # Unsummarized history beyond this count is summarized when no input budget is configured.
@@ -92,6 +94,17 @@ class ChatIO:
     def last_input_source(self) -> str:
         source = getattr(self.inner, "last_input_source", None)
         return source() if callable(source) else "text"
+
+    def grant_path(self, offer: dict[str, Any], request_id: str | None = None) -> str:
+        """once, root:<folder> or denied for a path outside the roots; an IO without its own card is asked
+        a yes/no question for this one time."""
+        hook = getattr(self.inner, "grant_path", None)
+        if callable(hook):
+            return hook(offer, request_id)
+        verb = "读取" if offer["access"] == "read" else "写入"
+        text = (f"知秋想{verb}白名单外的文件：{offer['path']}（内容会发送到模型端点）"
+                + (f"\n{offer['preview']}" if offer.get("preview") else "") + "\n只允许这一次吗？")
+        return "once" if self.inner.confirm(text) else "denied"
 
     def confirm_tool(self, spec: Any, args: dict[str, Any], request_id: str | None = None) -> bool:
         # An IO that shows approvals as records of their own (the web workbench) gets the request id.
@@ -208,6 +221,10 @@ class ChatAgent:
         # JSON stages (lessons, questions, grading) report how much of their reply has arrived.
         if hasattr(service, "progress") and callable(getattr(io, "progress", None)):
             service.progress = self.io.progress
+        # A request field the endpoint refused is worked around once and said here (see capabilities.py).
+        model = getattr(service, "model", None)
+        if hasattr(model, "on_notice"):
+            model.on_notice = lambda text: self.io.say(text, kind="note")
         # Private text read in this run; outgoing tool arguments may not copy it.
         self.private: list[Material] = []
         self.conversation: dict[str, Any] | None = None
@@ -223,16 +240,25 @@ class ChatAgent:
         self.on_switch: Callable[[str], None] | None = None
         # Tools the user allowed during the current turn (see TURN_APPROVAL_PERMISSIONS).
         self._approved: set[str] = set()
+        # Paths outside the roots the user allowed once in this turn, and how often this turn asked.
+        self._granted: set[tuple[str, Path]] = set()
+        self._grants = 0
+        # Folders never offered as roots; tests set [] because their files live under %TEMP% (in AppData).
+        self.blocked_dirs: Sequence[Path] | None = None
         self.registry = ToolRegistry()
         for spec in service.tools.specs():
             if spec.name in ("read_file", "notion_page") or not spec.in_loops:
                 continue
+            if spec.name == "write_file":
+                # The chat's own: the merged roots, and a path outside them once the user allowed it.
+                spec = write_file_spec(lambda: self.write_roots, granted=self._write_granted)
             if spec.permission in ("network", "external_mcp"):
                 # Every outgoing call passes the gate, where _confirm_tool applies the approval policy.
                 spec = replace(spec, requires_confirmation=True, describe=_describe_external(spec))
             self.registry.register(spec)
         self.refresh_roots()
-        self.registry.register(read_root_file_spec(lambda: self.read_roots, self.private.append))
+        self.registry.register(read_root_file_spec(lambda: self.read_roots, self.private.append,
+                                                   grant=self._grant_read))
         if history_search.available(store.db):
             self.registry.register(history_search.tool_spec(
                 store, lambda: self.conversation["id"] if self.conversation else None))
@@ -468,13 +494,23 @@ class ChatAgent:
         status = conversation["status_snapshot_json"]
         snapshot = json.loads(conversation["memory_snapshot_json"])
         memory = "\n".join(f"- {item['key']}: {item['content']}" for item in snapshot) or "（无）"
-        readable = "；".join(str(root) for root in self.read_roots) or "（未配置，不能读文件）"
+        grants = self.policy.path_grants()
+        outside = "；白名单外的文件可用绝对路径申请，由用户授权" if grants else ""
+        readable = ("；".join(str(root) for root in self.read_roots) + (f"（{outside[1:]}）" if outside else "")
+                    if self.read_roots else f"（未配置{outside or '，不能读文件'}）")
         writable = ("；".join(str(root) for root in self.write_roots) + f"（写入{self.policy.describe('write_file')}）"
-                    if self.write_roots else "（未配置，不能写文件）")
+                    if self.write_roots else f"（未配置{outside or '，不能写文件'}）")
         network = "已关闭（--offline）" if self.offline else NETWORK_TEXT[self.policy.permissions["network"]]
+        tools = "" if self.tools_available() else ("\n工具：本模型端点不支持工具调用，本段对话不能联网、读写文件、"
+                                                   "查学习状态或提议学习；用户需要学习时请他输入 /learn 知识点")
         return (f"今天：{today}\n学习状态（快照，最新状态请调用 zhiqiu_status）：{status}\n"
                 f"偏好与人设记忆（本段对话开始时的快照）：\n{memory}\n"
-                f"可读目录：{readable}\n可写目录：{writable}\n联网：{network}")
+                f"可读目录：{readable}\n可写目录：{writable}\n联网：{network}{tools}")
+
+    def tools_available(self) -> bool:
+        """False once the endpoint refused tool declarations (remembered by the adapter)."""
+        refused = getattr(getattr(self.service, "model", None), "refused_features", None)
+        return not (callable(refused) and "tools" in refused())
 
     def _history(self, summary: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Messages after the latest summary, without the current input; oldest first."""
@@ -492,9 +528,85 @@ class ChatAgent:
                 items.append({"id": message["id"], "seq": message["seq"], "role": "assistant", "content": note})
         return items
 
+    # ----- paths outside the roots, asked for in the conversation (9.0) ----------------------------
+
+    def _key(self, access: str, path: Path) -> tuple[str, Path]:
+        from .files import _key
+        return access, _key(path)
+
+    def _grant_allowed(self, exc: OutsideRoots) -> None:
+        """Raise the refusal when this path may not be asked for: policy, location or the turn's limit."""
+        reason = refused_location(exc.path, exc.access, self.blocked_dirs)
+        if reason:
+            raise ToolError("denied", f"{exc}（{reason}，不能在对话中申请）", rule=exc.rule)
+        if not self.policy.path_grants():
+            raise exc
+        if self._key(exc.access, exc.path) not in self._granted and self._grants >= GRANTS_PER_TURN:
+            raise ToolError("denied", f"本轮已经申请了 {GRANTS_PER_TURN} 次白名单外的路径；"
+                            f"请在“目录白名单”页添加目录后再问", rule=exc.rule)
+
+    def _grant_read(self, exc: OutsideRoots) -> bool:
+        self._grant_allowed(exc)
+        if self._key("read", exc.path) in self._granted:
+            return True
+        if self._ask_grant("read", exc.path) == "denied":
+            raise ToolError("denied", f"用户没有允许读取：{exc.path}", rule="confirmation_denied")
+        return True
+
+    def _write_granted(self, path: Path) -> bool:
+        return self._key("write", path) in self._granted
+
+    def _ask_grant(self, access: str, path: Path, preview: str | None = None) -> str:
+        """Ask once for a path outside the roots: once, root (its folder becomes a root) or denied."""
+        self._grants += 1
+        roots = self.read_roots if access == "read" else self.write_roots
+        folders = grant_folders(access, path, roots, len(self.store.roots(access)), self.blocked_dirs)
+        offered = [folder["path"] for folder in folders if not folder.get("refused")]
+        verb = "读取" if access == "read" else "写入"
+        request = self.store.open_approval(f"{access}_file", f"{access}_path", f"{verb}白名单外的文件：{path}",
+                                           {"path": str(path), "folders": offered}, self.conversation_id)
+        self._asked = request
+        offer = {"access": access, "path": str(path), "folders": folders, "preview": preview,
+                 "endpoint": getattr(self.service.model, "endpoint", "")}
+        try:
+            answer = self.io.grant_path(offer, request)
+        except BaseException as exc:
+            self.store.cancel_approval(request)
+            if not isinstance(exc, Exception):
+                self._asked = None
+            raise
+        choice, folder = "denied", None
+        if answer == "once":
+            choice = "once"
+        elif isinstance(answer, str) and answer.startswith("root:") and answer[5:] in offered:
+            choice, folder = "root", answer[5:]
+        self.store.decide_approval(request, choice != "denied", self.io.channel, grant=choice, root_path=folder)
+        if choice == "once":
+            self._granted.add(self._key(access, path))
+        elif choice == "root":
+            item = next(item for item in folders if item["path"] == folder)
+            self.store.add_root(access, folder, item["files"], item["truncated"], via="chat_grant")
+            self.refresh_roots()
+            self.io.say(f"已把 {folder} 加入{'可读' if access == 'read' else '可写'}目录，以后不用再问"
+                        "（可在“目录白名单”页移除）。", kind="note")
+        return choice
+
+    def _outside_write(self, args: dict[str, Any]) -> OutsideRoots | None:
+        try:
+            write_target(args["path"], self.write_roots)
+        except OutsideRoots as exc:
+            return exc
+        except ToolError:
+            return None
+        return None
+
     def _confirm_tool(self, spec: ToolSpec, args: dict[str, Any]) -> Approval:
         """Apply the approval policy. When asking, one approval covers the same network tool for the
         rest of the turn. Each call is still shown, and the answer says who let it through."""
+        if spec.name == "write_file" and (outside := self._outside_write(args)) is not None:
+            # One card for both: the path outside the roots and what would be written there.
+            preview = spec.describe(args) if spec.describe else None
+            return Approval(self._ask_grant("write", outside.path, preview) != "denied", "user")
         if self.policy.decide(spec) == "allow":
             self.io.say((spec.describe(args) if spec.describe else f"工具 {spec.name}") + "（自动）", kind="tool")
             return Approval(True, "policy")
@@ -530,10 +642,14 @@ class ChatAgent:
     def _check(self, spec: ToolSpec, args: dict[str, Any]) -> None:
         if self.policy.decide(spec) == "deny":
             raise ToolError("denied", f"审批策略禁止使用 {spec.name}", rule="policy_denied")
+        if spec.name == "write_file" and (outside := self._outside_write(args)) is not None:
+            self._grant_allowed(outside)
         if spec.permission in ("network", "external_mcp"):
             query_leak_check(list(self.private))(spec, args)
 
     def _tool_names(self) -> list[str]:
+        if not self.tools_available():
+            return []
         names = []
         for name in self.registry.names():
             spec = self.registry.get(name)
@@ -541,7 +657,7 @@ class ChatAgent:
                 continue
             if self.policy.decide(spec) == "deny":
                 continue
-            if name == "write_file" and not getattr(self.service, "write_roots", self.write_roots):
+            if name == "write_file" and not self.write_roots and not self.policy.path_grants():
                 continue
             names.append(name)
         return names
@@ -554,6 +670,8 @@ class ChatAgent:
         summary, history = self._summary_and_history(context, text)
         request = self.service.context.build_chat(context, history, text, self.conversation_id, summary)
         self._approved = set()
+        self._granted = set()
+        self._grants = 0
         self._asked = None
         scope = ToolScope(CHAT_PERMISSIONS, confirm=self._confirm_tool, check=self._check,
                           conversation_id=self.conversation_id)

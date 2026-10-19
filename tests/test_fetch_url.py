@@ -94,7 +94,8 @@ def test_offline_or_unconfigured_url_learning_stops_before_approval(tmp_path):
     assert asked == [] and fetcher.urls == []
 
 
-def test_local_and_web_text_share_the_total_limit(tmp_path):
+def test_local_and_web_text_share_the_total_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZHIQIU_MATERIALS_MAX_CHARS", "100000")
     fetcher = FakeFetcher({PAGE: "页" * 15_000})
     store, service, path, _ = url_service(tmp_path, fetcher=fetcher)
     path.write_text("本" * 90_000, encoding="utf-8")

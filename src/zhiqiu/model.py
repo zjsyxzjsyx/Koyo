@@ -10,13 +10,39 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import capabilities
 from .context import ModelRequest, _model_budget, _optional_int
+from .redact import redact
 from .search import WEB_SEARCH_DESCRIPTION, WEB_SEARCH_PARAMS
 from .tools import function_schema
 
 
 class ModelContextOverflowError(ValueError):
     """The provider rejected a request because it exceeded its context window."""
+
+
+class ModelServiceError(httpx.HTTPStatusError):
+    """An HTTP error from the model service, with a Chinese explanation as its message and a kind
+    (auth, forbidden, not_found, payment, rate_limited, server_error, bad_request) for the trace."""
+
+    def __init__(self, kind: str, message: str, exc: httpx.HTTPStatusError):
+        super().__init__(message, request=exc.request, response=exc.response)
+        self.kind = kind
+
+
+class ModelTimeoutError(httpx.TimeoutException):
+    kind = "timeout"
+
+
+class ModelConnectError(httpx.ConnectError):
+    kind = "connect"
+
+
+def _request_of(exc: httpx.HTTPError) -> httpx.Request | None:
+    try:
+        return exc.request
+    except RuntimeError:
+        return None
 
 
 def _is_context_overflow(response: httpx.Response) -> bool:
@@ -72,7 +98,8 @@ class OpenAICompatibleModel:
     """Small Chat Completions adapter. Model output is always untrusted input."""
 
     def __init__(self, base_url: str | None = None, model: str | None = None, api_key: str | None = None,
-                 audit: Callable[[dict[str, Any]], None] | None = None):
+                 audit: Callable[[dict[str, Any]], None] | None = None,
+                 capabilities: "capabilities.Memory | None" = None):
         self.endpoint = (base_url or os.getenv("ZHIQIU_LLM_BASE_URL", "")).rstrip("/")
         self.model = model or os.getenv("ZHIQIU_LLM_MODEL", "")
         self.api_key = api_key or os.getenv("ZHIQIU_LLM_API_KEY", "")
@@ -91,7 +118,15 @@ class OpenAICompatibleModel:
         self.kp_id: str | None = None
         self.attempt_id: str | None = None
         self.point = ""
-        self._stream_refused = False
+        # Fields this endpoint refused: remembered in the database when the error named them
+        # (`capabilities`), otherwise only for this process.
+        self.capabilities = capabilities
+        self._refused_here: set[str] = set()
+        self._known: set[str] | None = None
+        self._noticed: set[str] = set()
+        # Told once per field when a refusal is first worked around (the chat shows it as a note).
+        self.on_notice: Callable[[str], None] | None = None
+        self.notices: list[str] = []
 
     def set_trace_context(self, kp_id: str | None, attempt_id: str | None) -> None:
         self.kp_id = kp_id
@@ -101,10 +136,68 @@ class OpenAICompatibleModel:
         return self._chat_messages([{"role": "system", "content": instruction},
                                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], tools)
 
+    def refused_features(self) -> set[str]:
+        """Request fields this endpoint and model do not take (see capabilities.FEATURES)."""
+        if self._known is None:
+            self._known = set()
+            if self.capabilities is not None:
+                try:
+                    self._known = set(self.capabilities.refused_features(self.endpoint, self.model))
+                except Exception:
+                    self._known = set()
+        return self._known | self._refused_here
+
+    def forget_refusals(self) -> None:
+        self._known = None
+        self._refused_here.clear()
+        self._noticed.clear()
+
     def streaming(self) -> bool:
-        """Whether calls ask for a streamed reply: on unless ZHIQIU_LLM_STREAM=0, or until the endpoint
-        refused it once in this process."""
-        return os.getenv("ZHIQIU_LLM_STREAM", "1").strip() != "0" and not self._stream_refused
+        """Whether calls ask for a streamed reply: on unless ZHIQIU_LLM_STREAM=0, or the endpoint
+        refused streaming (remembered, or earlier in this process)."""
+        return os.getenv("ZHIQIU_LLM_STREAM", "1").strip() != "0" and "stream" not in self.refused_features()
+
+    def _learn(self, feature: str, named: bool, evidence: str) -> None:
+        """A refused field worked around with a successful retry: not sent again."""
+        self._refused_here.add(feature)
+        remembered = False
+        if named and self.capabilities is not None:
+            try:
+                self.capabilities.record_refused_feature(self.endpoint, self.model, feature, evidence)
+                remembered = True
+            except Exception:
+                remembered = False
+            if remembered and hasattr(self.capabilities, "record_event"):
+                from . import guardrails
+                guardrails.record(self.capabilities, "endpoint_feature_disabled", "blocked",
+                                  f"{self.model} 不支持 {feature}", feature=feature, model=self.model)
+        if feature in self._noticed:
+            return
+        self._noticed.add(feature)
+        text = capabilities.notice(feature, remembered)
+        self.notices.append(text)
+        if self.on_notice is not None:
+            try:
+                self.on_notice(text)
+            except Exception:
+                pass
+
+    def _service_error(self, exc: httpx.HTTPStatusError) -> ModelServiceError:
+        status = exc.response.status_code
+        known = {
+            401: ("auth", "API Key 无效或已过期（HTTP 401），请检查 model.api_key"),
+            402: ("payment", "账户余额不足（HTTP 402）"),
+            403: ("forbidden", "没有权限使用这个模型或端点（HTTP 403），请检查 Key 的权限和模型名"),
+            404: ("not_found", f"端点地址或模型名不对（HTTP 404）：{self.endpoint}/chat/completions，模型 {self.model}"),
+            429: ("rate_limited", "请求太频繁或额度用完（HTTP 429），请稍后再试或检查账户余额"),
+        }
+        if status in known:
+            kind, message = known[status]
+        elif status >= 500:
+            kind, message = "server_error", f"模型服务出错（HTTP {status}），请稍后再试"
+        else:
+            kind, message = "bad_request", f"模型服务拒绝了请求（HTTP {status}）：{redact(exc.response.text[:200])}"
+        return ModelServiceError(kind, message, exc)
 
     def _chat_messages(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                        request: ModelRequest | None = None, max_tokens: int | None = None,
@@ -126,6 +219,10 @@ class OpenAICompatibleModel:
         # Taken before the stream fields: the same request has the same fingerprint streamed or not.
         fingerprint = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         stream = self.streaming() if stream is None else stream
+        refused = self.refused_features()
+        for feature in ("tools", "tool_choice", "thinking", "max_tokens"):
+            if feature in refused and feature in body:
+                body = capabilities.without(body, feature)
         started_at_ns = time.time_ns()
         began = time.perf_counter()
         reply = _Reply(began, on_delta)
@@ -137,11 +234,19 @@ class OpenAICompatibleModel:
         try:
             # Streamed, the read timeout is the longest gap between two pieces, as it was the longest
             # wait for the whole reply before; the connection itself gets 10 seconds.
-            with httpx.Client(timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds))) as client:
-                if stream:
-                    self._post_streamed(client, body, reply)
-                else:
-                    reply.whole(self._post(client, body))
+            try:
+                with httpx.Client(timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds))) as client:
+                    self._send(client, body, stream, reply)
+            except httpx.TimeoutException as exc:
+                if isinstance(exc, ModelTimeoutError):
+                    raise
+                raise ModelTimeoutError(f"模型服务响应超时（连接 10 秒、两段之间 {timeout_seconds:g} 秒），"
+                                        "请检查网络或稍后再试", request=_request_of(exc)) from exc
+            except httpx.ConnectError as exc:
+                if isinstance(exc, ModelConnectError):
+                    raise
+                raise ModelConnectError(f"连不上模型端点 {self.endpoint}：请检查网络、代理和 base_url",
+                                        request=_request_of(exc)) from exc
             usage = reply.usage
             self.last_usage = usage
             if request and type(usage.get("prompt_tokens")) is int and usage["prompt_tokens"] > 0:
@@ -152,7 +257,7 @@ class OpenAICompatibleModel:
             status = error_kind = "context_overflow"
             raise
         except BaseException as exc:
-            error_kind = type(exc).__name__
+            error_kind = getattr(exc, "kind", None) or type(exc).__name__
             raise
         finally:
             usage = reply.usage
@@ -182,31 +287,47 @@ class OpenAICompatibleModel:
         _raise_for_status(response)
         return response.json()
 
-    def _post_streamed(self, client: httpx.Client, body: dict[str, Any], reply: "_Reply") -> None:
-        """Ask for a stream. An endpoint that refuses `stream_options` gets the request once more without
-        it; one that refuses streaming altogether is asked without streaming, and if that works it is
-        not asked to stream again in this process."""
-        attempts = [{**body, "stream": True, "stream_options": {"include_usage": True}}, {**body, "stream": True}]
-        for streamed in attempts:
-            with client.stream("POST", f"{self.endpoint}/chat/completions", json=streamed,
-                               headers={"Authorization": f"Bearer {self.api_key}"}) as response:
-                if response.status_code == 400:
-                    response.read()
-                    if _is_context_overflow(response):
-                        _raise_for_status(response)
+    def _send(self, client: httpx.Client, body: dict[str, Any], stream: bool, reply: "_Reply") -> None:
+        """Post the request; a refused optional field is dropped and the request sent once more, until it
+        is accepted or nothing optional is left. A rate limit waits once for Retry-After (at most 10 s)."""
+        request = {**body, "stream": True, "stream_options": {"include_usage": True}} if stream else dict(body)
+        if "stream_options" in self.refused_features():
+            request.pop("stream_options", None)
+        pending: list[tuple[str, bool, str]] = []
+        waited = False
+        while True:
+            try:
+                if request.get("stream"):
+                    self._post_streamed(client, request, reply)
+                else:
+                    reply.whole(self._post(client, request))
+            except httpx.HTTPStatusError as exc:
+                response = exc.response
+                if response.status_code == 429 and not waited:
+                    waited = True
+                    time.sleep(_retry_after(response))
                     continue
-                _raise_for_status(response, read=True)
-                if "text/event-stream" not in response.headers.get("content-type", ""):
-                    # The endpoint ignored `stream` and answered at once.
-                    response.read()
-                    reply.whole(response.json())
-                    return
-                reply.read(response.iter_lines())
-                return
-        data = self._post(client, body)
-        self._stream_refused = True
-        reply.whole(data)
+                found = capabilities.classify_refusal(response, request)
+                if found is None:
+                    raise self._service_error(exc) from exc
+                feature, named = found
+                pending.append((feature, named, capabilities.evidence(response)))
+                request = capabilities.without(request, feature)
+                continue
+            for feature, named, evidence in pending:
+                self._learn(feature, named, evidence)
+            return
 
+    def _post_streamed(self, client: httpx.Client, body: dict[str, Any], reply: "_Reply") -> None:
+        with client.stream("POST", f"{self.endpoint}/chat/completions", json=body,
+                           headers={"Authorization": f"Bearer {self.api_key}"}) as response:
+            _raise_for_status(response, read=True)
+            if "text/event-stream" not in response.headers.get("content-type", ""):
+                # The endpoint ignored `stream` and answered at once.
+                response.read()
+                reply.whole(response.json())
+                return
+            reply.read(response.iter_lines())
 
     def probe(self, messages: list[dict[str, str]], max_tokens: int = 64,
               timeout_seconds: float = 60, thinking_mode: str = "disabled") -> dict[str, Any]:
@@ -278,6 +399,13 @@ class OpenAICompatibleModel:
                 except (KeyError, TypeError, json.JSONDecodeError):
                     pass
         return None
+
+
+def _retry_after(response: httpx.Response) -> float:
+    try:
+        return min(10.0, max(0.0, float(response.headers.get("retry-after", "2"))))
+    except ValueError:
+        return 2.0
 
 
 def _raise_for_status(response: httpx.Response, read: bool = False) -> None:
