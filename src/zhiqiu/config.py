@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -19,7 +20,7 @@ from typing import Any, Iterable
 ENV = "ZHIQIU_CONFIG"
 FILE_NAME = "config.toml"
 KINDS = {"str": "字符串", "choice": "字符串", "bool": "true 或 false", "int": "非负整数", "float": "非负数",
-         "paths": "字符串数组", "suffixes": "以 . 开头的字符串数组", "table": "表"}
+         "paths": "字符串数组", "suffixes": "以 . 开头的字符串数组", "names": "字符串数组", "table": "表"}
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("model", "base_url", "ZHIQIU_LLM_BASE_URL", "str", "API 根路径，例如 https://api.deepseek.com/v1", ""),
     Setting("model", "model", "ZHIQIU_LLM_MODEL", "str", "模型名", ""),
     Setting("model", "api_key", "ZHIQIU_LLM_API_KEY", "str", "必填；也可以只写在 .env 或环境变量里", "", secret=True),
+    Setting("model", "choices", "ZHIQIU_LLM_MODELS", "names",
+            "输入框模型按钮里可选的模型；不填用端点的模型列表和价格页上的模型", example='["deepseek-flash", "deepseek-v4-pro"]'),
     Setting("model", "stream", "ZHIQIU_LLM_STREAM", "bool", "流式输出", True, default=True),
     Setting("model", "window", "ZHIQIU_LLM_WINDOW", "int", "上下文窗口（token），不填不做超限判断", example="131072"),
     Setting("model", "output_reserve", "ZHIQIU_LLM_OUTPUT_RESERVE", "int", "输出预留，也是请求的 max_tokens",
@@ -98,6 +101,9 @@ SETTINGS: tuple[Setting, ...] = (
             choices=("auto", "zh", "en", "ja", "ko", "yue")),
     Setting("voice", "threads", "ZHIQIU_VOICE_THREADS", "int", "识别用的 CPU 线程数，不填为 min(4, CPU 核数)", example="4"),
     Setting("services", "exa_api_key", "ZHIQIU_EXA_API_KEY", "str", "Exa 联网搜索", "", secret=True),
+    Setting("services", "search", "ZHIQIU_SEARCH", "choice",
+            "联网搜索来源：auto 有 Exa 密钥用 Exa，否则用模型端点自带的搜索（如 DeepSeek，按次计费）；"
+            "exa、provider 只用其中一个；off 不搜索", "auto", default="auto", choices=("auto", "exa", "provider", "off")),
     Setting("services", "notion_token", "ZHIQIU_NOTION_TOKEN", "str", "Notion 内部集成令牌（learn --notion）", "",
             secret=True),
     Setting("services", "mcp_config", "ZHIQIU_MCP_CONFIG", "str", "外部 MCP 工具配置文件", ""),
@@ -106,6 +112,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("price", "cached_input", "ZHIQIU_PRICE_CACHED_INPUT", "float", "缓存命中的输入，不填按输入价", example="0.5"),
     Setting("price", "output", "ZHIQIU_PRICE_OUTPUT", "float", "输出", example="8"),
     Setting("price", "currency", "ZHIQIU_PRICE_CURRENCY", "str", "金额前缀，例如 ¥ 或 $", ""),
+    Setting("price", "models", "ZHIQIU_PRICE_MODELS", "table", "按模型手填价格，优先于价格页",
+            example='{ "deepseek-v4-pro" = { input = 9, cached_input = 0.3, output = 27, currency = "¥" } }'),
+    Setting("price", "auto_update", "ZHIQIU_PRICE_AUTO_UPDATE", "bool",
+            "工作台启动时，若价格超过 7 天未更新，就读一次厂商价格页（一次小的模型调用）", True, default=True),
     Setting("trace", "content", "ZHIQIU_TRACE_CONTENT", "bool", "保存每次模型调用的请求与回复正文（脱敏、截断）",
             False, default=False),
 )
@@ -171,6 +181,11 @@ def to_env(setting: Setting, value: Any, path: Path) -> str | None:
         if type(value) not in (int, float) or value < 0:
             raise _invalid(path, setting)
         return str(value)
+    if kind == "names":
+        if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() and "," not in item
+                                                  for item in value):
+            raise _invalid(path, setting)
+        return ",".join(item.strip() for item in value) or None
     if kind in ("paths", "suffixes"):
         if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
             raise _invalid(path, setting)
@@ -249,7 +264,7 @@ def typed(setting: Setting, raw: str) -> Any:
             return raw
     if setting.kind == "paths":
         return [item for item in raw.split(os.pathsep) if item.strip()]
-    if setting.kind == "suffixes":
+    if setting.kind in ("suffixes", "names"):
         return [item for item in raw.split(",") if item.strip()]
     return raw
 
@@ -355,6 +370,82 @@ def write(path: Path, values: dict[str, Any]) -> Path | None:
     tomllib.loads(text)  # never write a file the loader would refuse
     path.write_text(text, encoding="utf-8")
     return backup
+
+
+def _replace_line(lines: list[str], section: str | None, pattern: re.Pattern[str], line: str) -> list[str]:
+    """Put `line` where `pattern` matches (inside [section] when given), or at the section's end."""
+    start, end = 0, len(lines)
+    if section is not None:
+        header = next((i for i, text in enumerate(lines) if text.strip() == f"[{section}]"), None)
+        if header is None:
+            return lines + ["", f"[{section}]", line]
+        start = header + 1
+        end = next((i for i in range(start, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    for i in range(start, end):
+        if pattern.match(lines[i]):
+            return lines[:i] + [line] + lines[i + 1:]
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[:end] + [line] + lines[end:]
+
+
+def set_value(name: str, value: Any, explicit: Path | None = None) -> tuple[str, Path]:
+    """Save one setting where its value now comes from: the project .env when that set it, otherwise
+    config.toml (made from the template when missing; the old file kept as .bak). The process takes the
+    new value at once. A value set in the process environment cannot be changed from here."""
+    from .local_env import PROJECT_ENV
+    setting = BY_NAME.get(name)
+    if setting is None:
+        raise ValueError(f"未知的配置项 {name}")
+    where = source(setting)
+    if where == "环境变量":
+        raise ValueError(f"{setting.env} 在环境变量里设置，优先于配置文件；请在那里修改")
+    if where == ".env":
+        target = PROJECT_ENV
+        converted = to_env(setting, value, target)
+        lines = target.read_text(encoding="utf-8-sig").splitlines()
+        pattern = re.compile(rf"^\s*{re.escape(setting.env)}\s*=")
+        text = "\n".join(_replace_line(lines, None, pattern, f"{setting.env}={converted or ''}")) + "\n"
+    else:
+        target = config_path(explicit)
+        converted = to_env(setting, value, target)
+        if not target.exists():
+            write(target, {name: value})
+            restrict(target)
+            _apply(setting, converted, FILE_NAME)
+            return FILE_NAME, target
+        lines = target.read_text(encoding="utf-8-sig").splitlines()
+        pattern = re.compile(rf"^\s*#?\s*{re.escape(setting.key)}\s*=")
+        text = "\n".join(_replace_line(lines, setting.section, pattern,
+                                        f"{setting.key} = {_toml_value(value)}  # {setting.comment}")) + "\n"
+        read_text(text, target)  # never write a file the loader would refuse
+    target.with_name(target.name + ".bak").write_bytes(target.read_bytes())
+    target.write_text(text, encoding="utf-8")
+    _apply(setting, converted, where if where == ".env" else FILE_NAME)
+    return (where if where == ".env" else FILE_NAME), target
+
+
+def _apply(setting: Setting, converted: str | None, where: str) -> None:
+    if converted is None:
+        os.environ.pop(setting.env, None)
+        SOURCES.pop(setting.env, None)
+    else:
+        os.environ[setting.env] = converted
+        SOURCES[setting.env] = where
+
+
+def read_text(text: str, path: Path) -> dict[str, str]:
+    """read() for text not yet written to `path`."""
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"配置文件格式有误：{path}（{exc}）") from None
+    scratch = path.with_name(path.name + ".check")
+    scratch.write_text(text, encoding="utf-8")
+    try:
+        return read(scratch)
+    finally:
+        scratch.unlink(missing_ok=True)
 
 
 def restrict(path: Path) -> bool:

@@ -43,6 +43,8 @@ REWRITTEN = (
     "斜杠命令由程序直接执行",                     # chat: /compact
     "对话页右侧是状态面板",                       # workbench: the review calendar and the context usage
     "| `GET /api/chat/state` |",               # workbench: context.usage
+    # Rewritten for 9.2.
+    "| `GET /api/chat/conversations?limit=30` |",  # workbench: groups and the archive
 )
 LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
 

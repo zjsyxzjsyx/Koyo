@@ -42,7 +42,7 @@ class UserInput:
     source: str = "text"
     voice: dict[str, Any] | None = None
 # What the page can ask the worker to do besides a line of input; each runs between turns only.
-CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5, "compact": 0}
+CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5, "compact": 0, "model": 1, "new_in": 1}
 _STOPPED = object()
 _CLOSE = object()
 
@@ -288,9 +288,18 @@ class Workbench:
     """
 
     def __init__(self, db_path: Path, make_agent: Callable[[Store, WebIO], Any], *,
-                 clock: Any = None, resume: str | None = None, io: WebIO | None = None):
+                 clock: Any = None, resume: str | None = None, io: WebIO | None = None,
+                 price_updater: Callable[[], dict[str, Any]] | None = None,
+                 remind_every: float | None = None, local_now: Callable[[], Any] | None = None):
         self.db_path = Path(db_path)
         self.make_agent = make_agent
+        # Reads the vendor's price page on a thread of its own (with its own connection); see update_prices.
+        self.price_updater = price_updater
+        self.prices: dict[str, Any] = {"running": False, "error": "", "models": 0}
+        # Reminders are checked every remind_every seconds on a thread of their own (None: not at all).
+        self.remind_every = remind_every
+        self.local_now = local_now
+        self._stopped = threading.Event()
         self.clock = clock
         self.resume = resume
         self.io = io or WebIO()
@@ -318,6 +327,27 @@ class Workbench:
             raise RuntimeError("工作台启动超时")
         if self._error is not None:
             raise self._error
+        if self.remind_every:
+            threading.Thread(target=self._remind, name="zhiqiu-reminders", daemon=True).start()
+
+    def _remind(self) -> None:
+        """Say each reminder when it is due, also during a turn; those missed while the workbench was
+        closed come first, marked late. A connection of its own: the worker's never leaves its thread."""
+        from .reminders import Reminders
+        store = Store(self.db_path, self.clock) if self.clock is not None else Store(self.db_path)
+        try:
+            while not self._stopped.is_set():
+                try:
+                    fired = Reminders(store).fire(self.local_now() if self.local_now else None)
+                except Exception as exc:  # a locked database: try again next time
+                    fired = []
+                    self.io.emit("status", text=f"读取提醒失败：{type(exc).__name__}")
+                for row in fired:
+                    self.io.emit("reminder", reminder_id=row["id"], title=row["title"], note=row["note"],
+                                 repeat=row["repeat"], due_at=row["due_at"], next_at=row["next_at"], late=row["late"])
+                self._stopped.wait(self.remind_every)
+        finally:
+            store.close()
 
     @property
     def busy(self) -> bool:
@@ -343,6 +373,33 @@ class Workbench:
             return False
         return self._queue(tuple(action))
 
+    def update_prices(self) -> bool:
+        """Read the price page in the background; False when there is no updater or one is running."""
+        with self._lock:
+            if self.price_updater is None or self.prices["running"] or self._closed:
+                return False
+            self.prices = {**self.prices, "running": True, "error": ""}
+        threading.Thread(target=self._update_prices, name="zhiqiu-prices", daemon=True).start()
+        return True
+
+    def _update_prices(self) -> None:
+        assert self.price_updater is not None
+        try:
+            data = self.price_updater()
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            with self._lock:
+                self.prices = {**self.prices, "running": False, "error": message}
+            self.io.say(f"没能更新模型价格：{message}", kind="note")
+            self.io.emit("prices", ok=False)
+            return
+        with self._lock:
+            self.prices = {"running": False, "error": "", "models": len(data.get("models") or {})}
+        names = "、".join(list(data.get("models") or {})[:6])
+        self.io.say(f"已从{data.get('vendor', '厂商')}价格页更新 {len(data.get('models') or {})} 个模型的价格：{names}。",
+                    kind="note")
+        self.io.emit("prices", ok=True)
+
     def _queue(self, item: Any) -> bool:
         with self._lock:
             if self._busy or self._closed or not self._ready.is_set() or self._error is not None:
@@ -362,6 +419,7 @@ class Workbench:
         """Stop waiting prompts, end the worker and wait for it; True when it has ended."""
         with self._lock:
             self._closed = True
+        self._stopped.set()
         self.io.close()
         self._inputs.put(_CLOSE)
         if self._thread.is_alive():
@@ -386,6 +444,7 @@ class Workbench:
             self._roots_context(agent)
             self._tools_context(agent)
             self._usage_context(agent)
+            self._model_context(agent)
         except BaseException as exc:
             self._error = exc
             self._ready.set()
@@ -422,6 +481,7 @@ class Workbench:
                     self._roots_context(agent)
                     self._tools_context(agent)
                     self._usage_context(agent)
+                    self._model_context(agent)
                     with self._lock:
                         self._busy = False
                     self.io.emit("idle", conversation_id=self.conversation_id)
@@ -437,8 +497,13 @@ class Workbench:
     def _tools_context(self, agent: Any) -> None:
         available = getattr(agent, "tools_available", None)
         policy = getattr(agent, "policy", None)
+        search = getattr(agent, "search_status", None)
         self.context = {**self.context, "tools": available() if callable(available) else True,
-                        "path_grants": bool(policy is not None and policy.path_grants())}
+                        "path_grants": bool(policy is not None and policy.path_grants()),
+                        "search": search() if callable(search) else None}
+
+    def _model_context(self, agent: Any) -> None:
+        self.context = {**self.context, "model": str(getattr(agent, "model_name", "") or "")}
 
     def _usage_context(self, agent: Any) -> None:
         """How full the conversation's context is, for the status panel; only a hint, so never an error."""
@@ -468,6 +533,10 @@ class Workbench:
                 agent.new()
             elif name == "compact":
                 agent.compact()
+            elif name == "model":
+                agent.use_model(*args)
+            elif name == "new_in":
+                agent.new(*args)
             elif name == "roots":
                 agent.change_roots(*args)
                 self._roots_context(agent)

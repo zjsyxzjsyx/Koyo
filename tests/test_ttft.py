@@ -21,7 +21,7 @@ def test_a_v22_database_gains_the_columns_and_old_calls_read_as_not_streamed(tmp
     store.close()
     reopened = Store(path)
     try:
-        assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 24
+        assert reopened.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 25
         assert (path.parent / "state.sqlite.pre-v23.bak").exists()
         row = reopened.db.execute("SELECT ttft_ms, streamed FROM llm_calls").fetchone()
         assert (row["ttft_ms"], row["streamed"]) == (None, 0)

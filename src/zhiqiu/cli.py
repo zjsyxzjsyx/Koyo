@@ -13,7 +13,7 @@ import httpx
 import typer
 
 from . import config as user_config
-from . import contracts, gate, metrics, regressions, traces, tracing
+from . import contracts, gate, metrics, pricing, providers, regressions, traces, tracing
 from .conversations import Conversations
 from .flows import FlowInterrupted, resume_lesson, resume_target, run_lesson, run_quiz, short_id, show_outcome
 from .notion import NotionReader
@@ -25,7 +25,6 @@ from .model import OpenAICompatibleModel
 from .quality import evaluate_labels, grading_usage, label_template, record_eval_run
 from .retrieval import rank_lessons
 from .runtime import LearningRuntime
-from .search import ExaSearch
 from .store import Store
 from .tools import ToolSpec
 
@@ -52,6 +51,17 @@ def load_settings(config_file: Path | None = None) -> Path | None:
     user_config.mark_environment()
     user_config.mark(load_local_env() or (), ".env")
     return user_config.load(config_file)
+
+
+def _safe_console() -> None:
+    """A console that cannot show a character (a GBK one and "¥") prints a replacement instead of failing."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 # The database the desktop shortcut used before 9.0 (scripts/zhiqiu-web.ps1); `config init` offers to keep it.
@@ -99,9 +109,10 @@ def _mcp_tools(store: Store) -> list[Any]:
 
 def runtime(store: Store, mcp: bool = False) -> LearningRuntime:
     model = OpenAICompatibleModel(audit=store.record_llm_call, capabilities=store)
-    exa = ExaSearch() if os.getenv("ZHIQIU_EXA_API_KEY") or os.getenv("EXA_API_KEY") else None
+    # Exa when its key is set, otherwise the model vendor's own search (providers.web_search).
+    search = providers.web_search()
     notion = NotionReader() if os.getenv("ZHIQIU_NOTION_TOKEN") else None
-    return LearningRuntime(store, model, exa, exa, write_roots_from_env(), _mcp_tools(store) if mcp else [], notion)
+    return LearningRuntime(store, model, search, search, write_roots_from_env(), _mcp_tools(store) if mcp else [], notion)
 
 
 def _terminal(service: Any) -> Any:
@@ -133,6 +144,7 @@ def show_status(store: Store, full: bool = False) -> None:
 def root(ctx: typer.Context, db: Annotated[Path | None, typer.Option("--db", help="SQLite 状态文件")] = None,
          offline: Annotated[bool, typer.Option("--offline", help="禁止 Web 搜索")] = False,
          config_file: Annotated[Path | None, typer.Option("--config", help="配置文件 config.toml（默认位置见 zhiqiu config path）")] = None) -> None:
+    _safe_console()
     if ctx.invoked_subcommand == "config":
         # The config commands load (or repair) the settings themselves and never open the database.
         ctx.obj = {"config": config_file}
@@ -1026,13 +1038,17 @@ def web_command(ctx: typer.Context,
         return ChatAgent(worker_store, runtime(worker_store, mcp=not offline), io, read_roots=read_roots_from_env(),
                          write_roots=write_roots_from_env(), offline=offline, policy=policy)
 
-    bench = Workbench(path, make_agent, resume=resume)
+    bench = Workbench(path, make_agent, resume=resume, price_updater=lambda: _update_prices(path), remind_every=30)
     try:
         bench.start()
     except ValueError as exc:
         bench.close()
         typer.echo(f"不能启动工作台：{exc}", err=True)
         raise typer.Exit(1) from None
+    from . import prices
+    if not offline and prices.auto_update() and prices.stale() and providers.provider_for() is not None:
+        # Prices older than a week: read the vendor's page again, in the background.
+        bench.update_prices()
 
     def ready(url: str) -> None:
         typer.echo(f"工作台已启动：{url}（只在本机可访问；Ctrl+C 停止）")
@@ -1046,6 +1062,63 @@ def web_command(ctx: typer.Context,
     except OSError as exc:
         bench.close()
         raise typer.BadParameter(f"端口 {port} 无法使用：{exc}") from None
+
+
+def _update_prices(db_path: Path) -> dict[str, Any]:
+    """Read the vendor's price page with a connection of its own (it may run beside the workbench thread),
+    traced as a /price turn."""
+    from . import prices
+    store = Store(db_path)
+    try:
+        model = OpenAICompatibleModel(audit=store.record_llm_call, capabilities=store)
+        with tracing.span(store, "turn", "/price"):
+            return prices.update(model)
+    finally:
+        store.close()
+
+
+price_app = typer.Typer(help="模型价格：从厂商价格页读取，或查看现在用的价格")
+app.add_typer(price_app, name="price")
+
+
+@price_app.command("update")
+def price_update(ctx: typer.Context) -> None:
+    """读一次模型厂商的价格页，由模型挑出各模型的价格（一次小调用），存到 prices.json。"""
+    from . import prices
+    try:
+        data = _update_prices(context_store(ctx).path)
+    except (ValueError, httpx.HTTPError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"已从 {data['source']} 读到 {len(data['models'])} 个模型的价格，存到 {prices.path()}")
+    for line in _price_lines(list(data["models"])):
+        typer.echo(line)
+    for reason in data["dropped"]:
+        typer.echo(f"  未采用：{reason}")
+
+
+@price_app.command("show")
+def price_show(ctx: typer.Context) -> None:
+    """列出可选模型现在的价格与来源（手填或价格页）。"""
+    from . import prices
+    context_store(ctx)
+    for line in _price_lines(prices.choices(pricing.default_model())):
+        typer.echo(line)
+
+
+def _price_lines(names: list[str]) -> list[str]:
+    lines = []
+    for name in names:
+        price = pricing.price_for(name)
+        if price is None:
+            lines.append(f"  {name}  未定价")
+            continue
+        now = price.rates()
+        off = (f"；平峰 输入 {price.currency}{price.off_peak['input']:g} / 输出 {price.currency}{price.off_peak['output']:g}"
+               f"（现在{'是高峰' if price.peak() else '是平峰'}）" if price.off_peak and price.peak_hours else "")
+        lines.append(f"  {name}  输入 {price.currency}{now['input']:g}（缓存命中 {price.currency}{now['cached_input']:g}）"
+                     f" / 输出 {price.currency}{now['output']:g} 每百万 token{off}  来源：{price.source}"
+                     + (f" {price.fetched_at[:10]}" if price.fetched_at else ""))
+    return lines
 
 
 @app.command("traces")

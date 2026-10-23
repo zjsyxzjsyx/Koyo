@@ -39,6 +39,12 @@
 
 每次询问用户（策略为 `ask`，且不是“本轮已允许”）都在 `approval_requests` 写一条记录：询问时为 `pending`，回答后改为 `approved` 或 `denied`，并记下在哪个界面回答（`terminal`，以后还有 `web`）和对应的工具调用；询问中按 Ctrl+C 记为 `cancelled`。记录只保存描述的第一行（如“写入文件：路径”）和脱敏的参数摘要，写文件的正文只记字数。对话启动时，把这段对话遗留的、以及超过 30 分钟仍未回答的 `pending` 标为 `cancelled`。`chat forget` 一并删除该对话的审批记录，`export` 包含这张表。
 
+## 模型、提醒与分组（9.2）
+
+- `/model` 列出可选的模型和它们现在的价格；`/model 模型名` 从下一轮起换用这个模型，对话和学习流程都用它，重启后回到配置的模型。切换后按新模型重新取上下文预算（`model.budgets` 里按模型配置的窗口与输出预留）和这个模型被拒过的请求字段，trace 的每轮对话记下当时的 `model`。同一次学习中途换模型时，之后的阶段（例如评阅）由新模型完成，每次调用的 `llm_calls.model` 都有记录。
+- 提醒：对话里说“每天晚上 9 点提醒我复习红黑树”，知秋会调用提议工具 `propose_reminder`（内容、`at` 本地时间 YYYY-MM-DD HH:MM、`repeat` 为 none／daily／weekdays／weekly、备注），先显示“建议设一个提醒：每天 21:00  复习红黑树”，你同意后才保存；时间已过、超过一年或格式不对时，工具在问你之前就把原因交还给模型。`zhiqiu_status` 从 9.2 起带上当前时间 `now` 和今天的提醒，模型不用猜现在几点。终端对话在每次等你输入之前检查一次到期的提醒，说一句“⏰ 提醒：…”；工作台的提醒见[网页工作台](workbench.md)。提醒只是告诉你，从不自己执行任何操作。
+- `/chats` 按分组列出（“【分组名】”开头，没有分组时和以前一样），`/archive 编号`（或短号）把一段对话归档：它不再出现在列表里，内容不删除；当前对话不能归档。分组在工作台的会话侧栏里建立和整理。
+
 ## 对话内授权（9.0）
 
 对话里要读或写白名单外的文件时，不再直接拒绝、让你去设置页添加，而是在对话里申请，像 Codex 那样：
@@ -77,6 +83,8 @@
 所有调用经过 `ToolExecutor.run`，顺序为：查找 → 参数校验（只校验、不纠正，失败不执行）→ 闸门（本步骤未允许该权限类别时拒绝；需要确认的工具在缺少确认回调、回调出错或用户拒绝时一律拒绝）→ 执行 → 截断输出 → 审计。失败用固定的错误类型表示：`invalid_args`、`denied`、`timeout`、`network`、`rate_limited`、`upstream`、`not_found`、`internal`；只有 `network`、`timeout`、`rate_limited` 按指数退避重试。网络请求流式读取响应，每读一块检查一次总时限，超时即中断。
 
 每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认及由谁放行（`approval_source`：`policy` 审批策略、`user` 用户当场批准、`turn` 本轮已允许；V6 起记录，schema v19）、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
+
+联网搜索的来源（9.2）：配置了 Exa 密钥（`ZHIQIU_EXA_API_KEY`，或 Exa 文档里的 `EXA_API_KEY`，两个名字都可以写在 `.env` 里）时用 Exa；没有时，如果模型端点是 DeepSeek（`api.deepseek.com`），就用 DeepSeek 的搜索与抓取接口（`/v1/tools/search`、`/v1/tools/fetch`，用同一把模型密钥，按次计费），不必再注册 Exa；两个都没有就没有 `web_search` 和 `fetch_url`。`services.search`（`ZHIQIU_SEARCH`）可以设为 `exa`、`provider` 只用其中一个，或 `off` 不搜索。用哪个在对话开头就说清楚：没有可用的搜索时，新对话的第一条提示写“联网搜索：未配置，不能搜索网页”和配置方法，状态面板的“联网”一行也这样写；模型的上下文里写着“没有联网搜索工具”，用户要搜索时它会如实转告。审批卡片和工具提示写明查询发往哪里（例如“联网搜索（查询发往DeepSeek 搜索，按次计费）”）。密钥无效、过期或没有权限（HTTP 401／403）、余额不足（402）时，错误里写出是哪个服务、什么原因，错误种类为 `auth`、`billing`。
 
 目前注册的工具有 `notion_page`（只供程序调用，见“Notion 页面资料”）、业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 

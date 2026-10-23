@@ -51,7 +51,7 @@ def test_example_parses_and_every_key_is_known(tmp_path):
 def test_env_example_lists_exactly_the_allowed_variables():
     names = {line.split("=", 1)[0] for line in config.render_env().splitlines()
              if line and not line.startswith("#")}
-    assert names == set(ALLOWED_KEYS)
+    assert names == set(ALLOWED_KEYS) - {"EXA_API_KEY"}
     assert "ZHIQIU_LONG_ANSWER_SEGMENTS" not in names
 
 
@@ -190,11 +190,14 @@ def test_config_commands_do_not_open_the_database(tmp_path, clean_env, monkeypat
 class FakeBench:
     conversation_id = "conv"
 
-    def __init__(self, path, make_agent, resume=None):
+    def __init__(self, path, make_agent, resume=None, **options):
         self.path = path
 
     def start(self):
         pass
+
+    def update_prices(self):
+        return False
 
     def close(self):
         pass

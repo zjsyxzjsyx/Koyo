@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from .tools import ToolError, ToolSpec
@@ -206,6 +206,22 @@ def _date_arg(args: dict[str, Any], key: str) -> None:
             raise ToolError("invalid_args", f"{key} 应为 YYYY-MM-DD 日期") from exc
 
 
+def reminders_today(db: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+    """The local time now and today's reminders (still to come, or already said)."""
+    now = now or datetime.now()
+    day = now.date().isoformat()
+    try:
+        rows = db.execute("""SELECT title,note,repeat,next_at,fired_at FROM reminders WHERE status!='cancelled'
+            AND (next_at LIKE ? OR fired_at LIKE ?) ORDER BY COALESCE(next_at, fired_at)""",
+                          (f"{day}%", f"{day}%")).fetchall()
+    except sqlite3.OperationalError:
+        rows = []  # a database from before reminders
+    return {"now": now.strftime("%Y-%m-%d %H:%M"),
+            "reminders_today": [{"title": row["title"], "note": row["note"], "repeat": row["repeat"],
+                                 "at": (row["next_at"] if (row["next_at"] or "").startswith(day) else row["fired_at"]),
+                                 "said": bool(row["fired_at"] and row["fired_at"].startswith(day))} for row in rows]}
+
+
 def query_tool_specs(run: Runner, today: Callable[[], str]) -> list[ToolSpec]:
     """Business read queries as tools; every one is permission "read" and never writes."""
     def lookup(query: Callable[[sqlite3.Connection], Any]) -> Any:
@@ -215,8 +231,9 @@ def query_tool_specs(run: Runner, today: Callable[[], str]) -> list[ToolSpec]:
             raise ToolError("not_found", str(exc)) from exc
 
     return [
-        ToolSpec("zhiqiu_status", "知秋当前状态：今天到期的复习任务、未结束的尝试、需要补学的知识点。",
-                 _NO_ARGS, "read", lambda args: lookup(lambda db: status(db, today())), source="zhiqiu.queries"),
+        ToolSpec("zhiqiu_status", "知秋当前状态：现在的时间（now）、今天到期的复习任务、今天的提醒、未结束的尝试、需要补学的知识点。",
+                 _NO_ARGS, "read", lambda args: lookup(lambda db: {**status(db, today()), **reminders_today(db)}),
+                 source="zhiqiu.queries"),
         ToolSpec("zhiqiu_due", "截至某日（含）将到期或已到期的复习任务；不给日期时为今天。",
                  {"type": "object", "additionalProperties": False,
                   "properties": {"until": {"type": "string", "minLength": 10, "maxLength": 10}}},

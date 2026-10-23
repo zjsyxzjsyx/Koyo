@@ -20,7 +20,9 @@ from .redact import redact
 
 # propose: the handler only records a suggestion (enter a flow, remember a preference); the program decides.
 PERMISSIONS = ("read", "network", "write_file", "external_mcp", "propose")
-ERROR_KINDS = ("invalid_args", "denied", "timeout", "network", "rate_limited", "upstream", "not_found", "internal")
+# auth: the service refused the key; billing: the account has no balance left.
+ERROR_KINDS = ("invalid_args", "denied", "timeout", "network", "rate_limited", "upstream", "not_found", "internal",
+               "auth", "billing")
 RETRYABLE = frozenset({"network", "timeout", "rate_limited"})
 # Who let a gated call through: the approval policy, the user now, or the user earlier in this turn.
 APPROVAL_SOURCES = ("policy", "user", "turn")
@@ -60,6 +62,8 @@ class ToolSpec:
     precheck: Callable[[dict[str, Any]], None] | None = None
     # Text shown to the user when the call needs confirmation.
     describe: Callable[[dict[str, Any]], str] | None = None
+    # The outside service that receives the call (e.g. "Exa", "DeepSeek 搜索"), named to the user.
+    service: str = ""
 
     def __post_init__(self) -> None:
         if self.permission not in PERMISSIONS:
@@ -332,18 +336,21 @@ class ToolExecutor:
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float,
-              max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic) -> Any:
-    return request_json("POST", url, headers, timeout_s, payload=payload, max_bytes=max_bytes, clock=clock)
+              max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic, service: str = "") -> Any:
+    return request_json("POST", url, headers, timeout_s, payload=payload, max_bytes=max_bytes, clock=clock,
+                        service=service)
 
 
 def request_json(method: str, url: str, headers: dict[str, str], timeout_s: float,
                  payload: dict[str, Any] | None = None, params: dict[str, Any] | None = None,
-                 max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic) -> Any:
+                 max_bytes: int = 2_000_000, clock: Callable[[], float] = time.monotonic, service: str = "") -> Any:
     """Send one JSON request with a hard total deadline.
 
     httpx timeouts apply per phase, so a server trickling bytes could outlast them; the
-    body is streamed and the deadline is checked after every chunk.
+    body is streamed and the deadline is checked after every chunk. A refused key or an empty
+    balance is said in words, with the service's name when given.
     """
+    who = f"{service}：" if service else ""
     deadline = clock() + timeout_s
     phase = httpx.Timeout(min(timeout_s, 10.0), read=timeout_s)
     try:
@@ -354,8 +361,12 @@ def request_json(method: str, url: str, headers: dict[str, str], timeout_s: floa
                     raise ToolError("rate_limited", f"服务限流（HTTP 429）：{url}", status)
                 if status >= 500:
                     raise ToolError("network", f"服务暂时不可用（HTTP {status}）：{url}", status)
+                if status in (401, 403):
+                    raise ToolError("auth", f"{who}密钥无效、已过期或没有权限（HTTP {status}）：{url}", status)
+                if status == 402:
+                    raise ToolError("billing", f"{who}账户余额不足（HTTP 402）：{url}", status)
                 if status >= 400:
-                    raise ToolError("upstream", f"服务拒绝请求（HTTP {status}）：{url}", status)
+                    raise ToolError("upstream", f"{who}服务拒绝请求（HTTP {status}）：{url}", status)
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)

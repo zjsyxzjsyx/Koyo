@@ -17,7 +17,7 @@ from typing import Any, Callable, Sequence
 
 import httpx
 
-from . import guardrails, tracing
+from . import guardrails, prices, pricing, providers, tracing
 from . import history as history_search
 from .approvals import ApprovalPolicy
 from .context import ContextBudgetError, ContextTask
@@ -33,12 +33,13 @@ from .memory import MemoryService
 from .model import ModelContextOverflowError
 from .queries import status as status_query
 from .redact import redact
+from .reminders import REPEATS, Reminders, describe as reminder_text, stamp as reminder_stamp
 from .store import DAILY_REVIEW_LIMIT, Store
 from .toolloop import LOOP_SECONDS, MAX_ROUNDS, Draft, LoopResult, ToolLoop, query_leak_check
 from .tools import Approval, ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec, summarize_args
 
 CHAT_PERMISSIONS = frozenset({"read", "network", "write_file", "external_mcp", "propose"})
-PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory"})
+PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory", "propose_reminder"})
 TRACED_COMMANDS = frozenset({"/learn", "/review", "/resume"})
 MEMORY_PREFIXES = ("pref.", "soul.")
 MEMORY_ITEM_CHARS = 300
@@ -58,7 +59,8 @@ KEEP_RECENT = 10
 CLOSING = "不要再调用工具，直接用文字给出本轮的回答。"
 HELP = ("对话命令：/status 查看状态；/learn 知识点 [--from 路径] [--url 网址] [--notion 页面]；"
         "/review [知识点]；/resume [短号]；/detail [短号] 查看评阅详情；/chats 列出最近的对话；/open 编号或短号 切换对话；"
-        "/title 新标题 给对话改名；/compact 把较早的消息压缩成摘要；/memory 查看记忆；/skill 查看讲法，/skill 名称 知识点 指定讲法；/new 开新对话。"
+        "/title 新标题 给对话改名；/compact 把较早的消息压缩成摘要；/memory 查看记忆；/skill 查看讲法，/skill 名称 知识点 指定讲法；"
+        "/model [模型名] 查看或切换模型；/archive 编号 归档对话；/new 开新对话。"
         "其他输入直接与知秋对话。")
 # How many conversations /chats lists.
 CHATS_LISTED = 10
@@ -141,10 +143,12 @@ class ChatIO:
 
 def _describe_external(spec: ToolSpec) -> Callable[[dict[str, Any]], str]:
     def describe(args: dict[str, Any]) -> str:
+        service = spec.service or "外部搜索服务"
+        paid = "，按次计费" if spec.service and spec.service != "Exa" else ""
         if spec.name == "web_search":
-            return f"联网搜索（查询发往外部搜索服务）：{args.get('query', '')}"
+            return f"联网搜索（查询发往{service}{paid}）：{args.get('query', '')}"
         if spec.name == "fetch_url":
-            return f"获取网页正文：{args.get('url', '')}"
+            return f"获取网页正文（经{service}{paid}）：{args.get('url', '')}"
         shown = json.dumps(args, ensure_ascii=False)
         return f"调用外部工具 {spec.name}（{spec.source}）：{shown[:500]}"
     return describe
@@ -238,6 +242,8 @@ class ChatAgent:
         # Called with the conversation id whenever this agent opens another conversation (the workbench
         # follows it there).
         self.on_switch: Callable[[str], None] | None = None
+        # Called with the model name after /model or the workbench's model button switched it.
+        self.on_model: Callable[[str], None] | None = None
         # Tools the user allowed during the current turn (see TURN_APPROVAL_PERMISSIONS).
         self._approved: set[str] = set()
         # Paths outside the roots the user allowed once in this turn, and how often this turn asked.
@@ -284,6 +290,10 @@ class ChatAgent:
                    else self.chats.open_today(self._snapshot(), self._status()))
         for warning in self.policy_warnings:
             self.io.say(warning, kind="note")
+        search = self.search_status()
+        if not search["available"] and not self.offline and self.policy.permissions["network"] != "deny":
+            # Said up front: finding out only when a search is needed is too late.
+            self.io.say(search["text"], kind="note")
         state = self.store.status()
         if state["open_attempts"] or self.store.pending_lessons():
             self.io.say("有未完成的自测或讲解：可以直接说“继续”，或输入 /resume。", kind="note")
@@ -319,9 +329,17 @@ class ChatAgent:
         count = len(self.chats.messages(self.conversation_id))
         self.io.say(f"已切换到「{self._title()}」（{count} 条消息）。", kind="note")
 
-    def new(self) -> None:
-        self._open(self.chats.start_new(self._snapshot(), self._status()))
-        self.io.say("已开始新对话。", kind="note")
+    def new(self, group_id: str | None = None) -> None:
+        self._open(self.chats.start_new(self._snapshot(), self._status(), group_id))
+        group = f"（分组「{self.chats.group(group_id)['name']}」）" if group_id else ""
+        self.io.say(f"已开始新对话{group}。", kind="note")
+
+    def archive(self, conversation_id: str, archived: bool = True) -> None:
+        if archived and conversation_id == self.conversation_id:
+            raise ValueError("不能归档当前对话；先切换到别的对话或开新对话")
+        self.chats.archive(conversation_id, archived)
+        title = self.chats.display_title(self.chats.get(conversation_id))
+        self.io.say(f"已{'归档' if archived else '取消归档'}「{title}」。", kind="note")
 
     def rename(self, conversation_id: str, title: str) -> str:
         """A user's title for any conversation (the workbench sidebar renames rows other than the current)."""
@@ -335,6 +353,7 @@ class ChatAgent:
     def run(self) -> None:
         while True:
             try:
+                self.say_due_reminders()
                 text = self.io.ask("你：").strip()
             except FlowInterrupted:
                 self.io.say("对话已保存；再次运行 zhiqiu 可以接着聊。")
@@ -388,7 +407,8 @@ class ChatAgent:
                 self._command(text)
             return
         with tracing.span(self.store, "turn", "chat", conversation_id=self.conversation_id) as span:
-            span.set(approval_policy=self.policy.fingerprint(), **self._input)
+            span.set(approval_policy=self.policy.fingerprint(), **({"model": self.model_name} if self.model_name else {}),
+                     **self._input)
             span.set(end_reason=self._turn(text))
 
     def _turn(self, text: str) -> str:
@@ -501,11 +521,20 @@ class ChatAgent:
         writable = ("；".join(str(root) for root in self.write_roots) + f"（写入{self.policy.describe('write_file')}）"
                     if self.write_roots else f"（未配置{outside or '，不能写文件'}）")
         network = "已关闭（--offline）" if self.offline else NETWORK_TEXT[self.policy.permissions["network"]]
+        if not self.offline and self.policy.permissions["network"] != "deny":
+            search = self.search_status()
+            network += (f"（搜索服务：{search['label']}）" if search["available"]
+                        else "（没有联网搜索工具；用户要搜索时如实告诉他：" + search["text"].split("；", 1)[-1] + "）")
         tools = "" if self.tools_available() else ("\n工具：本模型端点不支持工具调用，本段对话不能联网、读写文件、"
                                                    "查学习状态或提议学习；用户需要学习时请他输入 /learn 知识点")
         return (f"今天：{today}\n学习状态（快照，最新状态请调用 zhiqiu_status）：{status}\n"
                 f"偏好与人设记忆（本段对话开始时的快照）：\n{memory}\n"
                 f"可读目录：{readable}\n可写目录：{writable}\n联网：{network}{tools}")
+
+    def search_status(self) -> dict[str, Any]:
+        """Where this chat's web_search goes, or how to set one up (providers.search_status)."""
+        spec = self.registry.get("web_search")
+        return providers.search_status((spec.service or "Exa") if spec is not None else None)
 
     def tools_available(self) -> bool:
         """False once the endpoint refused tool declarations (remembered by the adapter)."""
@@ -729,6 +758,51 @@ class ChatAgent:
         return {**usage, "trigger": int(SUMMARY_TRIGGER * limit) if limit is not None else None,
                 "messages": len(history), "keep_recent": KEEP_RECENT, "history_messages": HISTORY_MESSAGES,
                 "summarized_upto": summary["upto_seq"] if summary else 0, "can_compact": len(history) > KEEP_RECENT}
+
+    # ----- the model in use -------------------------------------------------------
+
+    @property
+    def model_name(self) -> str:
+        return str(getattr(getattr(self.service, "model", None), "model", ""))
+
+    def model_choices(self) -> list[dict[str, Any]]:
+        """Models offered for switching, each with its price now (None when unpriced) and window."""
+        current = self.model_name
+        result = []
+        for name in prices.choices(current):
+            price = pricing.price_for(name)
+            result.append({"model": name, "current": name == current, "default": name == pricing.default_model(),
+                           "price": price.as_dict() if price else None})
+        return result
+
+    def _models_text(self) -> str:
+        lines = [f"当前模型：{self.model_name}"]
+        for item in self.model_choices():
+            price = item["price"]
+            cost = (f"输入 {price['currency']}{price['now']['input']:g} / 输出 {price['currency']}{price['now']['output']:g}"
+                    f" 每百万 token（{price['source']}）" if price else "未定价")
+            lines.append(f"  {'*' if item['current'] else ' '} {item['model']}  {cost}")
+        lines.append("用 /model 模型名 切换，从下一轮起生效；重启后回到配置的模型。")
+        return "\n".join(lines)
+
+    def use_model(self, name: str) -> None:
+        """Switch the model for the rest of this run (chat and learning flows alike)."""
+        model = getattr(self.service, "model", None)
+        if not callable(getattr(model, "use", None)):
+            raise ValueError("当前的模型连接不支持切换")
+        if name.strip() == model.model:
+            self.io.say(f"已经在用 {model.model}。", kind="note")
+            return
+        model.use(name)
+        context = getattr(self.service, "context", None)
+        if context is not None and callable(getattr(context, "refresh_budget", None)):
+            context.refresh_budget()
+        price = pricing.price_for(model.model)
+        cost = (f"；输入 {price.currency}{price.rates()['input']:g} / 输出 {price.currency}{price.rates()['output']:g}"
+                " 每百万 token" if price else "；还没有它的价格")
+        self.io.say(f"已切换到 {model.model}，从下一轮起生效{cost}。", kind="note")
+        if self.on_model is not None:
+            self.on_model(model.model)
 
     def compact(self) -> None:
         """Fold every unsummarized message but the newest KEEP_RECENT into the summary now (/compact)."""
@@ -966,6 +1040,9 @@ class ChatAgent:
         if name == "propose_memory":
             self._memory_proposal(args)
             return
+        if name == "propose_reminder":
+            self._reminder_proposal(args)
+            return
         reason = args.get("reason") or ""
         try:
             description, runner = self._plan(name, args)
@@ -1024,6 +1101,41 @@ class ChatAgent:
         self.chats.update_payload(message["id"], status="saved")
         self.io.say("已记住；从下一段对话开始生效。")
 
+    def _reminder_proposal(self, args: dict[str, Any]) -> None:
+        """A reminder the model suggested: shown as it will be set, saved only when the user agrees."""
+        try:
+            title, moment, repeat, note = Reminders.check(args.get("title"), args.get("at"), args.get("repeat", "none"),
+                                                          args.get("note", ""))
+        except ValueError as exc:
+            self.io.say(f"这个提醒设不了：{exc}")
+            return
+        when = reminder_text({"next_at": None, "at": reminder_stamp(moment), "repeat": repeat})
+        message = self.chats.add_message(self.conversation_id, "assistant", "proposal", f"提醒：{when} {title}",
+                                         {"tool": "propose_reminder", "args": args, "status": "pending"})
+        self.io.say(f"建议设一个提醒：{when}  {title}" + (f"\n  备注：{note}" if note else "")
+                    + (f"\n  理由：{args['reason']}" if args.get("reason") else ""))
+        if not self.io.confirm("要设这个提醒吗？"):
+            self.chats.update_payload(message["id"], status="rejected")
+            guardrails.record(self.store, "proposal_rejected", "denied_by_user", title, tool="propose_reminder")
+            self.io.say("好的，不设。")
+            return
+        row = Reminders(self.store).create(title, reminder_stamp(moment), repeat, note,
+                                           conversation_id=self.conversation_id)
+        self.chats.update_payload(message["id"], status="saved", reminder_id=row["id"])
+        self.io.say(f"已设提醒：{reminder_text(row)}  {title}。到时间工作台会提醒你；没开着时，下次打开会补报。")
+
+    def _reminder_precheck(self, args: dict[str, Any]) -> None:
+        try:
+            Reminders.check(args.get("title"), args.get("at"), args.get("repeat", "none"), args.get("note", ""))
+        except ValueError as exc:
+            raise ToolError("invalid_args", str(exc)) from None
+
+    def say_due_reminders(self) -> None:
+        """The terminal's own reminders: said before each prompt (the workbench has a timer for this)."""
+        for row in Reminders(self.store).fire():
+            late = f"（本该在 {row['due_at'][5:]}）" if row["late"] else ""
+            self.io.say(f"⏰ 提醒：{row['title']}{late}" + (f"\n  {row['note']}" if row["note"] else ""), kind="note")
+
     def _memory_precheck(self, args: dict[str, Any]) -> None:
         key, content = args["key"].strip(), args["content"].strip()
         if not key.startswith(MEMORY_PREFIXES) or len(key) <= 5:
@@ -1053,6 +1165,15 @@ class ChatAgent:
                            {"type": "object", "additionalProperties": False,
                             "properties": {"target_id": {"type": "string", "minLength": 1, "maxLength": 64},
                                            "reason": _REASON}}),
+            _proposal_spec("propose_reminder", "建议设一个定时提醒（到时间提醒用户做某事，例如复习、交作业）。at 为本地时间 "
+                           "YYYY-MM-DD HH:MM；repeat 为 none（一次）、daily、weekdays 或 weekly。不确定现在几点时先调用 "
+                           "zhiqiu_status（其中 now 是当前时间）。用户确认后才保存。",
+                           {"type": "object", "additionalProperties": False, "required": ["title", "at"],
+                            "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 60},
+                                           "at": {"type": "string", "minLength": 16, "maxLength": 16},
+                                           "repeat": {"type": "string", "enum": list(REPEATS)},
+                                           "note": {"type": "string", "maxLength": 200}, "reason": _REASON}},
+                           precheck=self._reminder_precheck),
             _proposal_spec("propose_memory", "建议把用户明确表达的长期偏好或人设记下来（key 以 pref. 或 soul. 开头）。用户确认后才保存。",
                            {"type": "object", "additionalProperties": False, "required": ["key", "content"],
                             "properties": {"key": {"type": "string", "minLength": 6, "maxLength": 60},
@@ -1084,10 +1205,16 @@ class ChatAgent:
                 self._show_chats()
             elif name == "/open":
                 self._open_listed(rest[0] if rest else "")
+            elif name == "/archive":
+                if not rest:
+                    raise ValueError("用法：/archive 编号（先用 /chats 列出）或 /archive 短号")
+                self.archive(self._listed_target(rest[0]))
             elif name == "/detail":
                 self._show_detail(rest[0] if rest else None)
             elif name == "/compact":
                 self.compact()
+            elif name == "/model":
+                self.use_model(rest[0]) if rest else self.io.say(self._models_text())
             elif name == "/memory":
                 items = self.memory.list_semantic(None)
                 self.io.say("\n".join(f"  {item['key']}：{item['content']}" for item in items) or "还没有记忆。")
@@ -1137,20 +1264,31 @@ class ChatAgent:
         show_outcome_detail(self.io, self.store, json.loads(receipt[0]))
 
     def _show_chats(self) -> None:
-        """`/chats`: the recent conversations with messages, numbered for one following /open."""
+        """`/chats`: the recent conversations with messages (archived ones left out), grouped, numbered for
+        one following /open or /archive."""
         rows = [row for row in self.chats.recent(CHATS_LISTED * 3)
                 if row["messages"] or row["id"] == self.conversation_id][:CHATS_LISTED]
+        # Grouped ones first, group by group, in the order each group was last used; then the ungrouped.
+        order = list(dict.fromkeys(row["group_name"] for row in rows if row["group_name"])) + [""]
+        rows = [row for name in order for row in rows if row["group_name"] == name]
         self._listed = [row["id"] for row in rows]
         today = self.store.clock.today().isoformat()
-        lines = [f"{number}. {row['title']} · {'今天' if row['chat_date'] == today else row['chat_date'][5:]} · "
-                 f"{row['messages']} 条" + ("（当前）" if row["id"] == self.conversation_id else "")
-                 for number, row in enumerate(rows, 1)]
-        self.io.say("\n".join(lines + ["输入 /open 编号 切换（编号只对下一条输入有效）。"]))
+        lines, heading = [], None
+        for number, row in enumerate(rows, 1):
+            if row["group_name"] != heading and (row["group_name"] or heading):
+                heading = row["group_name"]
+                lines.append(f"【{heading or '未分组'}】")
+            lines.append(f"{number}. {row['title']} · {'今天' if row['chat_date'] == today else row['chat_date'][5:]} · "
+                         f"{row['messages']} 条" + ("（当前）" if row["id"] == self.conversation_id else ""))
+        self.io.say("\n".join(lines + ["输入 /open 编号 切换，/archive 编号 归档（编号只对下一条输入有效）。"]))
 
     def _open_listed(self, value: str) -> None:
         """`/open 编号|短号`: a number from the /chats just shown, or a conversation's short id."""
         if not value:
             raise ValueError("用法：/open 编号（先用 /chats 列出）或 /open 短号")
+        self.switch(self._listed_target(value))
+
+    def _listed_target(self, value: str) -> str:
         if value.isdigit() and len(value) < MIN_PREFIX:
             if not self._offered:
                 raise ValueError("编号已失效，请先用 /chats 重新列出。")
@@ -1161,7 +1299,7 @@ class ChatAgent:
         else:
             target = resolve_prefix(value, [row[0] for row in self.store.db.execute(
                 "SELECT id FROM conversations ORDER BY rowid DESC")], "对话")
-        self.switch(target)
+        return target
 
     @staticmethod
     def _resolve_prefix(prefix: str, matches: list[str], label: str) -> str:

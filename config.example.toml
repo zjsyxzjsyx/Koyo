@@ -6,6 +6,7 @@
 base_url = ""  # API 根路径，例如 https://api.deepseek.com/v1
 model = ""  # 模型名
 api_key = ""  # 必填；也可以只写在 .env 或环境变量里
+# choices = ["deepseek-flash", "deepseek-v4-pro"]  # 输入框模型按钮里可选的模型；不填用端点的模型列表和价格页上的模型
 stream = true  # 流式输出
 # window = 131072  # 上下文窗口（token），不填不做超限判断
 # output_reserve = 8192  # 输出预留，也是请求的 max_tokens
@@ -50,6 +51,7 @@ language = "auto"  # 识别语言
 # 其他服务
 [services]
 exa_api_key = ""  # Exa 联网搜索
+search = "auto"  # 联网搜索来源：auto 有 Exa 密钥用 Exa，否则用模型端点自带的搜索（如 DeepSeek，按次计费）；exa、provider 只用其中一个；off 不搜索
 notion_token = ""  # Notion 内部集成令牌（learn --notion）
 mcp_config = ""  # 外部 MCP 工具配置文件
 approval_config = ""  # 对话审批策略文件
@@ -60,6 +62,8 @@ approval_config = ""  # 对话审批策略文件
 # cached_input = 0.5  # 缓存命中的输入，不填按输入价
 # output = 8  # 输出
 currency = ""  # 金额前缀，例如 ¥ 或 $
+# models = { "deepseek-v4-pro" = { input = 9, cached_input = 0.3, output = 27, currency = "¥" } }  # 按模型手填价格，优先于价格页
+auto_update = true  # 工作台启动时，若价格超过 7 天未更新，就读一次厂商价格页（一次小的模型调用）
 
 # 观测
 [trace]

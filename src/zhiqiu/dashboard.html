@@ -276,6 +276,23 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .vmark svg.i { width: 12px; height: 12px; }
 .composer textarea { display: block; width: 100%; min-height: 44px; max-height: 200px; resize: none; font: inherit; color: var(--ink); background: transparent; border: 0; padding: 4px 2px; }
 .composer textarea:focus { outline: none; }
+.composer { --mm: 0; }
+.composer .box { position: relative; }
+.composer .modelbtn { padding: 3px 9px; font-size: 12px; color: var(--ink2); border-radius: 999px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .modelbtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.modelmenu { position: absolute; left: 8px; bottom: calc(100% + 6px); z-index: 6; width: min(420px, calc(100vw - 32px)); max-height: 60vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: 12px; box-shadow: 0 8px 28px rgba(0, 0, 0, .14); padding: 6px; font-size: 12.5px; }
+.modelmenu .mh { font-size: 11px; color: var(--ink3); letter-spacing: .04em; padding: 4px 8px 6px; }
+.modelmenu .mi { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 2px 8px; align-items: baseline; width: 100%; text-align: left;
+  background: none; border: 0; border-radius: 8px; padding: 7px 8px; color: var(--ink); cursor: pointer; font: inherit; }
+.modelmenu .mi:hover:not(:disabled) { background: var(--accent-soft); }
+.modelmenu .mi:disabled { cursor: default; }
+.modelmenu .mi .ck { color: var(--accent); font-weight: 700; }
+.modelmenu .mi .nm { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelmenu .mi .pr { color: var(--ink2); white-space: nowrap; }
+.modelmenu .mi .sub { grid-column: 2 / 4; color: var(--ink3); font-size: 11.5px; }
+.modelmenu .mf { border-top: 1px solid var(--line); margin-top: 4px; padding: 8px 8px 4px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; color: var(--ink3); font-size: 11.5px; }
+.modelmenu .mf .btn { padding: 3px 9px; font-size: 12px; }
 .composer .state { flex: 1; min-width: 0; font-size: 11.5px; color: var(--ink3); display: flex; gap: 8px; align-items: center; min-height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .chatgrid { display: grid; grid-template-columns: 210px minmax(0, 1fr) 270px; gap: 20px; align-items: start; }
 .convs { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; font-size: 12.5px; }
@@ -293,6 +310,31 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .convs .tag { display: inline-block; font-size: 10.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
 .convs.off .cbody { opacity: .5; pointer-events: none; }
 .convs .offnote { color: var(--ink3); font-size: 11.5px; margin: 0 0 6px; }
+.convs .cnew { display: flex; gap: 6px; margin-bottom: 8px; }
+.convs .cnew .new { flex: 1; margin: 0; }
+.convs .cnew .btn { padding: 4px 8px; font-size: 12px; }
+.convs .ginput { width: 100%; font: inherit; font-size: 12.5px; padding: 5px 8px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); color: var(--ink); margin-bottom: 6px; }
+.cgroup { margin: 2px 0 6px; }
+.cgroup > summary { list-style: none; display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-radius: 7px; cursor: pointer; color: var(--ink2); font-size: 11.5px; font-weight: 600; letter-spacing: .02em; }
+.cgroup > summary::-webkit-details-marker { display: none; }
+.cgroup > summary::before { content: "▸"; font-size: 10px; color: var(--ink3); transition: transform .15s; }
+.cgroup[open] > summary::before { transform: rotate(90deg); }
+.cgroup > summary .gn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cgroup > summary .gc { color: var(--ink3); font-weight: 400; }
+.cgroup > summary button { border: 0; background: none; color: var(--ink3); cursor: pointer; padding: 0 4px; border-radius: 5px; font-size: 13px; visibility: hidden; }
+.cgroup > summary:hover button { visibility: visible; }
+.cgroup > summary button:hover { background: var(--line); color: var(--ink); }
+.cgroup > summary.drop { background: var(--accent-soft); outline: 1px dashed var(--accent); }
+.cgroup.cgarch > summary { color: var(--ink3); }
+.convs .crow.archived .ct { color: var(--ink2); }
+.cmenu { position: fixed; z-index: 20; min-width: 168px; max-width: 240px; background: var(--panel); border: 1px solid var(--line2); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .14); padding: 4px; font-size: 12.5px; }
+.cmenu button { display: block; width: 100%; text-align: left; font: inherit; background: none; border: 0; border-radius: 7px; padding: 6px 9px; color: var(--ink); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmenu button:hover:not(:disabled) { background: var(--accent-soft); }
+.cmenu button:disabled { color: var(--ink3); cursor: default; }
+.cmenu .sep { border-top: 1px solid var(--line); margin: 4px 2px; }
+.cmenu .lbl { color: var(--ink3); font-size: 11px; padding: 4px 9px 2px; }
 .chatmain { min-width: 0; display: flex; flex-direction: column; min-height: calc(100vh - var(--headh, 90px)); }
 .chatmain .stream { flex: 1; }
 /* Context usage in the status panel: one bar split by part, the auto-summary line, and the compact button. */
@@ -314,6 +356,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .cal .cb b { display: block; font-size: 18px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.3; }
 .cal .cb.bad { background: var(--bad-soft); color: var(--bad); } .cal .cb.bad b { color: var(--bad); }
 .cal .cb.hot { background: var(--accent-soft); color: var(--accent); } .cal .cb.hot b { color: var(--accent); }
+.cal .cb.warm { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); } .cal .cb.warm b { color: var(--warn); }
 .cal .cnav { display: flex; align-items: center; gap: 4px; font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
 .cal .cnav span { flex: 1; text-align: center; }
 .cal .cnav button { font: inherit; font-size: 12px; border: 1px solid var(--line2); background: var(--panel); color: var(--ink2); border-radius: 6px; padding: 0 8px; line-height: 20px; cursor: pointer; }
@@ -332,9 +375,50 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .cgrid .cd i.ok { color: var(--good); }
 .cgrid .cd.today i { color: #fff; }
 .cal .clist { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.cgrid .cd b.rm { position: absolute; top: 3px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
+.cgrid .cd { position: relative; }
+.cal .rrow { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-top: 1px solid var(--line); }
+.cal .rrow:first-of-type { border-top: 0; }
+.cal .rrow .tm { font-family: var(--mono); font-size: 11.5px; color: var(--warn); }
+.cal .rrow .tt { flex: 1; min-width: 0; }
+.cal .rrow .x { border: 0; background: none; color: var(--ink3); cursor: pointer; font-size: 12px; padding: 0 3px; border-radius: 4px; }
+.cal .rrow .x:hover { background: var(--line); color: var(--ink); }
+.cal .rform { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 6px; margin-top: 6px; align-items: center; }
+.cal .rform input, .cal .rform select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line2); border-radius: 6px; background: var(--panel); color: var(--ink); min-width: 0; }
+.cal .rform .wide { grid-column: 1 / 3; }
+.cal .rform .acts { grid-column: 1 / 3; display: flex; gap: 6px; justify-content: flex-end; }
+.cal .rform .btn { padding: 2px 9px; font-size: 12px; }
+.rcard { border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+.rcard .head { font-weight: 650; display: flex; gap: 6px; align-items: center; }
+.rcard .acts { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.rcard.done { opacity: .6; border-color: var(--line2); background: var(--panel); }
 .cal .clist h5 { font-size: 11.5px; color: var(--ink2); font-weight: 600; margin: 0 0 5px; }
 .cal .clist h5.bad { color: var(--bad); }
 .spanel { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; font-size: 12.5px; }
+/* The right column's tabs: the status, a file browser, and the files opened from the chat (like an editor). */
+.chatgrid.wide { grid-template-columns: 210px minmax(0, 1fr) var(--pw, 480px); }
+.ptabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 8px; padding-bottom: 2px; scrollbar-width: thin; }
+.ptabs .pt { flex: none; display: flex; align-items: center; gap: 4px; max-width: 170px; font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink2); cursor: pointer; }
+.ptabs .pt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptabs .pt.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.ptabs .pt .x { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 2px; font-size: 13px; line-height: 1; opacity: .6; }
+.ptabs .pt .x:hover { opacity: 1; }
+.pfile .fhead { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.pfile .fhead .path { flex: 1; min-width: 0; }
+.pfile .fhead .btn { padding: 2px 8px; font-size: 11.5px; }
+.pfile .fbody { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; overflow-x: auto; }
+.pfile .fbody.code { padding: 8px 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre; }
+.pfile .fbody.code .ln { display: inline-block; width: 3.6em; padding-right: 10px; text-align: right; color: var(--ink3); user-select: none; }
+.pfile .flist .fe { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; font: inherit; background: none; border: 0; border-top: 1px solid var(--line);
+  padding: 5px 4px; color: var(--ink); cursor: pointer; }
+.pfile .flist .fe:first-child { border-top: 0; }
+.pfile .flist .fe:hover:not(:disabled) { background: var(--soft); }
+.pfile .flist .fe:disabled { color: var(--ink3); cursor: default; }
+.pfile .flist .fe .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdrag { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; z-index: 2; cursor: col-resize; border-radius: 4px; }
+.pdrag:hover, .pdrag.on { background: var(--accent-soft); }
+.md code.fp, a.fp { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .spanel > summary { display: none; }
 .spanel section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
 .spanel h4 { font-size: 11px; letter-spacing: .06em; color: var(--ink3); font-weight: 600; margin-bottom: 6px; display: flex; gap: 6px; align-items: center; }
@@ -352,7 +436,8 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .md table { margin: 6px 0; font-size: 12.5px; } .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
 @media (min-width: 861px) and (max-width: 1180px) {
   /* Mid widths: conversations and the status panel share the left rail; the chat keeps the room. */
-  .chatgrid { grid-template-columns: 220px minmax(0, 1fr); }
+  .chatgrid, .chatgrid.wide { grid-template-columns: 220px minmax(0, 1fr); }
+  .pdrag { display: none; }
   .convs { grid-column: 1; grid-row: 1; position: static; max-height: none; }
   .spanel { grid-column: 1; grid-row: 2; position: static; max-height: none; }
   .chatmain { grid-column: 2; grid-row: 1 / span 2; }
@@ -364,7 +449,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   main { height: auto; padding: 0 16px 30px; overflow: visible; }
   .split { grid-template-columns: 1fr; } .detail { position: static; max-height: none; }
   .row, .axis { grid-template-columns: minmax(0, 1fr) 30% 52px; }
-  .chatgrid { grid-template-columns: 1fr; gap: 0; }
+  .chatgrid, .chatgrid.wide { grid-template-columns: 1fr; gap: 0; }
   .week { grid-template-columns: 1fr; }
   .sday { min-height: 0; }
   .mcell { min-height: 44px; padding: 3px 4px; } .mcell .t { display: none; }
@@ -462,7 +547,7 @@ const go = (hash) => { if (location.hash !== hash) location.hash = hash; else ro
 
 async function api(path) {
   // Chat content and the root settings exist only in the workbench, and only answer our page's token.
-  const headers = /^\/api\/(chat|roots)(\/|$)/.test(path.split("?")[0]) ? {"X-Zhiqiu-Token": WB.token} : {};
+  const headers = /^\/api\/(chat|roots|files)(\/|$)/.test(path.split("?")[0]) ? {"X-Zhiqiu-Token": WB.token} : {};
   const response = await fetch(path, {cache: "no-store", headers});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
@@ -535,6 +620,24 @@ document.addEventListener("click", (event) => {
   if (rootButton) { rootsAction(rootButton); return; }
   const review = event.target.closest("[data-review]");
   if (review) { schReview(review.dataset.review); return; }
+  const fopen = event.target.closest("[data-fopen]");
+  if (fopen) { event.preventDefault(); paneOpen(fopen.dataset.fopen); return; }
+  const fdir = event.target.closest("[data-fdir]");
+  if (fdir) { event.preventDefault(); paneBrowse(fdir.dataset.fdir); return; }
+  const ftab = event.target.closest("[data-ftab]");
+  if (ftab) {
+    const close = event.target.closest("[data-fclose]");
+    if (close) paneClose(close.dataset.fclose); else paneShow(ftab.dataset.ftab);
+    return;
+  }
+  const fact = event.target.closest("[data-fcopy],[data-frefresh]");
+  if (fact) {
+    if (fact.dataset.fcopy !== undefined) navigator.clipboard?.writeText(fact.dataset.fcopy).then(() => pulse(), () => {});
+    else paneLoad(fact.dataset.frefresh, true);
+    return;
+  }
+  const remind = event.target.closest("[data-rnew],[data-rform],[data-rcancel],[data-rsnooze],[data-rok]");
+  if (remind) { event.preventDefault(); remindAction(remind); return; }
   const compact = event.target.closest("[data-compact]");
   if (compact) { chatCompact(compact); return; }
   const cal = event.target.closest("[data-cal]");
@@ -1149,11 +1252,15 @@ async function viewMetrics() {
   S.currency = d.currency;
   setHead("指标与花费", `最近 ${S.days} 天${d.priced ? "" : " · 未配置价格，只显示 token"}`);
   const stages = Object.entries(m.by_stage);
+  const models = Object.entries(m.by_model || {}).sort((a, b) => b[1].tokens_in - a[1].tokens_in);
   const tools = Object.entries(d.tools.by_tool);
   $("#view").innerHTML = tiles([["模型调用", num(m.calls)], ["错误率", pct(m.error_rate)], ["无效输出率", pct(m.invalid_rate)],
     ["p50 / p95", `${ms(m.p50_ms)}<span class="faint" style="font-size:12px"> / ${ms(m.p95_ms)}</span>`], ["首字 p50 / p95", ttftCell(m)], ["输入 token", num(m.tokens_in)], ["缓存命中率", pct(m.cache_hit_rate)],
     ["输出 token", num(m.tokens_out)], ["花费", money(m.cost)], ["工具调用", num(d.tools.calls)], ["确认被拒", `${num(d.human.denied_by_user)} / ${num(d.human.confirmations_asked)}`]]) +
     `<h2>每日 token</h2><div class="card">${dailyChart(d.daily)}</div>
+    ${models.length ? `<h2>按模型</h2><div class="card" style="padding:4px 8px"><table><thead><tr><th>模型</th><th class="num">调用</th><th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th>价格（每百万 token，输入 / 输出）</th><th class="num">花费</th></tr></thead><tbody>` +
+      models.map(([k, s]) => `<tr><td class="mono">${esc(k)}</td><td class="num">${num(s.calls)}</td><td class="num">${num(s.tokens_in)}</td><td class="num">${num(s.tokens_cached)}</td><td class="num">${num(s.tokens_out)}</td>
+      <td>${s.price ? `${esc(modelPrice(s.price))} <span class="faint">${esc(s.price.source === "价格页" ? `价格页 ${(s.price.fetched_at || "").slice(0, 10)}` : "手填")}</span>` : `<span class="faint">未定价</span>`}</td><td class="num">${money(s.cost)}</td></tr>`).join("") + "</tbody></table></div>" : ""}
     <h2>按阶段</h2><div class="card" style="padding:4px 8px">${stages.length ? `<table><thead><tr><th>阶段</th><th class="num">调用</th><th class="num">错误</th><th class="num">无效</th>
       <th class="num">p95</th><th class="num">首字 p50 / p95</th><th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th class="num">花费</th></tr></thead><tbody>` +
       stages.sort((a, b) => b[1].tokens_in - a[1].tokens_in).map(([k, s]) => `<tr><td>${esc(STAGE[k] || k)} <span class="faint mono">${esc(k)}</span></td><td class="num">${num(s.calls)}</td>
@@ -1471,8 +1578,14 @@ async function viewAttempt(id) {
 
 // Markdown for the model's answers. Everything is escaped first; only these few constructs then become
 // tags, built from already-escaped text, so no HTML from an answer can run. Links show their address as text.
+// Looks like a file path (has a folder separator and an extension): opened in the file pane when clicked.
+const FILEISH = /^(?:[A-Za-z]:)?[^\s:*?"<>|]*[\\/][^\s:*?"<>|]*\.[A-Za-z0-9]{1,8}$/;
+// Absolute Windows paths with an extension inside a line of plain text (tool notes).
+const ABSPATH = /[A-Za-z]:\\[^\s，。；：、（）()"'<>]+\.[A-Za-z0-9]{1,8}/g;
+const linkPaths = (escaped) => escaped.replace(ABSPATH, (p) => `<a class="lnk fp" data-fopen="${p}" title="在右侧打开">${p}</a>`);
+
 function md(source) {
-  const inline = (s) => s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+  const inline = (s) => s.replace(/`([^`]+)`/g, (m, c) => FILEISH.test(c) ? `<code class="fp" data-fopen="${c}" title="在右侧打开">${c}</code>` : `<code>${c}</code>`).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1（$2）");
   const cells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
   const lines = esc(source).split("\n");
@@ -1529,29 +1642,70 @@ function chatMount() {
   const narrow = matchMedia("(max-width: 860px)").matches;
   $("#view").innerHTML = `<div class="chatgrid"><details class="convs" id="convs"${narrow ? "" : " open"}><summary>会话</summary>
       <div class="offnote" id="convsoff" hidden>先回答或停止当前提示</div>
-      <div class="cbody"><button class="btn primary new" id="newchat">新对话</button><div id="clist"><div class="faint">加载中…</div></div></div></details>
+      <div class="cbody"><div class="cnew"><button class="btn primary new" id="newchat">新对话</button><button class="btn" id="newgroup" title="新建分组">＋分组</button></div>
+      <div id="clist"><div class="faint">加载中…</div></div></div></details>
     <div class="chatmain"><div class="stream" id="stream"></div>
     <div class="composer"><div class="box"><div class="askbar" id="askbar" hidden></div>
       <textarea id="say" rows="1" placeholder="和知秋说点什么（/help 查看命令，Shift+Enter 换行）"></textarea>
-      <div class="line"><div class="state" id="cstate"></div>
+      <div class="line"><button class="btn modelbtn" id="modelbtn" aria-haspopup="true" aria-expanded="false" title="切换模型">模型 ▾</button>
+        <div class="modelmenu" id="modelmenu" hidden></div><div class="state" id="cstate"></div>
         <button class="btn mic" id="mic" hidden title="按住说话，松开结束（本地识别，录音不保存）" aria-label="按住说话">${icon("mic")}</button>
         <button class="btn" id="stop" disabled title="停止正在等待的提问或审批">停止</button><button class="btn primary" id="send">发送</button></div></div>
       <div class="vhint" id="vhint" hidden></div></div></div>
-    <details class="spanel" id="spanel"${narrow ? "" : " open"}><summary>复习计划与当前状态</summary>
-      <section class="cal" id="spcal"><div class="faint">复习计划加载中…</div></section><div id="spbody"><div class="faint">加载中…</div></div></details></div>`;
+    <details class="spanel" id="spanel"${narrow ? "" : " open"}><summary>复习计划、状态与文件</summary><div class="pdrag" id="pdrag" title="拖动调整宽度"></div>
+      <div class="ptabs" id="ptabs"></div>
+      <div id="pstatus"><section class="cal" id="spcal"><div class="faint">复习计划加载中…</div></section><div id="spbody"><div class="faint">加载中…</div></div></div>
+      <div class="pfile" id="pfile" hidden></div></details></div>`;
   chatFitHead();
   chatUnmount();
   Object.assign(C, {mounted: true, after: 0, cards: {}, ask: null, busy: false, pending: [], loaded: null, convs: [], renaming: null,
     dirty: true, progress: null, compacting: false});
   $("#newchat").addEventListener("click", () => chatControl("/api/chat/new", {}));
+  $("#newgroup").addEventListener("click", () => groupInput());
+  $("#clist").addEventListener("dragstart", (e) => {
+    const row = e.target.closest(".crow[data-conv]");
+    if (row) { e.dataTransfer.setData("text/zq-conv", row.dataset.conv); e.dataTransfer.effectAllowed = "move"; }
+  });
+  $("#clist").addEventListener("dragover", (e) => {
+    const zone = e.target.closest("[data-gdrop]");
+    if (zone && e.dataTransfer.types.includes("text/zq-conv")) { e.preventDefault(); zone.classList.add("drop"); }
+  });
+  $("#clist").addEventListener("dragleave", (e) => e.target.closest("[data-gdrop]")?.classList.remove("drop"));
+  $("#clist").addEventListener("drop", (e) => {
+    const zone = e.target.closest("[data-gdrop]");
+    const id = e.dataTransfer.getData("text/zq-conv");
+    if (!zone || !id) return;
+    e.preventDefault();
+    zone.classList.remove("drop");
+    convOrganize("/api/chat/move", {conversation_id: id, group_id: zone.dataset.gdrop || null});
+  });
+  $("#clist").addEventListener("toggle", (e) => {
+    const group = e.target.closest?.("details[data-group]");
+    if (!group) return;
+    GROUPS_OPEN[group.dataset.group] = group.open;
+    try { localStorage.setItem("zq.groups", JSON.stringify(GROUPS_OPEN)); } catch (err) { /* not kept */ }
+  }, true);
   $("#clist").addEventListener("click", (e) => {
+    const gact = e.target.closest("[data-gnew],[data-gmenu]");
+    if (gact) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (gact.dataset.gnew !== undefined) chatControl("/api/chat/new_in", {group_id: gact.dataset.gnew});
+      else groupMenu(gact);
+      return;
+    }
     const rename = e.target.closest("[data-rename]");
-    if (rename) { e.stopPropagation(); convRename(rename.dataset.rename); return; }
+    if (rename) { e.stopPropagation(); convMenu(rename); return; }
     const row = e.target.closest(".crow[data-conv]");
     if (row && !row.classList.contains("on") && !e.target.closest("input")) chatControl("/api/chat/switch", {conversation_id: row.dataset.conv});
   });
   $("#say").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); } });
   $("#send").addEventListener("click", chatSend);
+  $("#modelbtn").addEventListener("click", (e) => { e.stopPropagation(); modelToggle(); });
+  $("#pdrag").addEventListener("pointerdown", paneDrag);
+  paneRender();
+  $("#modelmenu").addEventListener("click", (e) => { e.stopPropagation(); modelClick(e); });
+  modelLoad().catch((e) => pulse(e.message));
   $("#mic").addEventListener("pointerdown", micStart);
   for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) $("#mic").addEventListener(name, micStop);
   $("#mic").hidden = !V.available;
@@ -1954,6 +2108,8 @@ function chatDraft(e) {
 }
 
 function chatEvent(e) {
+  // A switch, a finished turn or new prices: the model button reads again.
+  if (e.kind === "prices" || e.kind === "idle") modelLoad().catch(() => {});
   // A stage's reply is still arriving; anything said or asked next means it is done.
   if (e.kind === "progress") { C.progress = e; chatProgress(); return; }
   if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, grant: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
@@ -1968,7 +2124,7 @@ function chatEvent(e) {
     node.innerHTML = md(e.text);
   } else if (e.kind === "say") {
     // Tool call notes and system notes are small print; everything else is the agent talking.
-    if (e.say_kind === "tool") chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${esc(e.text)}</span></div>`);
+    if (e.say_kind === "tool") chatAppend(`<div class="note">${icon("tool", "k-tool")}<span>${linkPaths(esc(e.text))}</span></div>`);
     else if (e.say_kind === "note") chatNote(e.text);
     else if (e.say_kind === "outcome") chatAppend(outcomeCard(e));
     else {
@@ -1994,6 +2150,7 @@ function chatEvent(e) {
     if (e.kind === "ask") C.ask = e.request_id;
   } else if (e.kind === "resolved") resolveCard(e);
   else if (e.kind === "voice_install") voiceInstallEvent(e);
+  else if (e.kind === "reminder") reminderEvent(e);
   else if (e.kind === "status") chatNote(e.text);
   else if (e.kind === "error") chatNote(e.text, true);
 }
@@ -2067,9 +2224,23 @@ async function chatConvs() {
   C.convs = d.conversations;
   const list = $("#clist");
   if (!list || C.renaming) return;
-  list.innerHTML = d.conversations.map((c) => `<div class="crow${c.current ? " on" : ""}" data-conv="${esc(c.id)}" title="${esc(c.title)}">
-      <div class="ct">${esc(c.title)}</div><button class="rn" data-rename="${esc(c.id)}" title="改名">✎</button>
-      <div class="cm">${esc(dayLabel(c.chat_date))} · ${num(c.messages)} 条${c.resumable ? `<span class="tag">可继续</span>` : ""}</div></div>`).join("")
+  C.groups = d.groups || [];
+  const row = (c) => `<div class="crow${c.current ? " on" : ""}${c.archived ? " archived" : ""}" data-conv="${esc(c.id)}" title="${esc(c.title)}"${c.current ? "" : ` draggable="true"`}>
+      <div class="ct">${esc(c.title)}</div><button class="rn" data-rename="${esc(c.id)}" title="改名、移到分组、归档">⋯</button>
+      <div class="cm">${esc(dayLabel(c.chat_date))} · ${num(c.messages)} 条${c.resumable ? `<span class="tag">可继续</span>` : ""}</div></div>`;
+  const live = d.conversations.filter((c) => !c.archived);
+  const archived = d.conversations.filter((c) => c.archived);
+  const section = (key, name, items, {group = null, closed = false, cls = ""} = {}) => {
+    const open = GROUPS_OPEN[key] ?? !closed;
+    const tools = group ? `<button data-gnew="${esc(group)}" title="在这个分组里开新对话">＋</button><button data-gmenu="${esc(group)}" title="改名或删除分组">⋯</button>` : "";
+    return `<details class="cgroup ${cls}" data-group="${esc(key)}"${open ? " open" : ""}><summary${key !== "@archive" ? ` data-gdrop="${esc(group || "")}"` : ""}>
+      <span class="gn">${esc(name)}</span><span class="gc">${num(items.length)}</span>${tools}</summary>${items.map(row).join("") || `<div class="faint" style="padding:4px 9px">拖对话到这里</div>`}</details>`;
+  };
+  const grouped = C.groups.map((g) => section(g.id, g.name, live.filter((c) => c.group_id === g.id), {group: g.id})).join("");
+  const loose = live.filter((c) => !c.group_id);
+  // Without any group the list looks as before: no headings at all.
+  list.innerHTML = (C.groups.length ? grouped + (loose.length ? section("@none", "未分组", loose) : "") : loose.map(row).join(""))
+    + (archived.length ? section("@archive", "已归档", archived, {closed: true, cls: "cgarch"}) : "")
     || `<div class="faint">还没有对话</div>`;
   chatHead();
 }
@@ -2078,6 +2249,91 @@ function chatHead() {
   const current = C.convs.find((c) => c.current);
   setHead("对话", current ? current.title : "", C.pending.length ? pill("running", "等待你") : C.busy ? pill("running", "处理中") : pill("ok", "空闲"));
   $("#sub").title = current ? current.id : "";  // the full id only on hover
+}
+
+// Which group sections are open (by group id; "@none", "@archive"), remembered per browser.
+let GROUPS_OPEN = {};
+try { GROUPS_OPEN = JSON.parse(localStorage.getItem("zq.groups") || "{}"); } catch (e) { /* all open */ }
+
+async function convOrganize(path, body) {
+  try { await post(path, body); } catch (e) { chatNote(e.message, true); }
+  await chatConvs().catch((e) => pulse(e.message));
+}
+
+function popMenu(anchor, html, onPick) {
+  document.querySelector(".cmenu")?.remove();
+  const menu = document.createElement("div");
+  menu.className = "cmenu";
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+  const box = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.min(box.left, window.innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(box.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+  menu.addEventListener("click", (e) => {
+    const pick = e.target.closest("button[data-pick]");
+    if (!pick || pick.disabled) return;
+    e.stopPropagation();
+    menu.remove();
+    onPick(pick.dataset.pick);
+  });
+  setTimeout(() => document.addEventListener("click", () => menu.remove(), {once: true}));
+}
+
+function convMenu(button) {
+  const id = button.dataset.rename;
+  const item = C.convs.find((c) => c.id === id);
+  if (!item) return;
+  const groups = (C.groups || []).map((g) => `<button data-pick="move:${esc(g.id)}"${item.group_id === g.id ? " disabled" : ""}>${esc(g.name)}${item.group_id === g.id ? " ✓" : ""}</button>`).join("");
+  popMenu(button, `<button data-pick="rename">改名</button><div class="sep"></div><div class="lbl">移到分组</div>${groups}
+    <button data-pick="move:"${item.group_id ? "" : " disabled"}>未分组${item.group_id ? "" : " ✓"}</button><button data-pick="newgroup">新建分组并移入…</button><div class="sep"></div>
+    ${item.archived ? `<button data-pick="unarchive">取消归档</button>` : `<button data-pick="archive"${item.current ? " disabled title=\"不能归档当前对话\"" : ""}>归档</button>`}`,
+  (pick) => {
+    if (pick === "rename") convRename(id);
+    else if (pick === "newgroup") groupInput(id);
+    else if (pick.startsWith("move:")) convOrganize("/api/chat/move", {conversation_id: id, group_id: pick.slice(5) || null});
+    else convOrganize("/api/chat/archive", {conversation_id: id, archived: pick === "archive"});
+  });
+}
+
+function groupMenu(button) {
+  const id = button.dataset.gmenu;
+  const group = (C.groups || []).find((g) => g.id === id);
+  if (!group) return;
+  popMenu(button, `<button data-pick="rename">改名</button><button data-pick="delete">删除分组（对话移到未分组）</button>`, (pick) => {
+    if (pick === "rename") groupInput(null, group);
+    else convOrganize("/api/chat/groups/delete", {group_id: id});
+  });
+}
+
+// An input at the top of the list: a new group (then moving a conversation into it), or a group's new name.
+function groupInput(moveId = null, group = null) {
+  const list = $("#clist");
+  list.querySelector(".ginput")?.remove();
+  list.insertAdjacentHTML("afterbegin", `<input class="ginput" maxlength="20" placeholder="${group ? "分组的新名字" : "新分组的名字"}，回车确定">`);
+  const input = list.querySelector(".ginput");
+  input.value = group ? group.name : "";
+  input.focus();
+  input.select();
+  C.renaming = "@group";
+  let finished = false;
+  const done = async (save) => {
+    if (finished) return;
+    finished = true;
+    C.renaming = null;
+    const name = input.value.trim();
+    input.remove();
+    if (!save || !name || (group && name === group.name)) { await chatConvs().catch((e) => pulse(e.message)); return; }
+    try {
+      const r = await post(group ? "/api/chat/groups/rename" : "/api/chat/groups/create", group ? {group_id: group.id, name} : {name});
+      if (moveId) await post("/api/chat/move", {conversation_id: moveId, group_id: r.group.id});
+    } catch (e) { chatNote(e.message, true); }
+    await chatConvs().catch((e) => pulse(e.message));
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); done(true); }
+    else if (e.key === "Escape") done(false);
+  });
+  input.addEventListener("blur", () => done(false));
 }
 
 function convRename(id) {
@@ -2116,6 +2372,215 @@ async function chatHistory() {
   }
   chatAppend(`<div class="divider">本次工作台</div>`);
 }
+
+// ----- the right column's tabs: the status, a file browser, and files opened from the chat -----
+// active: "" for the status, "@files" for the browser, otherwise the open file's path. Remembered per browser.
+const PANE = {tabs: [], active: "", dir: "", files: {}, list: null, wide: 480};
+try { Object.assign(PANE, JSON.parse(localStorage.getItem("zq.pane") || "{}"), {files: {}, list: null}); } catch (e) { /* defaults */ }
+const PANE_TABS = 8;
+
+function paneSave() {
+  try { localStorage.setItem("zq.pane", JSON.stringify({tabs: PANE.tabs, active: PANE.active, dir: PANE.dir, wide: PANE.wide})); } catch (e) { /* not kept */ }
+}
+
+const baseName = (path) => path.split(/[\\/]/).filter(Boolean).pop() || path;
+
+function paneRender() {
+  const tabs = $("#ptabs");
+  if (!tabs) return;
+  const tab = (key, label, title, closable) => `<button class="pt${PANE.active === key ? " on" : ""}" data-ftab="${esc(key)}" title="${esc(title)}">
+    <span>${esc(label)}</span>${closable ? `<span class="x" data-fclose="${esc(key)}" title="关闭">×</span>` : ""}</button>`;
+  tabs.innerHTML = tab("", "状态", "复习计划与当前状态") + tab("@files", "文件", "浏览可读、可写目录") +
+    PANE.tabs.map((path) => tab(path, baseName(path), path, true)).join("");
+  const onFile = PANE.active !== "";
+  $("#pstatus").hidden = onFile;
+  $("#pfile").hidden = !onFile;
+  const grid = $(".chatgrid");
+  grid?.classList.toggle("wide", onFile);
+  grid?.style.setProperty("--pw", `${PANE.wide}px`);
+  if (PANE.active === "@files") paneList();
+  else if (onFile) paneFile(PANE.active);
+}
+
+function paneShow(key) {
+  PANE.active = key;
+  paneSave();
+  paneRender();
+  if (key === "@files" && !PANE.list) paneBrowse(PANE.dir);
+  else if (key && key !== "@files" && !PANE.files[key]) paneLoad(key);
+}
+
+function paneOpen(path) {
+  $("#spanel").open = true;
+  if (!PANE.tabs.includes(path)) {
+    PANE.tabs.push(path);
+    if (PANE.tabs.length > PANE_TABS) PANE.tabs = PANE.tabs.filter((p) => p !== PANE.active).slice(-PANE_TABS);
+  }
+  delete PANE.files[path];
+  paneShow(path);
+}
+
+function paneClose(path) {
+  PANE.tabs = PANE.tabs.filter((p) => p !== path);
+  delete PANE.files[path];
+  if (PANE.active === path) PANE.active = PANE.tabs.at(-1) || "";
+  paneSave();
+  paneRender();
+}
+
+async function paneLoad(path, force = false) {
+  try {
+    const d = await api(`/api/files/read?path=${encodeURIComponent(path)}`);
+    const old = PANE.files[path];
+    PANE.files[path] = d;
+    // The tab keeps the name it was opened with; a relative path is shown resolved.
+    if (PANE.active === path && (force || !old || old.mtime_ns !== d.mtime_ns || old.error)) paneFile(path);
+  } catch (e) {
+    PANE.files[path] = {error: e.message};
+    if (PANE.active === path) paneFile(path);
+  }
+}
+
+function paneFile(path) {
+  const box = $("#pfile");
+  const d = PANE.files[path];
+  if (!d) { box.innerHTML = `<div class="faint">读取中…</div>`; paneLoad(path); return; }
+  if (d.error) {
+    box.innerHTML = `<div class="fhead"><span class="path">${esc(path)}</span></div><div class="fbody"><div class="warnc">${esc(d.error)}</div>
+      <div class="faint" style="margin-top:6px">只能打开对话可读、可写目录里的文本文件。<a class="lnk" data-view="roots">管理目录 →</a></div></div>`;
+    return;
+  }
+  const scroll = box.querySelector(".fbody")?.scrollTop || 0;
+  const meta = `${(d.size / 1024).toFixed(d.size < 10240 ? 1 : 0)} KB · ${new Date(d.mtime_ns / 1e6).toLocaleString("zh-CN", {hour12: false})}${d.truncated ? " · 只显示前 1MB" : ""}`;
+  const body = d.language === "markdown" ? `<div class="fbody md">${md(d.text)}</div>`
+    : `<div class="fbody code">${d.text.split("\n").map((line, i) => `<span class="ln">${i + 1}</span>${esc(line)}`).join("\n")}</div>`;
+  box.innerHTML = `<div class="fhead"><span class="path" title="${esc(d.path)}">${esc(d.path)}</span>
+    <button class="btn" data-fcopy="${esc(d.path)}">复制路径</button><button class="btn" data-frefresh="${esc(path)}">刷新</button></div>
+    <div class="faint" style="margin:-4px 0 6px">${esc(meta)}</div>${body}`;
+  box.querySelector(".fbody").scrollTop = scroll;
+}
+
+async function paneBrowse(dir) {
+  $("#spanel").open = true;
+  PANE.dir = dir || "";
+  if (PANE.active !== "@files") { PANE.active = "@files"; paneRender(); }
+  paneSave();
+  try { PANE.list = await api(`/api/files/list?dir=${encodeURIComponent(PANE.dir)}`); }
+  catch (e) { PANE.list = {error: e.message, dir: PANE.dir, entries: []}; }
+  paneList();
+}
+
+function paneList() {
+  const box = $("#pfile");
+  const d = PANE.list;
+  if (!box) return;
+  if (!d) { box.innerHTML = `<div class="faint">读取中…</div>`; paneBrowse(PANE.dir); return; }
+  const up = d.dir ? `<button class="btn" data-fdir="${esc(d.parent || "")}">${d.parent ? "↑ 上一级" : "↑ 所有目录"}</button>` : "";
+  const rows = d.entries.map((e) => e.kind === "file"
+    ? `<button class="fe" data-fopen="${esc(e.path)}"${e.readable ? "" : " disabled title=\"不是可读的文本类型\""}>${icon("book")}<span class="nm">${esc(e.name)}</span><span class="faint">${(e.size / 1024).toFixed(1)} KB</span></button>`
+    : `<button class="fe" data-fdir="${esc(e.path)}">${icon("flow")}<span class="nm">${esc(e.name)}${e.kind === "dir" ? "/" : ""}</span></button>`).join("");
+  box.innerHTML = `<div class="fhead"><span class="path">${esc(d.dir || "可读、可写目录")}</span>${up}</div>
+    <div class="fbody flist">${d.error ? `<div class="warnc">${esc(d.error)}</div>` : rows || `<div class="faint">${d.dir ? "空目录" : "还没有可读或可写目录。"}<a class="lnk" data-view="roots">管理目录 →</a></div>`}
+    ${d.truncated ? `<div class="faint">只列出前 300 项</div>` : ""}</div>`;
+}
+
+// Drag the column's left edge to make it wider or narrower (kept per browser).
+function paneDrag(e) {
+  const grid = $(".chatgrid");
+  if (!grid?.classList.contains("wide")) return;
+  e.preventDefault();
+  const handle = e.currentTarget;
+  handle.classList.add("on");
+  handle.setPointerCapture(e.pointerId);
+  const right = grid.getBoundingClientRect().right;
+  const move = (ev) => {
+    PANE.wide = Math.round(Math.min(Math.max(right - ev.clientX, 280), window.innerWidth * 0.6));
+    grid.style.setProperty("--pw", `${PANE.wide}px`);
+  };
+  const done = () => {
+    handle.classList.remove("on");
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", done);
+    paneSave();
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", done);
+}
+
+// ----- the model button: which model answers, what each one costs now, and the vendor's price page -----
+const MODEL = {open: false, data: null};
+
+const windowSize = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1024)}K` : `${n}`;
+
+function modelPrice(p) {
+  if (!p) return "未定价";
+  const c = p.currency || "";
+  const n = p.now;
+  return `${c}${n.input} / ${c}${n.output}` + (p.peak_now === true ? " · 高峰" : p.peak_now === false ? " · 平峰" : "");
+}
+
+async function modelLoad() {
+  if (!$("#modelbtn")) return;
+  MODEL.data = await api("/api/chat/models");
+  const d = MODEL.data;
+  const button = $("#modelbtn");
+  if (!button) return;
+  button.textContent = `${d.current || "模型"} ▾`;
+  button.title = `当前模型：${d.current}（点此切换）`;
+  if (MODEL.open) modelMenu();
+}
+
+function modelToggle(open = !MODEL.open) {
+  MODEL.open = open;
+  $("#modelmenu").hidden = !open;
+  $("#modelbtn").setAttribute("aria-expanded", String(open));
+  if (open) { modelMenu(); modelLoad().catch((e) => pulse(e.message)); }
+}
+
+function modelMenu() {
+  const d = MODEL.data;
+  const menu = $("#modelmenu");
+  if (!menu || !d) return;
+  const locked = d.busy || d.pending;
+  const rows = d.choices.map((c) => {
+    const p = c.price;
+    const sub = [p ? `缓存命中 ${p.currency}${p.now.cached_input}` : "", p?.window ? `上下文 ${windowSize(p.window)}` : "",
+      p ? (p.source === "价格页" ? `价格页 ${(p.fetched_at || "").slice(0, 10)}` : "手填价格") : "", c.default ? "默认" : ""].filter(Boolean).join(" · ");
+    return `<button class="mi" data-model-pick="${esc(c.model)}"${c.current || locked ? " disabled" : ""}>
+      <span class="ck">${c.current ? "✓" : ""}</span><span class="nm">${esc(c.model)}</span><span class="pr">${esc(modelPrice(p))}</span>
+      ${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</button>`;
+  }).join("");
+  const page = d.page;
+  const updating = d.updating ? "正在读取价格页…" : d.error ? `上次更新失败：${d.error}` : page ? `价格来自 ${page.vendor || ""} 价格页，${(page.fetched_at || "").slice(0, 10)} 读取` : "还没有读过价格页";
+  const canDefault = d.current && d.current !== d.default;
+  menu.innerHTML = `<div class="mh">每百万 token 的输入 / 输出价 · 切换从下一轮起生效${locked ? "（这一轮结束后才能切换）" : ""}</div>${rows}
+    <div class="mf"><span style="flex:1;min-width:0">${esc(updating)}</span>
+      ${d.provider ? `<button class="btn" data-prices-update${d.updating ? " disabled" : ""} title="读一次 ${esc(d.provider)} 的价格页，由模型挑出价格（一次小调用）">更新价格</button>` : `<span>未知厂商：在 config.toml 的 [price] 里手填</span>`}
+      ${canDefault ? `<button class="btn" data-model-default="${esc(d.current)}" title="写入 ${esc(d.default_source === ".env" ? ".env" : "config.toml")}，以后启动都用它">设为默认</button>` : ""}</div>`;
+}
+
+async function modelClick(e) {
+  const pick = e.target.closest("[data-model-pick]");
+  if (pick && !pick.disabled) { modelToggle(false); await chatControl("/api/chat/model", {model: pick.dataset.modelPick}); return; }
+  const update = e.target.closest("[data-prices-update]");
+  if (update) {
+    update.disabled = true;
+    try { await post("/api/prices/update", {}); } catch (err) { chatNote(err.message, true); }
+    await modelLoad().catch(() => {});
+    return;
+  }
+  const keep = e.target.closest("[data-model-default]");
+  if (keep) {
+    try {
+      const r = await post("/api/chat/model/default", {model: keep.dataset.modelDefault});
+      chatNote(`已把 ${r.model} 设为默认模型（写入 ${r.path}）。`);
+    } catch (err) { chatNote(err.message, true); }
+    await modelLoad().catch(() => {});
+  }
+}
+
+document.addEventListener("click", () => { if (MODEL.open && $("#modelmenu")) modelToggle(false); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && MODEL.open && $("#modelmenu")) modelToggle(false); });
 
 // The composer's buttons, the question bar and the placeholder follow C at once, without a request.
 function chatControls() {
@@ -2205,7 +2670,8 @@ const CAL_WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
 // The review calendar beside the chat: this month's open reviews by day, overdue ones and today's at a glance.
 async function chatCalendar() {
-  if (!$("#spcal")) return;
+  // A reminder being typed in is not redrawn away.
+  if (!$("#spcal") || C.cal.form) return;
   C.cal.data = await api(`/api/schedule?view=month${C.cal.date ? `&date=${C.cal.date}` : ""}`);
   calRender();
 }
@@ -2222,25 +2688,100 @@ function calRender() {
     const cls = ["cd", day.date.slice(0, 7) !== month ? "out" : "", day.date < d.today ? "past" : "", count ? "has" : "",
       day.date === d.today ? "today" : "", day.date === C.cal.open ? "sel" : ""].filter(Boolean).join(" ");
     const mark = count ? `<i class="${count > d.limit ? "over" : ""}">${count}</i>` : day.done.length ? `<i class="ok">✓</i>` : "";
-    const tip = `${day.date}（${relDay(day.date, d.today)}）` + (count ? `：待复习 ${count} 个` : "") + (day.done.length ? `，完成 ${day.done.length} 次` : "");
-    return `<div class="${cls}" data-calday="${esc(day.date)}" title="${esc(tip)}">${Number(day.date.slice(8))}${mark}</div>`;
+    const reminders = day.reminders || [];
+    const tip = `${day.date}（${relDay(day.date, d.today)}）` + (count ? `：待复习 ${count} 个` : "") + (day.done.length ? `，完成 ${day.done.length} 次` : "")
+      + (reminders.length ? `，提醒 ${reminders.length} 个` : "");
+    return `<div class="${cls}" data-calday="${esc(day.date)}" title="${esc(tip)}">${Number(day.date.slice(8))}${mark}${reminders.length ? `<b class="rm"></b>` : ""}</div>`;
   }).join("");
   let list;
   const open = C.cal.open && d.days.find((day) => day.date === C.cal.open);
   if (open) {
     list = `<h5>${esc(open.date.slice(5))}（${relDay(open.date, d.today)}）</h5>${open.items.map(schItem).join("")}${schDone(open.done)}`
-      + (open.items.length || open.done.length ? "" : `<div class="faint">这天没有复习安排</div>`);
+      + (open.items.length || open.done.length ? "" : `<div class="faint">这天没有复习安排</div>`)
+      + remindList(open.reminders || [], open.date >= d.today ? open.date : "");
   } else {
     const today = d.days.find((day) => day.date === d.today);
     list = (d.overdue.length ? `<h5 class="bad">逾期 ${num(d.overdue.length)} 个</h5>${d.overdue.map(schItem).join("")}` : "")
       + `<h5>今天</h5>${today && today.items.length ? today.items.map(schItem).join("") : `<div class="faint">今天没有待复习的知识点</div>`}`
-      + (today ? schDone(today.done) : "");
+      + (today ? schDone(today.done) : "") + remindList(today?.reminders || [], d.today);
   }
   if (d.relearn.length) list += `<div class="faint" style="margin-top:6px">需要重学：${d.relearn.map(esc).join("、")}</div>`;
   node.innerHTML = `<h4>${icon("calendar")}复习计划<a class="lnk" data-view="schedule">完整日程 →</a></h4>
-    <div class="cbadges">${badge(s.overdue, "bad", "逾期")}${badge(s.today, "hot", "今天")}${badge(s.next7, "", "未来 7 天")}</div>
+    <div class="cbadges">${badge(s.overdue, "bad", "逾期")}${badge(s.today, "hot", "今天")}${badge(s.next7, "", "未来 7 天")}${badge(s.reminders_today || 0, "warm", "今日提醒")}</div>
     ${nav}<div class="cgrid">${CAL_WEEKDAYS.map((w) => `<div class="wd">${w}</div>`).join("")}${cells}</div><div class="clist">${list}</div>`;
 }
+
+// ----- reminders: in the calendar, a small form to add one, and the card said when one is due -----
+const REPEAT_TEXT = {none: "一次", daily: "每天", weekdays: "工作日", weekly: "每周"};
+
+function remindList(items, day) {
+  const rows = items.map((r) => `<div class="rrow"><span class="tm">${esc(r.time)}</span><span class="tt">${esc(r.title)}${r.repeat !== "none" ? ` <span class="faint">${REPEAT_TEXT[r.repeat]}</span>` : ""}</span>
+    <button class="x" data-rcancel="${esc(r.id)}" title="${r.repeat !== "none" ? "取消这个重复提醒" : "取消提醒"}">×</button></div>`).join("");
+  const form = C.cal.form && C.cal.form === day ? `<div class="rform"><input type="time" id="rtime" value="${esc(C.cal.formTime || "21:00")}">
+      <select id="rrepeat">${Object.entries(REPEAT_TEXT).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+      <input class="wide" id="rtitle" maxlength="60" placeholder="提醒做什么，例如：复习红黑树">
+      <div class="acts"><button class="btn" data-rform="cancel">取消</button><button class="btn primary" data-rform="save">保存</button></div></div>` : "";
+  return (rows || day ? `<h5>提醒</h5>${rows}` : "") + form
+    + (day && C.cal.form !== day ? `<a class="lnk" data-rnew="${esc(day)}" style="font-size:12px">＋提醒</a>` : "");
+}
+
+async function remindAction(target) {
+  if (target.dataset.rnew) {
+    C.cal.form = target.dataset.rnew;
+    calRender();
+    $("#rtitle")?.focus();
+    remindPermission();
+    return;
+  }
+  if (target.dataset.rform === "cancel") { C.cal.form = ""; calRender(); return; }
+  try {
+    if (target.dataset.rform === "save") {
+      const title = $("#rtitle").value.trim();
+      if (!title) { $("#rtitle").focus(); return; }
+      await post("/api/reminders/create", {title, at: `${C.cal.form} ${$("#rtime").value || "21:00"}`, repeat: $("#rrepeat").value});
+      C.cal.form = "";
+    } else if (target.dataset.rcancel) {
+      await post("/api/reminders/cancel", {id: target.dataset.rcancel});
+    } else if (target.dataset.rsnooze) {
+      await post("/api/reminders/snooze", {id: target.dataset.rsnooze, minutes: 10});
+      target.closest(".rcard")?.classList.add("done");
+      target.closest(".acts").innerHTML = `<span class="faint">10 分钟后再提醒</span>`;
+    } else if (target.dataset.rok) {
+      target.closest(".rcard")?.classList.add("done");
+      target.closest(".acts").innerHTML = `<span class="faint">已知道</span>`;
+      return;
+    }
+    if (target.dataset.rcancel && target.closest(".rcard")) {
+      target.closest(".rcard").classList.add("done");
+      target.closest(".acts").innerHTML = `<span class="faint">已取消</span>`;
+    }
+  } catch (e) { chatNote(e.message, true); }
+  await chatCalendar().catch((e) => pulse(e.message));
+}
+
+// The browser's own notifications are asked for once, when the user first adds a reminder here.
+function remindPermission() {
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+}
+
+let TITLE_BEFORE = null;
+function reminderEvent(e) {
+  const when = e.late ? `本该在 ${e.due_at.slice(5)}` : e.due_at.slice(11);
+  chatAppend(`<div class="rcard"><div class="head">${icon("calendar")}提醒：${esc(e.title)}</div>
+    <div class="faint">${esc(when)}${e.repeat !== "none" ? ` · ${REPEAT_TEXT[e.repeat]}，下次 ${esc((e.next_at || "").slice(5))}` : ""}</div>
+    ${e.note ? `<div style="margin-top:4px">${esc(e.note)}</div>` : ""}
+    <div class="acts"><button class="btn primary" data-rok="1">知道了</button><button class="btn" data-rsnooze="${esc(e.reminder_id)}">10 分钟后再提醒</button>
+    ${e.repeat !== "none" ? `<button class="btn" data-rcancel="${esc(e.reminder_id)}">取消重复</button>` : ""}</div></div>`);
+  if ("Notification" in window && Notification.permission === "granted" && !e.late) {
+    try { new Notification(`知秋提醒：${e.title}`, {body: e.note || when, tag: e.reminder_id}); } catch (err) { /* not shown */ }
+  }
+  if (document.hidden && TITLE_BEFORE === null) {
+    TITLE_BEFORE = document.title;
+    document.title = `⏰ ${e.title}`;
+  }
+  chatCalendar().catch(() => {});
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && TITLE_BEFORE !== null) { document.title = TITLE_BEFORE; TITLE_BEFORE = null; } });
 
 function calNav(action) {
   const d = C.cal.data;
@@ -2259,7 +2800,7 @@ async function chatPanel() {
   voiceState(d.voice);
   const body = $("#spbody");
   if (!body) return;
-  const list = (items, empty) => items.length ? items.map((p) => `<div class="path">${esc(p)}</div>`).join("") : `<span class="faint">${empty}</span>`;
+  const list = (items, empty) => items.length ? items.map((p) => `<div><a class="path lnk" data-fdir="${esc(p)}" title="在右侧浏览这个目录">${esc(p)}</a></div>`).join("") : `<span class="faint">${empty}</span>`;
   const g = d.goal;
   const goal = g ? `<div class="big">${esc(MODE[g.mode] || g.mode)}</div>
     ${g.goal ? `<div>${esc(g.goal)}</div>` : `<div class="faint">没有进行中的流程</div>`}${g.step && g.step !== g.mode ? `<div class="faint">步骤：${esc(MODE[g.step] || g.step)}</div>` : ""}` : `<span class="faint">没有对话</span>`;
@@ -2268,7 +2809,7 @@ async function chatPanel() {
   const context = usageBlock(c.usage, !d.busy && !d.pending) + `<dl class="kv"><dt>可读</dt><dd>${list(c.read_roots, c.path_grants ? `未配置${outside}` : "未配置，不能读文件")}</dd><dt>可写</dt><dd>${list(c.write_roots, c.path_grants ? `未配置${outside}` : "未配置，不能写文件")}</dd>
     <dt></dt><dd><a class="lnk" data-view="roots">管理目录 →</a></dd>
     <dt>记忆</dt><dd>${num(c.memories)} 条（本段对话开始时的快照）</dd><dt>摘要</dt><dd>${c.usage?.summarized_upto ? `已摘要到第 ${num(c.usage.summarized_upto)} 条` : c.summarized ? "较早的对话已摘要" : "无"}</dd>
-    <dt>联网</dt><dd>${c.network ? "可用" : "已关闭（--offline）"}</dd>
+    <dt>联网</dt><dd>${!c.network ? "已关闭（--offline）" : !c.search ? "可用" : c.search.available ? esc(c.search.text.replace(/^联网搜索：/, "")) : `<span class="warnc">${esc(c.search.text.replace(/^联网搜索：/, ""))}</span>`}</dd>
     ${c.tools === false ? `<dt>工具</dt><dd class="warnc">端点不支持工具调用：本段对话只用纯文本回答</dd>` : ""}
     ${d.voice ? `<dt>语音</dt><dd>${d.voice.available ? "可用：按住麦克风说话，本地识别" : voiceInstallText(d.voice.install) || `<span class="faint">${esc(d.voice.reason_text)}${d.voice.installable ? "：点麦克风即可下载" : ""}</span>`}</dd>` : ""}
     ${d.skills ? `<dt>Skill</dt><dd>${num(d.skills.count)} 个可用：${d.skills.names.map((s) => esc(s.title)).join("、")}${d.skills.errors.length ? `<details><summary class="warnc">${num(d.skills.errors.length)} 个用户 Skill 有错误</summary>${d.skills.errors.map((e) => `<div class="path">${esc(e)}</div>`).join("")}</details>` : ""}</dd>` : ""}</dl>`;
@@ -2313,6 +2854,8 @@ async function chatTick(force = false) {
     else await chatPoll(force);
   }
   if (C.live !== "fallback" && !C.streaming) chatStream();
+  // The file on screen is read again every few seconds; it is redrawn only when it changed.
+  if (PANE.active && PANE.active !== "@files" && C.tick % 4 === 0) paneLoad(PANE.active);
   if (!force && !C.busy && !C.pending.length && !C.dirty && C.tick % 3) return;
   await chatState();
   // The panel and the sidebar read the database, so they refresh less often than events arrive.
@@ -2449,6 +2992,13 @@ async function chatSend() {
   const box = $("#say");
   const text = box.value.trim();
   if (!text || C.sending) return;
+  if (/^\/view(\s|$)/.test(text) && !C.ask) {
+    const path = text.slice(5).trim().replace(/^["']|["']$/g, "");
+    if (path) paneOpen(path); else paneBrowse("");
+    box.value = "";
+    sayFit();
+    return;
+  }
   C.sending = true;
   // Any part of this input that came from a confirmed transcript marks it as voice.
   const source = V.voiced ? {input_source: "voice", voice_id: V.voiceId} : {};

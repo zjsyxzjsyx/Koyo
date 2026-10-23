@@ -17,7 +17,7 @@ from .scoring import RUBRIC_VERSION, DimensionGrade, QuestionAssessment, calcula
 from .files import FileRoots, read_file_spec, write_file_spec
 from .notion import NotionReader, notion_page_spec
 from .queries import query_tool_specs
-from .search import Fetcher, Search, fetch_url_spec, web_search_spec
+from .search import Fetcher, Search, fetch_url_spec, label_of, web_search_spec
 from .skills import GENERAL, Library, Skill
 from .store import Store, new_id
 from .toolloop import LOOP_SECONDS, LoopResult, ToolLoop, query_leak_check
@@ -400,7 +400,7 @@ class LearningRuntime:
         if (urls or notion_pages) and offline:
             raise ValueError("离线模式不能获取网页或 Notion 资料")
         if urls and not self.tools.get("fetch_url"):
-            raise ValueError("获取网页资料需要 ZHIQIU_EXA_API_KEY")
+            raise ValueError("获取网页资料需要联网搜索服务：设置 ZHIQIU_EXA_API_KEY（或 EXA_API_KEY），或使用自带搜索的模型端点（如 DeepSeek）")
         if notion_pages and not self.tools.get("notion_page"):
             raise ValueError("读取 Notion 页面需要 ZHIQIU_NOTION_TOKEN")
         can_gather = not offline and not force_local and bool(self._gather_tools())
@@ -408,10 +408,12 @@ class LearningRuntime:
                 if path is not None else Scan([]))
         materials = scan.materials
         # One confirmation covers everything this preparation may send out, before any request.
-        remote = [f"经 Exa 获取网页正文：{url}" for url in urls]
+        fetcher = self.tools.get("fetch_url")
+        via = (fetcher.service or "Exa") if fetcher is not None else "Exa"
+        remote = [f"经 {via} 获取网页正文：{url}" for url in urls]
         remote += [f"经 Notion API 读取页面：{page}" for page in notion_pages]
         if can_gather and self.search is not None:
-            remote.append("本地资料不足时，经 Exa 联网搜索补充（只发送查询词）")
+            remote.append(f"本地资料不足时，经 {label_of(self.search)} 联网搜索补充（只发送查询词）")
         if can_gather:
             servers: dict[str, list[str]] = {}
             for name in self._gather_tools():
@@ -436,11 +438,11 @@ class LearningRuntime:
             # The assessment splits material too large for one request; each part is one call, then one combine.
             segments = -(-size // max(1, int(limit * 0.8)))
             lines.append(f"资料超出一次请求的上限，预计分约 {segments} 段检查，约 {segments + 2} 次模型调用")
-        table = pricing.prices()
-        if table and size:
+        price = pricing.price_for(str(getattr(self.model, "model", "")) or None)
+        if price and size:
             # Input only, sent about twice (assessment and lesson); UTF-8 bytes / 3 approximates tokens.
-            cost = size / 3 * 2 * table["input"] / 1_000_000
-            lines.append(f"预计输入花费约 {pricing.currency()}{cost:.2f}（不含输出）")
+            cost = size / 3 * 2 * price.rates()["input"] / 1_000_000
+            lines.append(f"预计输入花费约 {price.currency or pricing.currency()}{cost:.2f}（不含输出）")
         if scan.skipped:
             reasons: dict[str, int] = {}
             for _, reason in scan.skipped:

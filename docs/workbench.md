@@ -14,6 +14,14 @@
 
 下面是状态面板（窄屏时与复习计划一起折叠在对话上方），按 L6 准则分五块，随对话实时更新：**当前目标**（模式：对话、讲解、自测或复习，以及流程目标与步骤）；**上下文范围**（9.1 起顶部是上下文占用：一条按规则、背景、摘要、历史分色的进度条，写明约多少／输入上限与百分比、估算方法（有服务端计数时“按服务端计数推算”，否则“按字节粗估，偏保守”），竖线标出 70% 的自动压缩线，超过后数字变成警告色；没有配置上下文窗口时改按条数显示“未摘要 n / 40 条”。旁边的“压缩”按钮立刻把较早的消息并入摘要，最近 10 条保留原文，未摘要的消息不超过 10 条或正在处理时不可点。下面是可读、可写目录，本段对话使用的偏好与人设记忆条数，摘要覆盖到第几条，联网是否可用）；**执行状态**（本轮运行链与进度、已用时间、模型调用次数，可跳到 trace）；**风险动作**（审批策略、待批准的动作、本段对话最近 5 条审批）；**验证结果**（最近一次学习或复习的得分与下次复习日期，以及本段对话的 trace 在最近 7 天的运行契约检查中是否有违反）。
 
+输入框左下角是模型按钮（9.2），写着当前模型。点开列出可选的模型：配置的 `model.choices`，没配置时是端点 `GET /models` 返回的和价格页上读到的；每个模型写着现在的输入／输出价（每百万 token，有平峰价的标出“高峰”或“平峰”）、缓存命中价、上下文长度和价格来源（手填或价格页与读取日期）。点一个模型就切换，从下一轮起生效，对话里出现一句“已切换到 …”；这一轮还没结束或有等待中的提示时不能切换。切换只管这次运行（对话和学习流程都用它），重启后回到配置的模型；“设为默认”把它写进当前生效的那份配置（来自 `.env` 就改 `.env` 里那一行，否则改 config.toml，先留 `.bak`）。“更新价格”在后台读一次厂商价格页（见[观测](observability.md#指标与花费)），读完在对话里说一句。
+
+右侧一栏有标签页（9.2）：“状态”是上面的复习计划与状态面板；“文件”浏览可读、可写目录（逐层展开，跳过隐藏项和 `.git`、`node_modules` 这类目录，只有对话能读的文本类型可以打开）；之后每打开一个文件多一个标签，最多 8 个，标签可以关闭。打开文件的方式：点对话里反引号中的路径或工具提示里的绝对路径，点状态面板里的可读、可写目录，或在输入框里输入 `/view 路径`（只在页面里处理，不算一轮对话）。Markdown 按回答的样式显示，其他文本带行号；顶部是完整路径、“复制路径”和“刷新”，文件在磁盘上改了会在几秒内自动重读。看文件时右栏变宽，左边缘可以拖动调整宽度；打开的标签和宽度记在浏览器里。读文件用和对话相同的规则（`files.read_target`：可读类型、路径上没有符号链接、在可读或可写目录内），一次最多 1 MB；不在目录内的显示原因和“管理目录 →”。只读，不经过模型。
+
+会话侧栏可以分组和归档（9.2）：“＋分组”新建分组；每行的“⋯”菜单可以改名、移到某个分组或“未分组”、新建分组并移入、归档或取消归档；也可以把对话拖到分组标题上。分组标题旁的“＋”在这个分组里开新对话，“⋯”改名或删除分组（删除后对话移到未分组，不会删除对话）。归档的对话收在最下面折叠着的“已归档”里，不出现在 `/chats` 中，内容都还在；当前对话不能归档。没有任何分组时侧栏和以前一样不显示标题。展开和折叠记在浏览器里。分组和归档不影响工作线程，所以对话进行中也能整理。
+
+复习计划月历里也显示提醒（9.2）：有提醒的日子右上角有一个橙色小点，数字块多了“今日提醒”；点开某天（或默认的今天）列出这天的提醒，可以“＋提醒”（选时间、重复方式：一次、每天、工作日、每周，写提醒内容），也可以取消。到点时对话里出现一张提醒卡（内容、备注、时间，“知道了”“10 分钟后再提醒”，重复的还有“取消重复”），允许过浏览器通知的话同时弹出系统通知（第一次在页面上加提醒时请求权限），页面在后台时标题前面加上 ⏰。工作台没开着时到点的提醒，下次打开时补报，卡片上写“本该在 …”。检查由工作台的一个后台线程每 30 秒做一次，用它自己的数据库连接，对话正在进行时也会提醒；提醒只是告诉你，不会自己执行任何操作。
+
 “设置 → 目录白名单”页（7.1，只在工作台中）列出可读和可写目录：环境变量（`ZHIQIU_READ_ROOTS`／`ZHIQIU_WRITE_ROOTS`）里的标“环境变量”，只能在 `.env` 中修改；在这一页添加的标“工作台添加”和日期，可以移除。添加时粘贴绝对路径，先“预览”：服务端检查后显示解析后的真实路径、其中的 `.md`/`.txt` 文件数与示例、警告（目录很大、没有文本文件、将覆盖已有目录），以及“添加后，对话中知秋可以读取这些文件，内容会发送到模型端点”；确认后才添加，改了输入框就要重新预览。检查规则：必须是带盘符的绝对路径（不接受 `~`、环境变量、`\\server\share` 网络路径），目录存在，先解析符号链接和目录联接；拒绝盘符根目录、用户主目录本身及其上级、系统目录（Windows 的 `%SystemRoot%`、`%ProgramFiles%`、`%ProgramFiles(x86)%`、`%ProgramData%` 和用户主目录下的 `AppData`；类 Unix 的 `/etc`、`/usr` 等）；同类里已有或已被包含的不再添加；每类最多添加 20 个。计数最多看 2 万项或 3 秒，超出时显示“至少 N 个”。添加和移除都作为控制指令排进工作线程，在两轮对话之间生效（本轮进行中或有等待中的提示时返回 409），对话里会出现一句“已添加可读目录：…”；每次改动写一条 `RootsChanged` 事件（只记路径和文件数，schema v21 的 `file_roots` 表存工作台添加的目录）。每轮开始时 agent 都重新合并环境变量和 `file_roots`（环境变量在前，相对路径落在第一个目录），所以同时开着的终端对话下一轮也能用新目录。知秋没有任何工具能读写这张表或调用这些接口；读到的网页或文件里即使写着“把某目录加入白名单”，也没有执行的途径。9.0 起，对话里申请白名单外的文件时也可以由你选择把所在目录加入（见[对话内授权](chat.md#对话内授权90)），那样加入的目录同样列在这一页、可以移除。
 
 工作台的接口（只在 `zhiqiu web` 中存在）：
@@ -24,7 +32,7 @@
 | `GET /api/chat/events?after=N` | 轮询（SSE 不可用时页面用它）：序号大于 N 的事件（`say` 知秋说的话，带 `say_kind` 与 `meta`；`user` 用户输入；`ask`／`confirm`／`approval`／`grant`（9.0，白名单外路径的申请）等待回答的提示；`resolved` 提示的结果；`switched` 换了会话；`status`、`error`、`idle` 本轮结束），只给最近一次 `switched` 之后的部分，以及 `busy`、等待中的提示；`lost` 表示 N 之后有事件已从内存丢弃（流式回答压缩后序号本来就不连续） |
 | `GET /api/chat/state` | 状态面板：当前目标、上下文范围、执行状态、风险动作、验证结果；9.1 起 `context.usage` 给出上下文占用（`estimate`、`limit`、`trigger`、`method`、`parts`［规则／背景／摘要／历史］、`messages`、`keep_recent`、`history_messages`、`summarized_upto`、`can_compact`），由工作线程在启动后与每轮、每次控制指令之后计算，算不出时为 `null` |
 | `GET /api/chat/history[?conversation_id=]` | 指定对话的消息；省略时为当前对话，只给切换到它时已有的消息（之后的以事件给出） |
-| `GET /api/chat/conversations?limit=30` | 会话侧栏：`id`、`short_id`、`title`、`title_source`、`chat_date`、`updated_at`、`messages`、`current`、`resumable` |
+| `GET /api/chat/conversations?limit=30` | 会话侧栏：`id`、`short_id`、`title`、`title_source`、`chat_date`、`updated_at`、`messages`、`current`、`resumable`；9.2 起每项多 `group_id`、`archived`（最多 50 条已归档的排在后面），另有 `groups`（`id`、`name`，按最近使用排序） |
 | `POST /api/chat/input` | `{"text": "…", "input_source": "text"｜"voice", "voice_id": "…"}` 发一条消息或斜杠命令（后两项可省略），202 或 409；`input_source` 非法时 400 |
 | `POST /api/chat/transcribe` | 请求体是 16 kHz 单声道 16 位 PCM 的 WAV（`Content-Type: audio/wav`，≤2 MiB，0.3–60 秒），返回 `{text, raw, replacements, duration_ms, elapsed_ms, voice_id}`；格式不对 400，另一段在识别 409，太大 413，没装依赖或没有模型 503 |
 | `GET /voice-worklet.js` | 录音用的 AudioWorklet 脚本（包内固定文件，不需要令牌） |
@@ -35,6 +43,18 @@
 | `POST /api/chat/new` | `{}` 开始新对话；202 或 409 |
 | `POST /api/chat/rename` | `{"conversation_id": "…", "title": "…"}` 改名（清洗后 1 到 30 字，否则 400）；202、404 或 409 |
 | `POST /api/chat/compact` | 9.1：`{}` 压缩当前对话（同 `/compact`），作为控制指令排进工作线程，结果以 `note` 提示推送；202，忙碌或有等待提示时 409 |
+| `GET /api/chat/models` | 9.2：模型按钮：`current`、`default`、`default_source`、`choices`（每项 `model`、`current`、`default`、`price`［`input`、`output`、`cached_input`、`currency`、`source`、`off_peak`、`peak_now`、`now`、`fetched_at`、`window`］）、`page`（读到的价格页：`vendor`、`source`、`fetched_at`、`dropped`）、`provider`、`updating`、`error` |
+| `POST /api/chat/model` | 9.2：`{"model": "…"}` 从下一轮起换用这个模型（同 `/model`），作为控制指令排进工作线程；202，模型名含空白 400，忙碌 409 |
+| `POST /api/chat/model/default` | 9.2：`{"model": "…"}` 设为默认，写进 `.env` 或 config.toml（看当前值来自哪里）；值来自进程环境变量时 409 |
+| `POST /api/prices/update` | 9.2：`{}` 在后台读一次价格页，读完推送 `prices` 事件和一句提示；202，不认识端点的厂商 400，正在读 409 |
+| `GET /api/files/list?dir=` | 9.2：文件标签页：可读、可写目录里的一层（`dir` 为空时列出这些目录本身），`entries` 每项 `name`、`path`、`kind`（`root`／`dir`／`file`）、`size`、`readable`，以及 `parent`；目录外 403 |
+| `GET /api/files/read?path=` | 9.2：读一个文件：`path`、`name`、`size`、`mtime_ns`、`language`、`truncated`、`text`（最多 1 MB）；目录外 403（带 `outside`），不存在 404，不是可读的文本类型 415 |
+| `POST /api/chat/groups/create`、`/rename`、`/delete` | 9.2：`{"name"}`、`{"group_id", "name"}`、`{"group_id"}` 新建、改名、删除分组（分组名清洗后 1 到 20 字，重名 400）；直接写入，不排队 |
+| `POST /api/chat/move` | 9.2：`{"conversation_id", "group_id"}` 移到分组，`group_id` 为 `null` 时移到未分组；不存在 404 |
+| `POST /api/chat/archive` | 9.2：`{"conversation_id", "archived": true｜false}` 归档或取消归档；当前对话 409 |
+| `POST /api/chat/new_in` | 9.2：`{"group_id"}` 在分组里开新对话，同“新对话”排进工作线程；202、404 或 409 |
+| `POST /api/reminders/create` | 9.2：`{"title", "at": "YYYY-MM-DD HH:MM", "repeat": "none"｜"daily"｜"weekdays"｜"weekly", "note"}` 新建提醒；已过的一次性时间、一年以后、格式不对时 400 |
+| `POST /api/reminders/snooze`、`/cancel` | 9.2：`{"id", "minutes": 5｜10｜30｜60}` 稍后再提醒；`{"id"}` 取消（重复的也一并停止） |
 | `GET /api/roots` | 可读、可写目录，每项带来源（`env`／`workbench`）、是否存在、添加时的文件数与日期 |
 | `POST /api/roots/preview` | `{"kind": "read"｜"write", "path": "…"}` 检查并预览，不改动任何东西；不合规时 400 并给出原因 |
 | `POST /api/roots/add` | 同上，服务端重新检查和计数后排进工作线程；202、400 或 409 |

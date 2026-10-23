@@ -48,7 +48,7 @@ def test_server_lists_only_read_tools_and_answers_with_json(tmp_path):
     tools, status, point, missing, bad = anyio.run(scenario)
     assert {tool.name for tool in tools} == QUERY_TOOLS
     assert all(tool.annotations.readOnlyHint and not tool.annotations.destructiveHint for tool in tools)
-    assert not status.isError and set(payload(status)["result"]) == {"due", "open_attempts", "needs_relearn"}
+    assert not status.isError and set(payload(status)["result"]) == {"due", "open_attempts", "needs_relearn", "now", "reminders_today"}
     assert payload(point)["result"]["knowledge_point"]["id"] == kp
     assert missing.isError and payload(missing)["error"] == "not_found"
     assert bad.isError and payload(bad)["error"] == "invalid_args"

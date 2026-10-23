@@ -128,6 +128,23 @@ class OpenAICompatibleModel:
         self.on_notice: Callable[[str], None] | None = None
         self.notices: list[str] = []
 
+    def use(self, model: str) -> None:
+        """Send later calls to another model of the same endpoint: its own budget and its own remembered
+        refusals apply from the next call (both are kept per endpoint and model)."""
+        model = model.strip()
+        if not model or len(model) > 200 or any(char.isspace() for char in model):
+            raise ValueError("模型名不能为空，也不能含空白")
+        previous = self.model
+        self.model = model
+        try:
+            configured = _model_budget(self)
+        except ValueError:
+            self.model = previous
+            raise
+        self.output_reserve = (configured["output_reserve"] if configured
+                               else _optional_int("ZHIQIU_LLM_OUTPUT_RESERVE"))
+        self.forget_refusals()
+
     def set_trace_context(self, kp_id: str | None, attempt_id: str | None) -> None:
         self.kp_id = kp_id
         self.attempt_id = attempt_id

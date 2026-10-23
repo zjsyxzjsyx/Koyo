@@ -198,17 +198,24 @@ class ContextManager:
         self.store = store
         self.model = model
         self.memory = memory or MemoryService(store)
-        configured = _model_budget(model)
+        # Budgets given here win over the configured ones, also after the model changes.
+        self._given = (window, output_reserve, margin)
+        self.refresh_budget()
+        # Keep several measured prefixes so an auxiliary call does not evict
+        # a reusable conversation prefix. Only digests, never prompt text, stay here.
+        self._usage_checkpoints: deque[tuple[tuple[str, str], tuple[str, ...], int]] = deque(maxlen=32)
+        self._append_streams: OrderedDict[tuple[str, str, str, str, str], _AppendStream] = OrderedDict()
+
+    def refresh_budget(self) -> None:
+        """Take the budget of the model now in use (again after /model switched it)."""
+        window, output_reserve, margin = self._given
+        configured = _model_budget(self.model)
         self.window = window if window is not None else (configured["window"] if configured else _optional_int("ZHIQIU_LLM_WINDOW"))
         self.output_reserve = (output_reserve if output_reserve is not None else
                                (configured["output_reserve"] if configured else _optional_int("ZHIQIU_LLM_OUTPUT_RESERVE")))
         self.margin = margin if margin is not None else (configured["margin"] if configured else _optional_int("ZHIQIU_LLM_MARGIN"))
         self.window_verified = bool(configured.get("verified", os.getenv("ZHIQIU_LLM_WINDOW_VERIFIED") == "1"))
         self.validation_retries = configured.get("validation_retries", 2)
-        # Keep several measured prefixes so an auxiliary call does not evict
-        # a reusable conversation prefix. Only digests, never prompt text, stay here.
-        self._usage_checkpoints: deque[tuple[tuple[str, str], tuple[str, ...], int]] = deque(maxlen=32)
-        self._append_streams: OrderedDict[tuple[str, str, str, str, str], _AppendStream] = OrderedDict()
 
     def _model_identity(self) -> tuple[str, str]:
         return (str(getattr(self.model, "endpoint", "")), str(getattr(self.model, "model", "")))

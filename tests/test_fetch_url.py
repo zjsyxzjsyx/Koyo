@@ -105,7 +105,7 @@ def test_local_and_web_text_share_the_total_limit(tmp_path, monkeypatch):
 
 
 def contents_response(body):
-    return lambda url, payload, headers, timeout: (calls.append((url, payload, headers)), body)[1]
+    return lambda url, payload, headers, timeout, **kwargs: (calls.append((url, payload, headers)), body)[1]
 
 
 calls = []

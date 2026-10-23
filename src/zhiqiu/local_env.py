@@ -8,8 +8,9 @@ from pathlib import Path
 from .config import ENV_NAMES
 
 PROJECT_ENV = Path(__file__).resolve().parents[2] / ".env"
-# Every variable config.toml can set; ZHIQIU_LONG_ANSWER_SEGMENTS stays process-only on purpose.
-ALLOWED_KEYS = frozenset(ENV_NAMES)
+# Every variable config.toml can set, plus EXA_API_KEY, the name Exa's own docs use (search.py reads
+# both); ZHIQIU_LONG_ANSWER_SEGMENTS stays process-only on purpose.
+ALLOWED_KEYS = frozenset(ENV_NAMES) | {"EXA_API_KEY"}
 
 
 def load_local_env(path: Path = PROJECT_ENV) -> list[str]:

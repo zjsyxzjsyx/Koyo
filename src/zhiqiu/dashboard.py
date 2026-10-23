@@ -43,6 +43,8 @@ VOICE_KEPT = 20
 INPUT_SOURCES = ("text", "voice")
 # A title typed in the sidebar, as /title allows.
 RENAME_CHARS = 30
+# How many archived conversations the sidebar lists (under a folded "已归档").
+ARCHIVED_LISTED = 50
 
 
 class BadRequest(ValueError):
@@ -187,6 +189,12 @@ def schedule(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, A
         start = first - timedelta(days=first.weekday())
         end = last + timedelta(days=6 - last.weekday())
     data = review_schedule(db, today.isoformat(), start.isoformat(), end.isoformat())
+    # Reminders sit in the same calendar, each on the days it falls on.
+    from .reminders import in_range
+    reminders = in_range(db, start, end)
+    for day in data["days"]:
+        day["reminders"] = [item for item in reminders if item["date"] == day["date"]]
+    data["summary"]["reminders_today"] = sum(item["date"] == today.isoformat() for item in reminders)
     return {**data, "view": view, "anchor": anchor.isoformat()}
 
 
@@ -286,6 +294,8 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
         "context": {"read_roots": context.get("read_roots", []), "write_roots": context.get("write_roots", []),
                     "memories": len(json.loads(row["memory_snapshot_json"] or "[]")) if row else 0,
                     "summarized": summaries > 0, "network": not context.get("offline", False),
+                    # Where web search goes, or how to set one up (providers.search_status).
+                    "search": context.get("search"),
                     "tools": context.get("tools", True), "path_grants": context.get("path_grants", False),
                     # Worked out by the worker after each turn; None when it could not be estimated.
                     "usage": context.get("usage")},
@@ -388,11 +398,18 @@ def chat_conversations(server: "DashboardServer", query: dict[str, list[str]]) -
     limit = int(_number(query, "limit", 30, 1, 200))
     db = server.connect()
     try:
-        rows = db.execute("""SELECT c.*,(SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) messages,
+        listed = """SELECT c.*,(SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) messages,
             (SELECT content FROM conversation_messages m WHERE m.conversation_id=c.id AND m.role='user'
              ORDER BY kind!='chat', seq LIMIT 1) first_message
-            FROM conversations c WHERE c.id=? OR EXISTS(SELECT 1 FROM conversation_messages m WHERE m.conversation_id=c.id)
-            ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?""", (bench.conversation_id, limit)).fetchall()
+            FROM conversations c WHERE (c.id=? OR EXISTS(SELECT 1 FROM conversation_messages m WHERE m.conversation_id=c.id))
+              AND (c.archived_at IS NULL) = ?
+            ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?"""
+        # The current one is never archived (the archive refuses it); archived ones are listed apart.
+        rows = db.execute(listed, (bench.conversation_id, 1, limit)).fetchall() + \
+            db.execute(listed, (bench.conversation_id, 0, ARCHIVED_LISTED)).fetchall()
+        groups = [dict(row) for row in db.execute("""SELECT g.id,g.name,
+            (SELECT MAX(c.updated_at) FROM conversations c WHERE c.group_id=g.id AND c.archived_at IS NULL) used
+            FROM chat_groups g ORDER BY used IS NULL, used DESC, g.created_at""")]
         items = []
         for row in rows:
             title = row["title"]
@@ -402,10 +419,11 @@ def chat_conversations(server: "DashboardServer", query: dict[str, list[str]]) -
                 title = (first[:FALLBACK_TITLE_CHARS] + ("…" if len(first) > FALLBACK_TITLE_CHARS else "")) or EMPTY_TITLE
             items.append({"id": row["id"], "short_id": row["id"][:8], "title": title, "title_source": row["title_source"],
                           "chat_date": row["chat_date"], "updated_at": row["updated_at"], "messages": row["messages"],
-                          "current": row["id"] == bench.conversation_id, "resumable": _resumable(db, row)})
+                          "current": row["id"] == bench.conversation_id, "resumable": _resumable(db, row),
+                          "group_id": row["group_id"], "archived": row["archived_at"] is not None})
     finally:
         db.close()
-    return {"conversations": items, "current": bench.conversation_id, "busy": bench.busy,
+    return {"conversations": items, "groups": groups, "current": bench.conversation_id, "busy": bench.busy,
             "pending": len(bench.io.pending())}
 
 
@@ -436,7 +454,31 @@ def roots_list(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
             "pending": len(server.workbench.io.pending())}
 
 
+def chat_models(server: "DashboardServer", query: dict[str, list[str]]) -> dict[str, Any]:
+    """The model button: the model in use, those offered, each one's price now, and the saved price page."""
+    from . import prices, providers
+    from .config import BY_NAME, source
+    bench = server.workbench
+    current = bench.context.get("model") or pricing.default_model()
+    choices = []
+    for name in prices.choices(current):
+        price = pricing.price_for(name)
+        choices.append({"model": name, "current": name == current, "default": name == pricing.default_model(),
+                        "price": price.as_dict() if price else None})
+    saved = prices.load()
+    provider = providers.provider_for()
+    return {"current": current, "default": pricing.default_model(),
+            "default_source": source(BY_NAME["model.model"]), "choices": choices,
+            "page": {"vendor": saved.get("vendor"), "source": saved.get("source"), "fetched_at": saved.get("fetched_at"),
+                     "dropped": saved.get("dropped") or [], "listing_error": saved.get("listing_error") or ""}
+            if saved else None,
+            "provider": provider.name if provider else None, "auto_update": prices.auto_update(),
+            "updating": bench.prices["running"], "error": bench.prices["error"],
+            "busy": bench.busy, "pending": len(bench.io.pending())}
+
+
 CHAT_GETS: dict[str, Callable[["DashboardServer", dict[str, list[str]]], dict[str, Any]]] = {
+    "/api/chat/models": chat_models,
     "/api/roots": roots_list,
     "/api/chat/events": chat_events,
     "/api/chat/state": chat_state,
@@ -665,6 +707,182 @@ def conversation_control(server: DashboardServer, action: str, data: dict[str, A
         return HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq}
     verb = "压缩" if action == "compact" else "切换"
     return HTTPStatus.CONFLICT, {"error": f"先回答或停止当前提示，等这一轮结束再{verb}"}
+
+
+def _model_name(data: dict[str, Any]) -> str | None:
+    name = data.get("model")
+    if not isinstance(name, str) or not name.strip() or len(name) > 200 or any(char.isspace() for char in name.strip()):
+        return None
+    return name.strip()
+
+
+def model_switch(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Use another model from the next turn on; done by the worker between turns."""
+    name = _model_name(data)
+    if name is None:
+        return HTTPStatus.BAD_REQUEST, {"error": "model 必须是不含空白的模型名"}
+    if server.workbench.control(("model", name)):
+        return HTTPStatus.ACCEPTED, {"accepted": True, "next": server.workbench.io.last_seq}
+    return HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再切换模型"}
+
+
+def model_default(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Make a model the configured one (model.model), where that setting now comes from."""
+    from .config import set_value
+    name = _model_name(data)
+    if name is None:
+        return HTTPStatus.BAD_REQUEST, {"error": "model 必须是不含空白的模型名"}
+    try:
+        where, path = set_value("model.model", name)
+    except (OSError, ValueError) as exc:
+        return HTTPStatus.CONFLICT, {"error": str(exc)}
+    return HTTPStatus.OK, {"saved": where, "path": str(path), "model": name}
+
+
+def prices_update(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    from .providers import provider_for
+    if provider_for() is None:
+        return HTTPStatus.BAD_REQUEST, {"error": "不认识这个模型端点的厂商，没有价格页可读；可以在 config.toml 的 [price] 里手填价格"}
+    if server.workbench.update_prices():
+        return HTTPStatus.ACCEPTED, {"accepted": True}
+    return HTTPStatus.CONFLICT, {"error": "价格正在更新"}
+
+
+def _pane_roots(server: DashboardServer) -> list[Path]:
+    """What the file pane may show: the chat's readable and writable roots, as the worker last saw them."""
+    context = server.workbench.context
+    return [Path(item) for item in list(context.get("read_roots", [])) + list(context.get("write_roots", []))]
+
+
+def file_read(server: DashboardServer, query: dict[str, list[str]]) -> tuple[int, dict[str, Any]]:
+    from . import viewer
+    try:
+        return HTTPStatus.OK, viewer.read(query.get("path", [""])[0], _pane_roots(server))
+    except viewer.Refused as exc:
+        return exc.status, {"error": str(exc), **exc.extra}
+    except OSError as exc:
+        return HTTPStatus.NOT_FOUND, {"error": f"读不了这个文件：{exc.strerror or exc}"}
+
+
+def file_list(server: DashboardServer, query: dict[str, list[str]]) -> tuple[int, dict[str, Any]]:
+    from . import viewer
+    try:
+        return HTTPStatus.OK, viewer.listing(query.get("dir", [""])[0], _pane_roots(server))
+    except viewer.Refused as exc:
+        return exc.status, {"error": str(exc), **exc.extra}
+    except OSError as exc:
+        return HTTPStatus.NOT_FOUND, {"error": f"读不了这个目录：{exc.strerror or exc}"}
+
+
+def _organize(server: DashboardServer, change: Callable[[Any], Any], on: str = "chats") -> tuple[int, dict[str, Any]]:
+    """Groups, the archive and reminders change no state the worker holds, so they are written here, at
+    once, even while a turn runs; a short connection of their own."""
+    from .conversations import Conversations
+    from .reminders import Reminders
+    from .store import Store
+    store = Store(server.db_path)
+    try:
+        return HTTPStatus.OK, {"ok": True, **(change(Conversations(store) if on == "chats" else Reminders(store)) or {})}
+    except LookupError as exc:
+        return HTTPStatus.NOT_FOUND, {"error": str(exc).strip("'\"")}
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    finally:
+        store.close()
+
+
+def _text_arg(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} 必须是非空字符串")
+    return value.strip()
+
+
+def group_create(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _organize(server, lambda chats: {"group": chats.create_group(data.get("name"))})
+
+
+def group_rename(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _organize(server, lambda chats: {"group": chats.rename_group(_text_arg(data, "group_id"), data.get("name"))})
+
+
+def group_delete(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _organize(server, lambda chats: {"ungrouped": chats.delete_group(_text_arg(data, "group_id"))})
+
+
+def conversation_move(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    group_id = data.get("group_id")
+    if group_id is not None and (not isinstance(group_id, str) or not group_id):
+        return HTTPStatus.BAD_REQUEST, {"error": "group_id 必须是分组 id，或 null 表示未分组"}
+    return _organize(server, lambda chats: chats.move(_text_arg(data, "conversation_id"), group_id))
+
+
+def conversation_archive(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    archived = data.get("archived", True)
+    if not isinstance(archived, bool):
+        return HTTPStatus.BAD_REQUEST, {"error": "archived 必须是 true 或 false"}
+    if archived and data.get("conversation_id") == server.workbench.conversation_id:
+        return HTTPStatus.CONFLICT, {"error": "不能归档当前对话；先切换到别的对话或开新对话"}
+    return _organize(server, lambda chats: chats.archive(_text_arg(data, "conversation_id"), archived))
+
+
+def new_in_group(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """A new conversation inside a group: like 新对话, done by the worker between turns."""
+    group_id = data.get("group_id")
+    if not isinstance(group_id, str) or not group_id:
+        return HTTPStatus.BAD_REQUEST, {"error": "group_id 必须是非空字符串"}
+    db = server.connect()
+    try:
+        known = db.execute("SELECT 1 FROM chat_groups WHERE id=?", (group_id,)).fetchone()
+    finally:
+        db.close()
+    if not known:
+        return HTTPStatus.NOT_FOUND, {"error": f"没有这个分组：{group_id}"}
+    if server.workbench.control(("new_in", group_id)):
+        return HTTPStatus.ACCEPTED, {"accepted": True, "next": server.workbench.io.last_seq}
+    return HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再开新对话"}
+
+
+def reminder_create(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _organize(server, lambda reminders: {"reminder": reminders.create(
+        data.get("title"), data.get("at"), data.get("repeat", "none"), data.get("note", ""),
+        conversation_id=server.workbench.conversation_id)}, on="reminders")
+
+
+def reminder_snooze(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    minutes = data.get("minutes", 10)
+    if type(minutes) is not int:
+        return HTTPStatus.BAD_REQUEST, {"error": "minutes 必须是整数"}
+    return _organize(server, lambda reminders: {"reminder": reminders.snooze(_text_arg(data, "id"), minutes)},
+                     on="reminders")
+
+
+def reminder_cancel(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _organize(server, lambda reminders: {"reminder": reminders.cancel(_text_arg(data, "id"))}, on="reminders")
+
+
+# Workbench reads that answer with their own status: (status, payload) from (server, query); token only.
+PANE_GETS: dict[str, Callable[[DashboardServer, dict[str, list[str]]], tuple[int, dict[str, Any]]]] = {
+    "/api/files/read": file_read,
+    "/api/files/list": file_list,
+}
+
+
+# Workbench actions with a JSON body: (status, payload) from (server, body). Every one passes the write checks.
+ACTIONS: dict[str, Callable[[DashboardServer, dict[str, Any]], tuple[int, dict[str, Any]]]] = {
+    "/api/chat/model": model_switch,
+    "/api/chat/model/default": model_default,
+    "/api/prices/update": prices_update,
+    "/api/chat/groups/create": group_create,
+    "/api/chat/groups/rename": group_rename,
+    "/api/chat/groups/delete": group_delete,
+    "/api/chat/move": conversation_move,
+    "/api/chat/archive": conversation_archive,
+    "/api/chat/new_in": new_in_group,
+    "/api/reminders/create": reminder_create,
+    "/api/reminders/snooze": reminder_snooze,
+    "/api/reminders/cancel": reminder_cancel,
+}
 
 
 def record_refusal(db_path: Path, reason: str) -> None:

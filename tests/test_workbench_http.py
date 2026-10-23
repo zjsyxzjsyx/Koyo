@@ -454,7 +454,8 @@ def test_switching_is_refused_while_a_prompt_waits(served):
 
 @pytest.mark.parametrize("path, body", [("/api/chat/switch", {"conversation_id": "x"}), ("/api/chat/new", {}),
                                         ("/api/chat/rename", {"conversation_id": "x", "title": "x"}),
-                                        ("/api/chat/compact", {})])
+                                        ("/api/chat/compact", {}), ("/api/chat/model", {"model": "m2"}),
+                                        ("/api/chat/model/default", {"model": "m2"}), ("/api/prices/update", {})])
 @pytest.mark.parametrize("kwargs, status", [
     ({"token": False}, 403), ({"origin": "https://evil.example"}, 403), ({"host": "evil.example:80"}, 403),
     ({"content_type": "text/plain"}, 415), ({"raw": b"{" + b" " * (MAX_BODY + 1) + b"}"}, 413), ({"raw": b"[1]"}, 400)])
@@ -481,3 +482,37 @@ def test_compact_from_the_panel_folds_older_messages_and_the_usage_follows(serve
     context = call(server, "/api/chat/state")[1]["context"]
     assert context["summarized"] is True and context["usage"]["summarized_upto"] == 2
     assert context["usage"]["messages"] == 10 and context["usage"]["can_compact"] is False
+
+
+def rows(server, sql, *args):
+    db = sqlite3.connect(server.db_path)
+    try:
+        return db.execute(sql, args).fetchall()
+    finally:
+        db.close()
+
+
+def test_the_model_button_switches_from_the_next_turn(served, monkeypatch):
+    server, bench, model = served
+    model.model = "m1"
+    model.use = lambda name: setattr(model, "model", name)
+    assert call(server, "/api/chat/model", "POST", {"model": "two words"})[0] == 400
+    status, data = call(server, "/api/chat/model", "POST", {"model": "m2"})
+    assert status == 202
+    note, _ = wait_event(server, ("say",), after=data["next"])
+    assert note["say_kind"] == "note" and note["text"].startswith("已切换到 m2，从下一轮起生效")
+    wait_event(server, ("idle",), after=note["seq"])
+    models = call(server, "/api/chat/models")[1]
+    assert models["current"] == "m2" and models["choices"][0] == {"model": "m2", "current": True, "default": False, "price": None}
+    assert call(server, "/api/chat/models", token=False)[0] == 403
+    data = call(server, "/api/chat/input", "POST", {"text": "你好"})[1]
+    wait_event(server, ("idle",), after=data["next"])
+    attrs = json.loads(rows(server, "SELECT attrs_json FROM spans WHERE kind='turn' AND name='chat'")[-1][0])
+    assert attrs["model"] == "m2"
+
+
+def test_prices_update_needs_a_known_vendor(served, monkeypatch):
+    server, bench, _ = served
+    monkeypatch.setenv("ZHIQIU_LLM_BASE_URL", "https://model.example/v1")
+    status, data = call(server, "/api/prices/update", "POST", {})
+    assert status == 400 and "不认识" in data["error"]

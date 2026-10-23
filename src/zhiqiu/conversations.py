@@ -21,6 +21,7 @@ MESSAGE_KINDS = frozenset({"chat", "command", "proposal", "flow_result", "error"
 TITLE_SOURCES = ("", "rule", "model", "fallback", "user")
 FALLBACK_TITLE_CHARS = 20
 EMPTY_TITLE = "（空对话）"
+GROUP_NAME_CHARS = 20
 # Stripped from the ends of a title: quotes, Markdown marks and sentence punctuation (an explicit list,
 # so "C#" or "C++" keep their last character). Brackets go only when they wrap the whole title: a closing
 # bracket that ends one, as in "继续：二叉树遍历（老讲解）", stays (V7 smoke).
@@ -64,14 +65,15 @@ class Conversations:
         self.db.execute("""UPDATE conversations SET status='closed',end_reason=?,closed_at=?,updated_at=?
             WHERE status='open' AND id IS NOT ?""", (reason, now, now, keep))
 
-    def _create(self, snapshot: list[dict[str, Any]], status: dict[str, Any] | None) -> str:
+    def _create(self, snapshot: list[dict[str, Any]], status: dict[str, Any] | None,
+                group_id: str | None = None) -> str:
         conversation_id = new_id()
         now = self.store._ts()
         self.db.execute("""INSERT INTO conversations
-            (id,chat_date,status,mode,memory_snapshot_json,status_snapshot_json,created_at,updated_at)
-            VALUES(?,?,'open','chat',?,?,?,?)""",
+            (id,chat_date,status,mode,memory_snapshot_json,status_snapshot_json,created_at,updated_at,group_id)
+            VALUES(?,?,'open','chat',?,?,?,?,?)""",
             (conversation_id, self.store.clock.today().isoformat(), json.dumps(snapshot, ensure_ascii=False),
-             json.dumps(status or {}, ensure_ascii=False), now, now))
+             json.dumps(status or {}, ensure_ascii=False), now, now, group_id))
         flow.enter(self.store, "conversation", conversation_id, "chat", "created")
         return conversation_id
 
@@ -90,12 +92,76 @@ class Conversations:
         return self.get(conversation_id)
 
     def start_new(self, snapshot: list[dict[str, Any]] | None = None,
-                  status: dict[str, Any] | None = None) -> dict[str, Any]:
-        """`/new`: close the open conversation and start another one."""
+                  status: dict[str, Any] | None = None, group_id: str | None = None) -> dict[str, Any]:
+        """`/new`: close the open conversation and start another one (in a group when given)."""
         with self.store.transaction():
+            if group_id is not None:
+                self.group(group_id)
             self._close_open("new")
-            conversation_id = self._create(snapshot or [], status)
+            conversation_id = self._create(snapshot or [], status, group_id)
         return self.get(conversation_id)
+
+    # ----- groups and the archive ---------------------------------------------------------------
+
+    @staticmethod
+    def group_name(name: Any) -> str:
+        cleaned = clean_title(name) if isinstance(name, str) else ""
+        if not cleaned or len(cleaned) > GROUP_NAME_CHARS:
+            raise ValueError(f"分组名清洗后须为 1 到 {GROUP_NAME_CHARS} 字")
+        return cleaned
+
+    def group(self, group_id: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT * FROM chat_groups WHERE id=?", (group_id,)).fetchone()
+        if not row:
+            raise LookupError(f"没有这个分组：{group_id}")
+        return dict(row)
+
+    def groups(self) -> list[dict[str, Any]]:
+        """Every group, oldest first, with how many conversations (not archived) it holds."""
+        return [dict(row) for row in self.db.execute("""SELECT g.id,g.name,g.created_at,
+            (SELECT COUNT(*) FROM conversations c WHERE c.group_id=g.id AND c.archived_at IS NULL) conversations
+            FROM chat_groups g ORDER BY g.created_at, g.rowid""")]
+
+    def create_group(self, name: str) -> dict[str, Any]:
+        name = self.group_name(name)
+        with self.store.transaction():
+            if self.db.execute("SELECT 1 FROM chat_groups WHERE name=?", (name,)).fetchone():
+                raise ValueError(f"已经有叫「{name}」的分组")
+            group_id = new_id()
+            self.db.execute("INSERT INTO chat_groups(id,name,created_at) VALUES(?,?,?)", (group_id, name, self.store._ts()))
+        return self.group(group_id)
+
+    def rename_group(self, group_id: str, name: str) -> dict[str, Any]:
+        name = self.group_name(name)
+        with self.store.transaction():
+            self.group(group_id)
+            if self.db.execute("SELECT 1 FROM chat_groups WHERE name=? AND id!=?", (name, group_id)).fetchone():
+                raise ValueError(f"已经有叫「{name}」的分组")
+            self.db.execute("UPDATE chat_groups SET name=? WHERE id=?", (name, group_id))
+        return self.group(group_id)
+
+    def delete_group(self, group_id: str) -> int:
+        """Remove a group; its conversations stay, ungrouped. Returns how many it held."""
+        with self.store.transaction():
+            self.group(group_id)
+            count = self.db.execute("SELECT COUNT(*) FROM conversations WHERE group_id=?", (group_id,)).fetchone()[0]
+            self.db.execute("UPDATE conversations SET group_id=NULL WHERE group_id=?", (group_id,))
+            self.db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
+        return count
+
+    def move(self, conversation_id: str, group_id: str | None) -> None:
+        with self.store.transaction():
+            self.get(conversation_id)
+            if group_id is not None:
+                self.group(group_id)
+            self.db.execute("UPDATE conversations SET group_id=? WHERE id=?", (group_id, conversation_id))
+
+    def archive(self, conversation_id: str, archived: bool = True) -> None:
+        """Put a conversation away (out of the list and of /chats) or bring it back; nothing is deleted."""
+        with self.store.transaction():
+            self.get(conversation_id)
+            self.db.execute("UPDATE conversations SET archived_at=? WHERE id=?",
+                            (self.store._ts() if archived else None, conversation_id))
 
     def reopen(self, conversation_id: str) -> dict[str, Any]:
         """`--resume ID`: make an older conversation the open one again."""
@@ -238,10 +304,12 @@ class Conversations:
                 "summaries": summaries, "state_events": events, "tool_calls": tools}
 
     def recent(self, limit: int = 10) -> list[dict[str, Any]]:
+        """The latest conversations not archived, with their group's name ("" when ungrouped)."""
         rows = [dict(row) for row in self.db.execute("""SELECT c.id,c.chat_date,c.status,c.mode,c.title,
-            c.title_source,c.active_kind,c.active_id,c.updated_at,
+            c.title_source,c.active_kind,c.active_id,c.updated_at,c.group_id,COALESCE(g.name,'') group_name,
             (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) messages
-            FROM conversations c ORDER BY c.rowid DESC LIMIT ?""", (limit,))]
+            FROM conversations c LEFT JOIN chat_groups g ON g.id=c.group_id
+            WHERE c.archived_at IS NULL ORDER BY c.rowid DESC LIMIT ?""", (limit,))]
         for row in rows:
             row["title"] = self.display_title(row)
         return rows

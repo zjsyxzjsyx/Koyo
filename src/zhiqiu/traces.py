@@ -46,7 +46,9 @@ def list_traces(db: sqlite3.Connection, days: float = 7, limit: int = 50) -> lis
                     tool_calls=db.execute("SELECT COUNT(*) FROM tool_calls WHERE trace_id=?",
                                           (row["trace_id"],)).fetchone()[0],
                     spans=db.execute("SELECT COUNT(*) FROM spans WHERE trace_id=?", (row["trace_id"],)).fetchone()[0])
-        item["cost"] = pricing.cost(item["tokens_in"], item["tokens_out"], item["tokens_cached"])
+        item["cost"] = pricing.calls_cost(db.execute(
+            "SELECT model,started_at_ns,tokens_in,tokens_out,tokens_cached FROM llm_calls WHERE trace_id=?",
+            (row["trace_id"],)).fetchall())
         result.append(item)
     return result
 
@@ -63,7 +65,8 @@ def _leaf_llm(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in ("id", "stage", "model", "status", "error_kind", "latency_ms", "tokens_in",
                                       "tokens_out", "tokens_cached", "started_at_ns", "context_build_id",
                                       "ttft_ms", "streamed")}
-    item["cost"] = pricing.cost(row["tokens_in"], row["tokens_out"], row["tokens_cached"])
+    item["cost"] = pricing.cost(row["tokens_in"], row["tokens_out"], row["tokens_cached"], row["model"],
+                                row["started_at_ns"])
     return item
 
 
@@ -106,17 +109,27 @@ def tree(db: sqlite3.Connection, trace_id: str) -> dict[str, Any]:
         parent = spans.get(item["parent_span_id"]) if item["parent_span_id"] else None
         (parent["children"] if parent else roots).append(item)
 
-    def total(node: dict[str, Any]) -> dict[str, int]:
-        sums = {"tokens_in": 0, "tokens_out": 0, "tokens_cached": 0, "llm_calls": 0, "tool_calls": 0}
+    def total(node: dict[str, Any]) -> dict[str, Any]:
+        # Each call has its own model's price, so the cost is the calls' costs added up (None if none priced).
+        sums: dict[str, Any] = {"tokens_in": 0, "tokens_out": 0, "tokens_cached": 0, "llm_calls": 0, "tool_calls": 0,
+                                "cost": None}
+
+        def add_cost(value: float | None) -> None:
+            if value is not None:
+                sums["cost"] = round((sums["cost"] or 0) + value, 6)
+
         for call in node["llm_calls"]:
             sums["llm_calls"] += 1
             for field in ("tokens_in", "tokens_out", "tokens_cached"):
                 sums[field] += call[field] or 0
+            add_cost(call["cost"])
         sums["tool_calls"] += len(node["tool_calls"])
         for child in node["children"]:
-            for field, value in total(child).items():
-                sums[field] += value
-        node["totals"] = {**sums, "cost": pricing.cost(sums["tokens_in"], sums["tokens_out"], sums["tokens_cached"])}
+            below = total(child)
+            for field in ("tokens_in", "tokens_out", "tokens_cached", "llm_calls", "tool_calls"):
+                sums[field] += below[field]
+            add_cost(below["cost"])
+        node["totals"] = dict(sums)
         return sums
 
     for root in roots:
@@ -254,7 +267,9 @@ def live(db: sqlite3.Connection) -> list[dict[str, Any]]:
                        "elapsed_ms": (now - root["started_at_ns"]) // 10**6,
                        "llm_calls": usage["calls"], "tokens_in": usage["tin"] or 0, "tokens_out": usage["tout"] or 0,
                        "tokens_cached": usage["cached"] or 0,
-                       "cost": pricing.cost(usage["tin"] or 0, usage["tout"] or 0, usage["cached"] or 0),
+                       "cost": pricing.calls_cost(db.execute(
+                           "SELECT model,started_at_ns,tokens_in,tokens_out,tokens_cached FROM llm_calls WHERE trace_id=?",
+                           (trace_id,)).fetchall()),
                        "last_tool": dict(last_tool) if last_tool else None})
     return result
 

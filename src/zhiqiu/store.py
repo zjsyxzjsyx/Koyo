@@ -19,7 +19,7 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 # Review attempts a day may start; the schedule shows the days that would go over it.
 DAILY_REVIEW_LIMIT = 3
 LLM_FAILURE_CHARS = 20_000
@@ -627,6 +627,24 @@ class Store:
                     if column not in {row["name"] for row in self.db.execute("PRAGMA table_info(approval_requests)")}:
                         self.db.execute(f'ALTER TABLE approval_requests ADD COLUMN "{column}" TEXT')
                 self.db.execute("PRAGMA user_version=24")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 25:
+            with self.transaction():
+                # Conversations in groups the user names, and put away (archived) without being deleted.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS chat_groups (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)""")
+                for column, kind in (("group_id", "TEXT REFERENCES chat_groups(id) ON DELETE SET NULL"),
+                                     ("archived_at", "TEXT")):
+                    if column not in {row["name"] for row in self.db.execute("PRAGMA table_info(conversations)")}:
+                        self.db.execute(f"ALTER TABLE conversations ADD COLUMN {column} {kind}")
+                # Reminders at a set time, once or repeating; next_at is when one is due next (local time).
+                self.db.execute("""CREATE TABLE IF NOT EXISTS reminders (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                    at TEXT NOT NULL, repeat TEXT NOT NULL DEFAULT 'none'
+                        CHECK(repeat IN ('none','daily','weekdays','weekly')),
+                    next_at TEXT, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','done','cancelled')),
+                    conversation_id TEXT, created_at TEXT NOT NULL, fired_at TEXT, fired_count INTEGER NOT NULL DEFAULT 0)""")
+                self.db.execute("CREATE INDEX IF NOT EXISTS reminders_due ON reminders(status, next_at)")
+                self.db.execute("PRAGMA user_version=25")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

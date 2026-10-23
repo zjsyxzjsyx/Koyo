@@ -233,6 +233,26 @@ def _workbench_routes(app: FastAPI, server: Any, query: Callable[[Request], dict
             return route
         app.add_api_route(f"/api/chat/{action}", control(), methods=["POST"])
 
+    for path, handler in data.PANE_GETS.items():
+        def pane(handler: Callable = handler) -> Callable:
+            def route(request: Request) -> Response:
+                # Local file content: like the chat, only our page, which holds the token, may read it.
+                if not token_ok(request, server.token):
+                    return error(HTTPStatus.FORBIDDEN, "缺少或错误的工作台令牌")
+                return json_response(*handler(server, query(request)))
+            return route
+        app.add_api_route(path, pane(), methods=["GET"])
+
+    for path, handler in data.ACTIONS.items():
+        def act(handler: Callable = handler) -> Callable:
+            async def route(request: Request) -> Response:
+                body = await json_body(request, server, data.MAX_BODY)
+                if isinstance(body, Response):
+                    return body
+                return json_response(*await run_in_threadpool(handler, server, body))
+            return route
+        app.add_api_route(path, act(), methods=["POST"])
+
     for action in ("preview", "add", "remove"):
         def roots(action: str = action) -> Callable:
             async def route(request: Request) -> Response:

@@ -71,7 +71,8 @@ def record_eval_run(reports: list[dict[str, Any]], set_name: str, usage: dict[st
               "set": set_name, "samples": reports[0]["sample_count"], "runs": agreements,
               "mean_agreement": mean, "evidence_ok": evidence_ok,
               "passed": enough and evidence_ok and mean >= 0.8, **usage,
-              "cost": pricing.cost(usage.get("tokens_in"), usage.get("tokens_out"), usage.get("tokens_cached"))}
+              "cost": pricing.cost(usage.get("tokens_in"), usage.get("tokens_out"), usage.get("tokens_cached"),
+                                   model or None)}
     path = path or EVAL_RUNS
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

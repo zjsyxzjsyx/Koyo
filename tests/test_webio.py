@@ -326,3 +326,38 @@ def test_compact_runs_on_the_worker_and_refreshes_the_usage(tmp_path):
     assert any(text.startswith("已压缩：2 条较早的消息并入摘要") for text in notes)
     usage = work.context["usage"]
     assert usage["messages"] == 10 and usage["summarized_upto"] == 2 and usage["can_compact"] is False
+
+
+def test_prices_are_read_beside_the_worker_and_said_when_done(tmp_path):
+    release = threading.Event()
+
+    def updater():
+        assert release.wait(5)
+        return {"vendor": "DeepSeek", "models": {"deepseek-flash": {}, "deepseek-v4-pro": {}}}
+    work = Workbench(tmp_path / "state.sqlite", lambda store, io: ChatAgent(store, LearningRuntime(store, ChatModel([])), io),
+                     clock=FixedClock(date(2026, 10, 15)), price_updater=updater)
+    OPEN.append(work)
+    work.start()
+    after = work.io.last_seq
+    assert work.update_prices() and not work.update_prices()  # one at a time
+    assert work.prices["running"] and not work.busy  # the chat is not held up
+    release.set()
+    done = next_event(work.io, after, ("prices",))
+    assert done["ok"] is True and work.prices == {"running": False, "error": "", "models": 2}
+    notes = [e["text"] for e in work.io.events(after) if e["kind"] == "say"]
+    assert notes == ["已从DeepSeek价格页更新 2 个模型的价格：deepseek-flash、deepseek-v4-pro。"]
+
+
+def test_a_failed_price_update_is_said_and_can_be_tried_again(tmp_path):
+    def updater():
+        raise ValueError("价格页返回 HTTP 503")
+    work = Workbench(tmp_path / "state.sqlite", lambda store, io: ChatAgent(store, LearningRuntime(store, ChatModel([])), io),
+                     clock=FixedClock(date(2026, 10, 15)), price_updater=updater)
+    OPEN.append(work)
+    work.start()
+    after = work.io.last_seq
+    assert work.update_prices()
+    assert next_event(work.io, after, ("prices",))["ok"] is False
+    assert work.prices["error"] == "价格页返回 HTTP 503" and not work.prices["running"]
+    assert any(e["text"] == "没能更新模型价格：价格页返回 HTTP 503" for e in work.io.events(after) if e["kind"] == "say")
+    assert work.update_prices()

@@ -78,7 +78,7 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
                          "context_overflow": sum(1 for row in rows if row["status"] == "context_overflow"),
                          "p50_ms": _percentile(latencies, 0.5), "p95_ms": _percentile(latencies, 0.95),
                          "tokens_in": tin, "tokens_out": tout, "tokens_cached": cached,
-                         "cost": pricing.cost(tin, tout, cached)}
+                         "cost": pricing.calls_cost(rows)}
     all_latencies = [row["latency_ms"] for row in llm]
     all_ttft = [row["ttft_ms"] for row in llm if row["streamed"] and row["ttft_ms"] is not None]
     total_in = sum(row["tokens_in"] or 0 for row in llm)
@@ -135,26 +135,41 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
     span_status = Counter(row["status"] for row in spans if row["parent_span_id"] is None)
 
     daily: dict[str, dict[str, Any]] = {}
+    day_rows: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for row in llm:
-        day = daily.setdefault(_day(row["started_at_ns"], row["created_at"]),
-                               {"calls": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+        key = _day(row["started_at_ns"], row["created_at"])
+        day = daily.setdefault(key, {"calls": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cached": 0})
+        day_rows[key].append(row)
         day["calls"] += 1
         day["tokens_in"] += row["tokens_in"] or 0
         day["tokens_out"] += row["tokens_out"] or 0
         day["tokens_cached"] += row["tokens_cached"] or 0
-    for day in daily.values():
-        day["cost"] = pricing.cost(day["tokens_in"], day["tokens_out"], day["tokens_cached"])
+    for key, day in daily.items():
+        day["cost"] = pricing.calls_cost(day_rows[key])
+
+    # Model calls, by model: each priced by its own model's price (typed in, or read from the vendor's page).
+    model_rows: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in llm:
+        model_rows[row["model"] or "-"].append(row)
+    by_model = {}
+    for name, rows in sorted(model_rows.items()):
+        price = pricing.price_for(name)
+        by_model[name] = {"calls": len(rows), "tokens_in": sum(row["tokens_in"] or 0 for row in rows),
+                          "tokens_out": sum(row["tokens_out"] or 0 for row in rows),
+                          "tokens_cached": sum(row["tokens_cached"] or 0 for row in rows),
+                          "cost": pricing.calls_cost(rows),
+                          "price": price.as_dict() if price else None}
 
     return {
         "days": days, "generated_at_ns": time.time_ns(), "currency": pricing.currency(),
-        "priced": pricing.prices() is not None,
+        "priced": pricing.prices() is not None or any(item["price"] for item in by_model.values()),
         "model": {"calls": len(llm), "errors": llm_errors, "error_rate": _rate(llm_errors, len(llm)),
                   "invalid_output": llm_invalid, "invalid_rate": _rate(llm_invalid, len(llm)),
                   "p50_ms": _percentile(all_latencies, 0.5), "p95_ms": _percentile(all_latencies, 0.95),
                   **_ttft(all_ttft), "streamed": sum(1 for row in llm if row["streamed"]),
                   "tokens_in": total_in, "tokens_out": total_out, "tokens_cached": total_cached,
                   "cache_hit_rate": _rate(total_cached, total_in),
-                  "cost": pricing.cost(total_in, total_out, total_cached), "by_stage": stages},
+                  "cost": pricing.calls_cost(llm), "by_stage": stages, "by_model": by_model},
         "tools": {"calls": len(tools), "retried": retried, "retry_rate": _rate(retried, len(tools)),
                   "confirmed": confirmed, "by_tool": tool_stats,
                   "by_status": dict(Counter(row["status"] for row in tools))},
