@@ -243,6 +243,9 @@ def test_the_state_panel_starts_empty_without_errors(served, tmp_path):
     context = data["context"]
     assert context["read_roots"] == [str(tmp_path / "notes")] and context["write_roots"] == [str(tmp_path / "out")]
     assert context["memories"] == 0 and context["summarized"] is False and context["network"] is True
+    usage = context["usage"]
+    assert usage["messages"] == 0 and usage["can_compact"] is False and usage["limit"] is None
+    assert sum(part["tokens"] for part in usage["parts"]) == usage["estimate"] > 0
     assert data["running"] == [] and data["result"] is None
     assert data["verification"] == {"traces": 0, "passed": None, "failed": []}
     risk = data["risk"]
@@ -441,15 +444,17 @@ def test_switching_is_refused_while_a_prompt_waits(served):
     event, data = wait_event(server, ("approval",), after=after)
     other = bench.conversation_id
     for path, body in (("/api/chat/switch", {"conversation_id": other}), ("/api/chat/new", {}),
-                       ("/api/chat/rename", {"conversation_id": other, "title": "改名"})):
+                       ("/api/chat/rename", {"conversation_id": other, "title": "改名"}), ("/api/chat/compact", {})):
         assert call(server, path, "POST", body)[0] == 409
+    assert "等这一轮结束再压缩" in call(server, "/api/chat/compact", "POST", {})[1]["error"]
     call(server, "/api/chat/respond", "POST", {"request_id": event["request_id"], "value": False})
     wait_event(server, ("idle",), after=event["seq"])
     assert call(server, "/api/chat/new", "POST", {})[0] == 202
 
 
 @pytest.mark.parametrize("path, body", [("/api/chat/switch", {"conversation_id": "x"}), ("/api/chat/new", {}),
-                                        ("/api/chat/rename", {"conversation_id": "x", "title": "x"})])
+                                        ("/api/chat/rename", {"conversation_id": "x", "title": "x"}),
+                                        ("/api/chat/compact", {})])
 @pytest.mark.parametrize("kwargs, status", [
     ({"token": False}, 403), ({"origin": "https://evil.example"}, 403), ({"host": "evil.example:80"}, 403),
     ({"content_type": "text/plain"}, 415), ({"raw": b"{" + b" " * (MAX_BODY + 1) + b"}"}, 413), ({"raw": b"[1]"}, 400)])
@@ -458,3 +463,21 @@ def test_conversation_writes_pass_the_same_checks_as_input(served, path, body, k
     first = bench.conversation_id
     assert call(server, path, "POST", body, **kwargs)[0] == status
     assert not bench.busy and bench.conversation_id == first
+
+
+def test_compact_from_the_panel_folds_older_messages_and_the_usage_follows(served):
+    server, bench, model = served
+    model.summarize_chat = lambda previous, items: {"summary": f"覆盖{len(items)}条"}
+    assert call(server, "/api/chat/compact", "POST", {})[0] == 202  # too few messages: a note, no model call
+    for index in range(6):
+        data = call(server, "/api/chat/input", "POST", {"text": f"第{index}句"})[1]
+        wait_event(server, ("idle",), after=data["next"])
+    assert call(server, "/api/chat/state")[1]["context"]["usage"]["can_compact"] is True
+    status, data = call(server, "/api/chat/compact", "POST", {})
+    assert status == 202
+    note, _ = wait_event(server, ("say",), after=data["next"])
+    assert note["say_kind"] == "note" and note["text"].startswith("已压缩：2 条较早的消息并入摘要")
+    wait_event(server, ("idle",), after=note["seq"])
+    context = call(server, "/api/chat/state")[1]["context"]
+    assert context["summarized"] is True and context["usage"]["summarized_upto"] == 2
+    assert context["usage"]["messages"] == 10 and context["usage"]["can_compact"] is False

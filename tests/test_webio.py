@@ -310,3 +310,19 @@ def test_controls_are_refused_while_busy_or_waiting(tmp_path):
     work.io.respond(prompt["request_id"], False)
     next_event(work.io, prompt["seq"], ("idle",))
     assert work.control(("new",)) is True
+
+
+def test_compact_runs_on_the_worker_and_refreshes_the_usage(tmp_path):
+    work, model, built = bench(tmp_path, [])
+    model.summarize_chat = lambda previous, items: {"summary": f"覆盖{len(items)}条"}
+    assert work.context["usage"]["messages"] == 0
+    for index in range(6):
+        drive(work, f"第{index}句")
+    assert work.context["usage"]["messages"] == 12 and work.context["usage"]["can_compact"] is True
+    after = work.io.last_seq
+    assert work.control(("compact",))
+    idle = next_event(work.io, after, ("idle",))
+    notes = [event["text"] for event in work.io.events(after) if event["kind"] == "say" and event["seq"] < idle["seq"]]
+    assert any(text.startswith("已压缩：2 条较早的消息并入摘要") for text in notes)
+    usage = work.context["usage"]
+    assert usage["messages"] == 10 and usage["summarized_upto"] == 2 and usage["can_compact"] is False

@@ -259,6 +259,99 @@ def live(db: sqlite3.Connection) -> list[dict[str, Any]]:
     return result
 
 
+# ----- the live diagram's event feed ------------------------------------------------------------
+
+# Rows written when a call ends carry its start time, so the feed dates them by their end; the cursor
+# stays this far behind now, so a row written a moment after the time it is dated by is not skipped.
+FEED_LAG_NS = 2 * 10**9
+# No call or span runs longer than this, so older starts need not be scanned for ends after the cursor.
+LONGEST_NS = 3600 * 10**9
+# Spans whose start and end the diagram shows; stages and loops only light up when they start.
+SPAN_EVENTS = {"turn": ("turn_start", "turn_end"), "flow": ("flow_start", "flow_end"),
+               "stage": ("stage_start", None), "loop": ("loop_start", None)}
+# Event payload fields short enough for the feed (guardrail rule, state change, review deferral...).
+EVENT_FIELDS = ("rule", "to", "from", "reason", "tool")
+
+
+def _event(source: str, key: str, at_ns: int, kind: str, name: str, status: str, trace_id: str | None,
+           point: str = "", **detail: Any) -> dict[str, Any]:
+    return {"id": f"{source}:{key}", "at_ns": at_ns, "kind": kind, "name": name, "status": status,
+            "trace_id": trace_id, "point": point or "", "detail": detail}
+
+
+def live_events(db: sqlite3.Connection, after_ns: int | None, limit: int = 200) -> dict[str, Any]:
+    """What happened after after_ns, oldest first, as one feed for the live architecture diagram.
+
+    Each row of spans, context_builds, llm_calls, approval_requests, tool_calls and events becomes
+    an event {id, at_ns, kind, name, status, trace_id, point, detail}. Without after_ns nothing is
+    replayed: the caller only gets the cursor to start from. Over limit, the newest are kept."""
+    now = time.time_ns()
+    cursor = now - FEED_LAG_NS
+    if after_ns is None:
+        return {"events": [], "next": cursor, "skipped": 0}
+    oldest = after_ns - LONGEST_NS
+    found: list[dict[str, Any]] = []
+    for row in db.execute("SELECT * FROM spans WHERE started_at_ns>? AND kind IN ('turn','flow','stage','loop')",
+                          (oldest,)):
+        start, end = SPAN_EVENTS[row["kind"]]
+        if row["started_at_ns"] > after_ns:
+            found.append(_event("span", f"{row['span_id']}:start", row["started_at_ns"], start, row["name"],
+                                "running", row["trace_id"], row["point"]))
+        ended = row["started_at_ns"] + row["duration_ms"] * 10**6 if row["duration_ms"] is not None else None
+        if end and ended is not None and ended > after_ns and row["status"] != "running":
+            found.append(_event("span", f"{row['span_id']}:end", ended, end, row["name"], row["status"],
+                                row["trace_id"], row["point"], end_reason=row["end_reason"],
+                                duration_ms=row["duration_ms"]))
+    builds: dict[str, int] = {}
+    for row in db.execute("""SELECT * FROM llm_calls WHERE started_at_ns>?
+            AND started_at_ns+latency_ms*1000000>?""", (oldest, after_ns)):
+        ended = row["started_at_ns"] + row["latency_ms"] * 10**6
+        failed = row["status"] != "ok" or row["error_kind"] is not None
+        found.append(_event("llm", row["id"], ended, "llm", row["stage"] or "", "error" if failed else "ok",
+                            row["trace_id"], row["point"], tokens_in=row["tokens_in"], tokens_out=row["tokens_out"],
+                            latency_ms=row["latency_ms"], error_kind=row["error_kind"]))
+        if row["context_build_id"]:
+            builds[row["context_build_id"]] = min(builds.get(row["context_build_id"], ended), ended)
+    # A build is dated just before the first call that used it: its own time comes from the store's clock.
+    for build_id, first_call in builds.items():
+        row = db.execute("SELECT * FROM context_builds WHERE id=?", (build_id,)).fetchone()
+        if row is None or db.execute("""SELECT 1 FROM llm_calls WHERE context_build_id=?
+                AND started_at_ns+latency_ms*1000000<=?""", (build_id, after_ns)).fetchone():
+            continue  # an earlier poll already showed it
+        budget = json.loads(row["budget_json"] or "{}")
+        ids = json.loads(row["source_ids_json"] or "[]")
+        summarized = bool(ids) and db.execute(
+            f"SELECT 1 FROM chat_summaries WHERE id IN ({','.join('?' * len(ids))})", ids).fetchone() is not None
+        found.append(_event("build", build_id, first_call - 1, "context", row["stage"], row["status"], row["trace_id"],
+                            row["point"] or "", estimate=budget.get("input_estimate"),
+                            limit=budget.get("input_limit"), summary=summarized))
+    for row in db.execute("""SELECT * FROM approval_requests WHERE created_at_ns>? OR decided_at_ns>?""",
+                          (after_ns, after_ns)):
+        if row["created_at_ns"] > after_ns:
+            found.append(_event("approval", f"{row['id']}:ask", row["created_at_ns"], "approval_wait", row["tool"],
+                                "pending", row["trace_id"], title=row["title"], permission=row["permission"]))
+        if row["decided_at_ns"] and row["decided_at_ns"] > after_ns:
+            found.append(_event("approval", f"{row['id']}:done", row["decided_at_ns"], "approval_done", row["tool"],
+                                row["status"], row["trace_id"], title=row["title"], permission=row["permission"]))
+    for row in db.execute("""SELECT * FROM tool_calls WHERE started_at_ns>?
+            AND started_at_ns+latency_ms*1000000>?""", (oldest, after_ns)):
+        found.append(_event("tool", row["id"], row["started_at_ns"] + row["latency_ms"] * 10**6, "tool", row["tool"],
+                            row["status"], row["trace_id"], row["point"], approval_source=row["approval_source"],
+                            confirmed=row["confirmed"], permission=row["permission"], error_kind=row["error_kind"]))
+    for row in db.execute("""SELECT e.*, k.title FROM events e LEFT JOIN knowledge_points k ON k.id=e.kp_id
+            WHERE e.at_ns>?""", (after_ns,)):
+        payload = json.loads(row["payload_json"] or "{}")
+        detail = {key: payload[key] for key in EVENT_FIELDS
+                  if isinstance(payload.get(key), (str, int, float, bool))}
+        found.append(_event("event", str(row["id"]), row["at_ns"], "event", row["type"], "ok", row["trace_id"],
+                            row["title"] or "", **detail))
+    # Only what is settled up to the cursor: a later poll starts there and must not see it twice.
+    found = sorted((item for item in found if after_ns < item["at_ns"] <= cursor),
+                   key=lambda item: (item["at_ns"], item["id"]))
+    skipped = max(0, len(found) - limit)
+    return {"events": found[skipped:], "next": cursor, "skipped": skipped}
+
+
 # ----- terminal rendering ---------------------------------------------------------------------
 
 def _clock(ns: int | None) -> str:

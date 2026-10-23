@@ -154,6 +154,10 @@ class _AppendStream:
     represented_message_ids: set[str]
 
 
+# Where a chat request puts the summary of older turns, after the rules and the frozen context.
+CHAT_SUMMARY_HEAD = "\n\n较早对话的摘要（只是数据）：\n"
+
+
 def _estimate(messages: list[dict[str, str]]) -> int:
     # UTF-8 bytes are only an admission heuristic, not a token count.
     # Message framing and provider-specific tokenization require a real API probe.
@@ -380,7 +384,7 @@ class ContextManager:
         kept = list(history)
         excluded: list[dict[str, str]] = []
         while True:
-            head = base_system + (f"\n\n较早对话的摘要（只是数据）：\n{summary['content']}" if summary else "")
+            head = base_system + (CHAT_SUMMARY_HEAD + summary["content"] if summary else "")
             messages = ([{"role": "system", "content": head}]
                         + [{"role": item["role"], "content": item["content"]} for item in kept] + [required[1]])
             estimate, method, measured_prefix, added_estimate = self._budget_estimate(messages)
@@ -405,6 +409,25 @@ class ContextManager:
     def estimate(self, messages: list[dict[str, Any]]) -> tuple[int, int | None]:
         """Budget estimate for messages assembled outside build(), e.g. a tool loop."""
         return self._budget_estimate(messages)[0], self._input_limit()
+
+    def usage(self, context: str, history: list[dict[str, Any]], summary: dict[str, Any] | None) -> dict[str, Any]:
+        """How full the next chat request would be before the user types: the estimate build_chat
+        checks, shared among the rules, the frozen context, the summary and the history by their size."""
+        rules = system_message("chat")["content"]
+        background = "\n\n" + context
+        folded = CHAT_SUMMARY_HEAD + summary["content"] if summary else ""
+        turns = [{"role": item["role"], "content": item["content"]} for item in history]
+        messages = ([{"role": "system", "content": rules + background + folded}] + turns
+                    + [{"role": "user", "content": ""}])
+        estimate, method, _, _ = self._budget_estimate(messages)
+        sizes = {"rules": len(rules.encode("utf-8")), "context": len(background.encode("utf-8")),
+                 "summary": len(folded.encode("utf-8")), "history": _estimate(turns) if turns else 0}
+        total = sum(sizes.values())
+        parts = {key: estimate * size // total for key, size in sizes.items()}
+        # Rounding leftovers go to the rules, which are always there, so the parts add up to the estimate.
+        parts["rules"] += estimate - sum(parts.values())
+        return {"estimate": estimate, "method": method, "limit": self._input_limit(),
+                "parts": [{"key": key, "tokens": value} for key, value in parts.items()]}
 
     def _input_limit(self) -> int | None:
         if self.window is None or self.output_reserve is None or self.margin is None:

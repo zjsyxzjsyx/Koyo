@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from importlib import resources
 from pathlib import Path
@@ -63,6 +63,57 @@ def live(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, Any]:
     path = db.execute("PRAGMA database_list").fetchone()["file"]
     return {"now_ns": time.time_ns(), "running": traces.live(db), "latest": latest[0] if latest else None,
             "currency": pricing.currency(), "db": Path(path).name if path else ""}
+
+
+def live_events(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, Any]:
+    """The live diagram's feed after a cursor (no cursor: only where to start), and with stats=1 the
+    numbers on its boxes."""
+    raw = query.get("after", [""])[0]
+    try:
+        after = int(raw) if raw else None
+    except ValueError:
+        raise BadRequest(f"after 应为整数：{raw}") from None
+    data = traces.live_events(db, after, int(_number(query, "limit", 200, 1, 1000)))
+    if query.get("stats", [""])[0] == "1":
+        data["stats"] = diagram_stats(db)
+    return data
+
+
+def diagram_stats(db: sqlite3.Connection) -> dict[str, Any]:
+    """Today's numbers on the live diagram's boxes, from the queries the other pages already use."""
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    since_ns = int(midnight.timestamp() * 10**9)
+    days = max((time.time_ns() - since_ns) / (86400 * 10**9), 0.0001)
+    model = metrics.collect(db, days)
+    today = Clock().today().isoformat()
+    plan = review_schedule(db, today, today, today)["summary"]
+
+    def count(sql: str, *args: Any) -> Any:
+        return db.execute(sql, args).fetchone()[0]
+    turns = count("SELECT COUNT(*) FROM spans WHERE kind='turn' AND name='chat' AND started_at_ns>=?", since_ns)
+    return {
+        "turns": turns,
+        "commands": count("SELECT COUNT(*) FROM spans WHERE kind='turn' AND name!='chat' AND started_at_ns>=?",
+                          since_ns),
+        "reply_ms": count("""SELECT AVG(duration_ms) FROM spans WHERE kind='turn' AND name='chat' AND started_at_ns>=?
+            AND duration_ms IS NOT NULL""", since_ns),
+        "llm_calls": model["model"]["calls"], "tokens_in": model["model"]["tokens_in"],
+        "tokens_out": model["model"]["tokens_out"], "cost": model["model"]["cost"], "currency": model["currency"],
+        "tool_calls": model["tools"]["calls"],
+        "tool_failures": sum(n for status, n in model["tools"]["by_status"].items() if status != "ok"),
+        "approvals_pending": count("SELECT COUNT(*) FROM approval_requests WHERE status='pending'"),
+        "grades": count("""SELECT COUNT(DISTINCT trace_id) FROM spans WHERE kind='stage' AND name LIKE 'grade%'
+            AND started_at_ns>=?""", since_ns),
+        "points": count("SELECT COUNT(*) FROM knowledge_points"),
+        "reviews_today": plan["today"], "reviews_overdue": plan["overdue"],
+        "memories": count("SELECT COUNT(*) FROM semantic_memories WHERE active=1"),
+        "conversations": count("SELECT COUNT(*) FROM conversations"),
+        "summaries": count("SELECT COUNT(*) FROM chat_summaries"),
+        "traces": traces.summary(db, days)["traces"],
+        "checks_passed": contracts.check(db, days)["passed"],
+        "guardrails": count("SELECT COUNT(*) FROM events WHERE type='GuardrailTriggered' AND at_ns>=?", since_ns),
+        "failures": contracts.failures(db, days)["total"],
+    }
 
 
 def trace_list(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -167,6 +218,7 @@ def approval_list(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[s
 
 ROUTES: dict[str, Callable[[sqlite3.Connection, dict[str, list[str]]], dict[str, Any]]] = {
     "/api/live": live,
+    "/api/live/events": live_events,
     "/api/traces": trace_list,
     "/api/metrics": lambda db, query: metrics.collect(db, _number(query, "days", 7, 0.01, 3650)),
     "/api/failures": lambda db, query: contracts.failures(db, _number(query, "days", 7, 0.01, 3650)),
@@ -234,7 +286,9 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
         "context": {"read_roots": context.get("read_roots", []), "write_roots": context.get("write_roots", []),
                     "memories": len(json.loads(row["memory_snapshot_json"] or "[]")) if row else 0,
                     "summarized": summaries > 0, "network": not context.get("offline", False),
-                    "tools": context.get("tools", True), "path_grants": context.get("path_grants", False)},
+                    "tools": context.get("tools", True), "path_grants": context.get("path_grants", False),
+                    # Worked out by the worker after each turn; None when it could not be estimated.
+                    "usage": context.get("usage")},
         "running": [{"trace_id": run["trace_id"], "chain": run["chain"], "elapsed_ms": run["elapsed_ms"],
                      "llm_calls": run["llm_calls"]} for run in running],
         "risk": {"policy": context.get("policy"), "policy_text": context.get("policy_text", ""),
@@ -584,11 +638,13 @@ def roots_change(server: DashboardServer, action: str, data: dict[str, Any]) -> 
 
 
 def conversation_control(server: DashboardServer, action: str, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """Switch, start or rename a conversation. Checked here, then done by the worker between turns."""
+    """Switch, start, rename or compact a conversation. Checked here, then done by the worker between turns.
+
+    compact (like new) acts on the open conversation, so it needs no conversation_id."""
     from .conversations import clean_title
     bench = server.workbench
     conversation_id = data.get("conversation_id")
-    if action != "new":
+    if action not in ("new", "compact"):
         if not isinstance(conversation_id, str) or not conversation_id:
             return HTTPStatus.BAD_REQUEST, {"error": "conversation_id 必须是非空字符串"}
         db = server.connect()
@@ -604,10 +660,11 @@ def conversation_control(server: DashboardServer, action: str, data: dict[str, A
             return HTTPStatus.BAD_REQUEST, {"error": f"标题清洗后须为 1 到 {RENAME_CHARS} 字"}
         command: tuple[Any, ...] = ("rename", conversation_id, title)
     else:
-        command = ("switch", conversation_id) if action == "switch" else ("new",)
+        command = ("switch", conversation_id) if action == "switch" else (action,)
     if bench.control(command):
         return HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq}
-    return HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再切换"}
+    verb = "压缩" if action == "compact" else "切换"
+    return HTTPStatus.CONFLICT, {"error": f"先回答或停止当前提示，等这一轮结束再{verb}"}
 
 
 def record_refusal(db_path: Path, reason: str) -> None:

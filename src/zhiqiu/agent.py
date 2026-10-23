@@ -58,7 +58,7 @@ KEEP_RECENT = 10
 CLOSING = "不要再调用工具，直接用文字给出本轮的回答。"
 HELP = ("对话命令：/status 查看状态；/learn 知识点 [--from 路径] [--url 网址] [--notion 页面]；"
         "/review [知识点]；/resume [短号]；/detail [短号] 查看评阅详情；/chats 列出最近的对话；/open 编号或短号 切换对话；"
-        "/title 新标题 给对话改名；/memory 查看记忆；/skill 查看讲法，/skill 名称 知识点 指定讲法；/new 开新对话。"
+        "/title 新标题 给对话改名；/compact 把较早的消息压缩成摘要；/memory 查看记忆；/skill 查看讲法，/skill 名称 知识点 指定讲法；/new 开新对话。"
         "其他输入直接与知秋对话。")
 # How many conversations /chats lists.
 CHATS_LISTED = 10
@@ -512,11 +512,13 @@ class ChatAgent:
         refused = getattr(getattr(self.service, "model", None), "refused_features", None)
         return not (callable(refused) and "tools" in refused())
 
-    def _history(self, summary: dict[str, Any] | None) -> list[dict[str, Any]]:
-        """Messages after the latest summary, without the current input; oldest first."""
+    def _history(self, summary: dict[str, Any] | None, drop_last: bool = True) -> list[dict[str, Any]]:
+        """Messages after the latest summary, oldest first. Within a turn the last message is the
+        current input and is left out; between turns (drop_last=False) it is history too."""
         after = summary["upto_seq"] if summary else 0
         items = []
-        for message in self.chats.messages(self.conversation_id)[:-1]:
+        messages = self.chats.messages(self.conversation_id)
+        for message in messages[:-1] if drop_last else messages:
             if message["seq"] <= after:
                 continue
             if message["kind"] == "chat":
@@ -717,6 +719,39 @@ class ChatAgent:
         if limit is None:
             return len(history) > HISTORY_MESSAGES
         return estimate > SUMMARY_TRIGGER * limit
+
+    def context_usage(self) -> dict[str, Any]:
+        """How full the next chat request would be and how close it is to being summarized, between turns."""
+        summary = self.chats.latest_summary(self.conversation_id)
+        history = self._history(summary, drop_last=False)
+        usage = self.service.context.usage(self._context(), history, summary)
+        limit = usage["limit"]
+        return {**usage, "trigger": int(SUMMARY_TRIGGER * limit) if limit is not None else None,
+                "messages": len(history), "keep_recent": KEEP_RECENT, "history_messages": HISTORY_MESSAGES,
+                "summarized_upto": summary["upto_seq"] if summary else 0, "can_compact": len(history) > KEEP_RECENT}
+
+    def compact(self) -> None:
+        """Fold every unsummarized message but the newest KEEP_RECENT into the summary now (/compact)."""
+        summary = self.chats.latest_summary(self.conversation_id)
+        history = self._history(summary, drop_last=False)
+        older = history[:-KEEP_RECENT]
+        if not older:
+            self.io.say(f"可压缩的消息不足：最近 {KEEP_RECENT} 条始终保留原文，现有 {len(history)} 条未摘要。",
+                        kind="note")
+            return
+        before = self.context_usage()["estimate"]
+        with tracing.span(self.store, "turn", "/compact", conversation_id=self.conversation_id) as span:
+            try:
+                folded = self._summarize(summary, older)
+            except Exception as exc:
+                span.set(end_reason="error")
+                self._fail(f"对话压缩失败：{exc}")
+                return
+            span.set(end_reason="compacted")
+        count = sum(1 for item in older if item["seq"] <= folded["upto_seq"])
+        after = self.context_usage()["estimate"]
+        self.io.say(f"已压缩：{count} 条较早的消息并入摘要，最近 {KEEP_RECENT} 条保留原文；"
+                    f"上下文估算 {before:,} → {after:,}。", kind="note")
 
     def _summarize(self, summary: dict[str, Any] | None, older: list[dict[str, Any]]) -> dict[str, Any]:
         """Fold older turns into the summary with the chat_summary stage; halve the batch if too long."""
@@ -1051,6 +1086,8 @@ class ChatAgent:
                 self._open_listed(rest[0] if rest else "")
             elif name == "/detail":
                 self._show_detail(rest[0] if rest else None)
+            elif name == "/compact":
+                self.compact()
             elif name == "/memory":
                 items = self.memory.list_semantic(None)
                 self.io.say("\n".join(f"  {item['key']}：{item['content']}" for item in items) or "还没有记忆。")

@@ -159,3 +159,51 @@ def test_v14_database_gains_status_snapshot_and_summaries_and_forget_removes_the
     chats.forget(conversation["id"])
     assert reopened.db.execute("SELECT COUNT(*) FROM chat_summaries").fetchone()[0] == 0
     reopened.close()
+
+
+def test_usage_splits_the_estimate_and_marks_where_summarizing_starts(tmp_path):
+    store, _, io, agent = make_agent(tmp_path, [])
+    fill(store, agent.conversation_id, 3)
+    unbudgeted = agent.context_usage()
+    assert unbudgeted["limit"] is None and unbudgeted["trigger"] is None
+    assert (unbudgeted["messages"], unbudgeted["history_messages"], unbudgeted["can_compact"]) == (6, 40, False)
+    budget(agent)
+    usage = agent.context_usage()
+    assert usage["limit"] == 5400 and usage["trigger"] == int(0.7 * 5400) and usage["method"] == "utf8_bytes"
+    parts = {part["key"]: part["tokens"] for part in usage["parts"]}
+    assert sum(parts.values()) == usage["estimate"] and parts["summary"] == 0
+    assert parts["history"] > 0 and parts["rules"] > parts["context"] > 0
+    # The total is what build_chat would check for the same messages.
+    summary = Conversations(store).latest_summary(agent.conversation_id)
+    request = agent.service.context.build_chat(agent._context(), agent._history(summary, drop_last=False), "",
+                                               agent.conversation_id)
+    assert request.budget["input_estimate"] == usage["estimate"]
+
+
+def test_compact_folds_all_but_the_newest_messages_on_request(tmp_path):
+    store, _, io, agent = make_agent(tmp_path, [])
+    model = SummaryModel()
+    agent.service.model = model
+    fill(store, agent.conversation_id, 8)
+    agent.handle("/compact")
+    chats = Conversations(store)
+    assert model.summaries == [("", 6)] and chats.latest_summary(agent.conversation_id)["upto_seq"] == 6
+    assert any(line.startswith("已压缩：6 条较早的消息并入摘要，最近 10 条保留原文") for line in io.said)
+    usage = agent.context_usage()
+    assert usage["messages"] == 10 and usage["summarized_upto"] == 6 and usage["can_compact"] is False
+    assert {part["key"]: part["tokens"] for part in usage["parts"]}["summary"] > 0
+    traced = store.db.execute("SELECT name,end_reason FROM spans WHERE kind='turn'").fetchall()
+    assert [tuple(row) for row in traced] == [("/compact", "compacted")]
+    agent.handle("/compact")  # nothing older than the newest ten: no model call
+    assert len(model.summaries) == 1 and io.said[-1].startswith("可压缩的消息不足")
+
+
+def test_a_failed_compact_keeps_the_messages_and_says_why(tmp_path):
+    store, _, io, agent = make_agent(tmp_path, [])
+    agent.service.model = SummaryModel(fail=True)
+    fill(store, agent.conversation_id, 8)
+    agent.handle("/compact")
+    chats = Conversations(store)
+    assert chats.latest_summary(agent.conversation_id) is None
+    assert "对话压缩失败" in chats.get(agent.conversation_id)["last_error"] and "对话压缩失败" in io.said[-1]
+    assert agent.context_usage()["messages"] == 16

@@ -42,7 +42,7 @@ class UserInput:
     source: str = "text"
     voice: dict[str, Any] | None = None
 # What the page can ask the worker to do besides a line of input; each runs between turns only.
-CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5}
+CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5, "compact": 0}
 _STOPPED = object()
 _CLOSE = object()
 
@@ -332,10 +332,10 @@ class Workbench:
         return self._queue(UserInput(text, input_source, voice))
 
     def control(self, action: tuple[Any, ...]) -> bool:
-        """Queue a switch, new or rename for the worker; False while busy, waiting on a prompt, or closed.
+        """Queue a switch, new, rename or compact for the worker; False while busy, waiting on a prompt, or closed.
 
         The agent and its database connection live on the worker, so the page never changes the
-        conversation itself: ("switch", id), ("new",), ("rename", id, title), and the user's root
+        conversation itself: ("switch", id), ("new",), ("rename", id, title), ("compact",), and the user's root
         changes: ("roots", "add" | "remove", kind, path, files, truncated)."""
         if not action or action[0] not in CONTROLS or len(action) != CONTROLS[action[0]] + 1:
             raise ValueError(f"unknown workbench control: {action!r}")
@@ -385,6 +385,7 @@ class Workbench:
                 "policy_text": policy.text() if policy else ""}
             self._roots_context(agent)
             self._tools_context(agent)
+            self._usage_context(agent)
         except BaseException as exc:
             self._error = exc
             self._ready.set()
@@ -420,6 +421,7 @@ class Workbench:
                     # A folder granted in the conversation became a root during the turn.
                     self._roots_context(agent)
                     self._tools_context(agent)
+                    self._usage_context(agent)
                     with self._lock:
                         self._busy = False
                     self.io.emit("idle", conversation_id=self.conversation_id)
@@ -438,6 +440,15 @@ class Workbench:
         self.context = {**self.context, "tools": available() if callable(available) else True,
                         "path_grants": bool(policy is not None and policy.path_grants())}
 
+    def _usage_context(self, agent: Any) -> None:
+        """How full the conversation's context is, for the status panel; only a hint, so never an error."""
+        usage = getattr(agent, "context_usage", None)
+        try:
+            value = usage() if callable(usage) else None
+        except Exception:
+            value = None
+        self.context = {**self.context, "usage": value}
+
     def _skills_context(self, agent: Any) -> None:
         """The Skills the next lesson can use and the user's broken ones, read on the worker."""
         library = getattr(getattr(agent, "service", None), "skills", None)
@@ -455,6 +466,8 @@ class Workbench:
                 agent.switch(*args)
             elif name == "new":
                 agent.new()
+            elif name == "compact":
+                agent.compact()
             elif name == "roots":
                 agent.change_roots(*args)
                 self._roots_context(agent)

@@ -222,7 +222,7 @@ def _workbench_routes(app: FastAPI, server: Any, query: Callable[[Request], dict
             return body
         return json_response(HTTPStatus.OK, {"stopped": bench.io.stop()})
 
-    for action in ("switch", "new", "rename"):
+    for action in ("switch", "new", "rename", "compact"):
         def control(action: str = action) -> Callable:
             async def route(request: Request) -> Response:
                 item = await body_of(request, ConversationControl)

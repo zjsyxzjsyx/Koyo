@@ -39,6 +39,10 @@ REWRITTEN = (
     "会话内 `/done` 确认学完",                   # commands: materials.max_chars
     "[server.json](server.json)",              # integrations: links relative to docs/, 9.0.0
     "配置 `ZHIQIU_MCP_CONFIG` 指向一个 JSON 文件后",
+    # Rewritten for 9.1.
+    "斜杠命令由程序直接执行",                     # chat: /compact
+    "对话页右侧是状态面板",                       # workbench: the review calendar and the context usage
+    "| `GET /api/chat/state` |",               # workbench: context.usage
 )
 LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
 
