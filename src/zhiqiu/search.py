@@ -129,7 +129,13 @@ class DeepSeekSearch:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ToolError("invalid_args", f"只支持 http/https 网页：{url}")
-        data = self._post("fetch", {"url": url})
+        try:
+            data = self._post("fetch", {"url": url})
+        except ToolError as exc:
+            # DeepSeek answers 404 when it could not get the page itself: name the page, not the API.
+            if exc.status == 404:
+                raise ToolError("not_found", f"抓取不到这个网页（DeepSeek 返回 404）：{url}", 404) from None
+            raise
         text = data.get("content")
         if not isinstance(text, str) or not text.strip():
             raise ToolError("not_found", f"网页没有可读正文：{url}")

@@ -143,12 +143,12 @@ class ChatIO:
 
 def _describe_external(spec: ToolSpec) -> Callable[[dict[str, Any]], str]:
     def describe(args: dict[str, Any]) -> str:
-        service = spec.service or "外部搜索服务"
+        service = f" {spec.service} " if spec.service else "外部搜索服务"
         paid = "，按次计费" if spec.service and spec.service != "Exa" else ""
         if spec.name == "web_search":
-            return f"联网搜索（查询发往{service}{paid}）：{args.get('query', '')}"
+            return f"联网搜索（查询发往{service.rstrip()}{paid}）：{args.get('query', '')}"
         if spec.name == "fetch_url":
-            return f"获取网页正文（经{service}{paid}）：{args.get('url', '')}"
+            return f"获取网页正文（经{service.rstrip()}{paid}）：{args.get('url', '')}"
         shown = json.dumps(args, ensure_ascii=False)
         return f"调用外部工具 {spec.name}（{spec.source}）：{shown[:500]}"
     return describe

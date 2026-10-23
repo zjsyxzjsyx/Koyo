@@ -111,3 +111,15 @@ def test_chat_says_up_front_when_search_is_missing(tmp_path, clean):
     store, model, io, agent = make_agent(tmp_path / "offline", [], offline=True)
     agent.start()
     assert not any("联网搜索：" in text for text in io.said)
+
+
+def test_a_page_deepseek_cannot_get_is_not_found_and_named(clean):
+    class Missing(FakeClient):
+        def stream(self, method, url, **kwargs):
+            stream = FakeStream({})
+            stream.status_code = 404
+            return stream
+    clean.setattr("zhiqiu.tools.httpx.Client", Missing)
+    with pytest.raises(ToolError) as error:
+        DeepSeekSearch("sk-test").fetch("https://example.org/gone")
+    assert error.value.kind == "not_found" and str(error.value).endswith("：https://example.org/gone")

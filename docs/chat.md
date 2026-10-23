@@ -84,7 +84,7 @@
 
 每次调用写一行 `tool_calls`：工具、来源、权限、关联的知识点或尝试、参数摘要（字符串截到 200 字，名称含 key、token、secret 等的字段不记录）、是否经确认及由谁放行（`approval_source`：`policy` 审批策略、`user` 用户当场批准、`turn` 本轮已允许；V6 起记录，schema v19）、状态、错误类型、尝试次数、耗时、结果数和输出字数。`trace` 会列出该尝试及其知识点准备阶段的工具调用；`export` 与 `forget` 同样覆盖这张表。V2 的 `search_calls` 只保留为历史，不再写入。
 
-联网搜索的来源（9.2）：配置了 Exa 密钥（`ZHIQIU_EXA_API_KEY`，或 Exa 文档里的 `EXA_API_KEY`，两个名字都可以写在 `.env` 里）时用 Exa；没有时，如果模型端点是 DeepSeek（`api.deepseek.com`），就用 DeepSeek 的搜索与抓取接口（`/v1/tools/search`、`/v1/tools/fetch`，用同一把模型密钥，按次计费），不必再注册 Exa；两个都没有就没有 `web_search` 和 `fetch_url`。`services.search`（`ZHIQIU_SEARCH`）可以设为 `exa`、`provider` 只用其中一个，或 `off` 不搜索。用哪个在对话开头就说清楚：没有可用的搜索时，新对话的第一条提示写“联网搜索：未配置，不能搜索网页”和配置方法，状态面板的“联网”一行也这样写；模型的上下文里写着“没有联网搜索工具”，用户要搜索时它会如实转告。审批卡片和工具提示写明查询发往哪里（例如“联网搜索（查询发往DeepSeek 搜索，按次计费）”）。密钥无效、过期或没有权限（HTTP 401／403）、余额不足（402）时，错误里写出是哪个服务、什么原因，错误种类为 `auth`、`billing`。
+联网搜索的来源（9.2）：配置了 Exa 密钥（`ZHIQIU_EXA_API_KEY`，或 Exa 文档里的 `EXA_API_KEY`，两个名字都可以写在 `.env` 里）时用 Exa；没有时，如果模型端点是 DeepSeek（`api.deepseek.com`），就用 DeepSeek 的搜索与抓取接口（`/v1/tools/search`、`/v1/tools/fetch`，用同一把模型密钥，按次计费），不必再注册 Exa；两个都没有就没有 `web_search` 和 `fetch_url`。`services.search`（`ZHIQIU_SEARCH`）可以设为 `exa`、`provider` 只用其中一个，或 `off` 不搜索。用哪个在对话开头就说清楚：没有可用的搜索时，新对话的第一条提示写“联网搜索：未配置，不能搜索网页”和配置方法，状态面板的“联网”一行也这样写；模型的上下文里写着“没有联网搜索工具”，用户要搜索时它会如实转告。审批卡片和工具提示写明查询发往哪里（例如“联网搜索（查询发往 DeepSeek 搜索，按次计费）”）。密钥无效、过期或没有权限（HTTP 401／403）、余额不足（402）时，错误里写出是哪个服务、什么原因，错误种类为 `auth`、`billing`。
 
 目前注册的工具有 `notion_page`（只供程序调用，见“Notion 页面资料”）、业务只读查询 `zhiqiu_status`、`zhiqiu_due`、`zhiqiu_knowledge_point`（资料只列清单、不含全文）、`zhiqiu_trace`（输出上限 20,000 字），以及 `read_file`、`write_file`（见下）、`fetch_url`（Exa contents 接口，只接受 http/https，网络类错误重试 1 次）和 `web_search`（Exa，30 秒总时限，网络类错误重试 1 次；为节省 token，每条结果最多 1500 字，每次调用合计最多 6000 字）。
 

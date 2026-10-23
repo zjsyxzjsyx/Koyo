@@ -409,11 +409,11 @@ class LearningRuntime:
         materials = scan.materials
         # One confirmation covers everything this preparation may send out, before any request.
         fetcher = self.tools.get("fetch_url")
-        via = (fetcher.service or "Exa") if fetcher is not None else "Exa"
+        via = ((fetcher.service or "Exa") if fetcher is not None else "Exa").removesuffix(" 搜索")  # "经 DeepSeek 获取网页正文"
         remote = [f"经 {via} 获取网页正文：{url}" for url in urls]
         remote += [f"经 Notion API 读取页面：{page}" for page in notion_pages]
         if can_gather and self.search is not None:
-            remote.append(f"本地资料不足时，经 {label_of(self.search)} 联网搜索补充（只发送查询词）")
+            remote.append(f"本地资料不足时，经 {label_of(self.search).removesuffix(" 搜索")} 联网搜索补充（只发送查询词）")
         if can_gather:
             servers: dict[str, list[str]] = {}
             for name in self._gather_tools():
