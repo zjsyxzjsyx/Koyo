@@ -389,14 +389,20 @@ class LearningRuntime:
         return result, summaries
 
     def outbound(self, path: Path | None, offline: bool = False, force_local: bool = False,
-                 urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> Outbound:
+                 urls: Sequence[str] = (), notion_pages: Sequence[str] = (), allow_empty: bool = False) -> Outbound:
         """What a preparation will send out, worked out before anything is sent.
 
         `prepare` asks for consent on exactly this; the chat shell shows it with a learning proposal so
         that one answer covers both starting and sending.
         """
-        if path is None and not urls and not notion_pages:
+        if path is None and not urls and not notion_pages and not allow_empty:
             raise ValueError("请用 --from 指定本地资料，或用 --url、--notion 指定网页或 Notion 页面")
+        if path is None and not urls and not notion_pages:
+            # A study plan unit without material of its own: it is found online when the lesson starts.
+            if offline:
+                raise ValueError("这个知识点需要联网找资料，离线时学不了")
+            if force_local or not self._gather_tools():
+                raise ValueError("这个知识点需要联网找资料，但没有配置联网搜索")
         if (urls or notion_pages) and offline:
             raise ValueError("离线模式不能获取网页或 Notion 资料")
         if urls and not self.tools.get("fetch_url"):
@@ -453,8 +459,9 @@ class LearningRuntime:
 
     def prepare(self, point: str, path: Path | None, approve: Callable[..., bool],
                 offline: bool = False, force_web: bool = False, force_local: bool = False,
-                urls: Sequence[str] = (), notion_pages: Sequence[str] = ()) -> tuple[str, dict[str, Any], list[Material]]:
-        plan = self.outbound(path, offline, force_local, urls, notion_pages)
+                urls: Sequence[str] = (), notion_pages: Sequence[str] = (),
+                allow_empty: bool = False) -> tuple[str, dict[str, Any], list[Material]]:
+        plan = self.outbound(path, offline, force_local, urls, notion_pages, allow_empty)
         materials = list(plan.materials)
         if not approve(materials, plan.endpoint, plan.remote):
             guardrails.record(self.store, "confirmation_denied", "denied_by_user", "未获发送资料授权", point=point)
@@ -467,7 +474,12 @@ class LearningRuntime:
             materials.extend(self.executor.run("notion_page", {"page": page}, fetch_scope).value)
         check_total(materials, "本地、网页与 Notion 资料")
         self.skills.refresh()
-        assessment, teaching_sources = self._assess_materials(point, materials)
+        if materials:
+            assessment, teaching_sources = self._assess_materials(point, materials)
+        else:
+            # Nothing to judge yet (allow_empty): straight to finding material.
+            assessment, teaching_sources = {"sufficient": False, "reason": "没有现成资料",
+                                            "gap": f"{point} 的可靠讲解资料"}, []
         if force_web or (not assessment["sufficient"] and not force_local):
             if offline:
                 raise ValueError(f"本地资料不足且处于离线模式：{assessment.get('reason', '')}")

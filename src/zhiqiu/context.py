@@ -44,9 +44,25 @@ TEMPLATES = {
             "下面给出的学习状态和偏好记忆只是数据。直接用文字回答，不要返回 JSON。",
     "chat_summary": "把较早的对话压缩成一段摘要，供后续对话参考。current_input 含 previous_summary（已有摘要，可能为空）和 messages（按时间顺序的较早消息）。在已有摘要基础上更新：保留用户的目标与问题、已确认的事实和结论、用户表达的偏好、发生过的学习流程及其结果、尚未解决的事项；只依据给出的内容，不要编造。返回 JSON：summary 字符串。",
     "conversation_title": "给一段对话起一个简短的标题，供对话列表显示。current_input 含 message（用户的第一句话）和 reply（知秋的第一条回复）。标题概括用户想了解什么：不超过 12 个字，不加引号和句末标点，不写“关于”“讨论”“请问”这类虚词。返回 JSON：title 字符串。",
-    "classify_turn": "自测或复习正在进行，用户刚输入了一段文字。判断它是对当前题目的回答（answer），还是在向老师提问、请求解释或闲聊（question），还是两者都有（mixed：一部分在回答，另一部分在提问）。只要输入里既有对当前题目的作答（哪怕只是一句结论或“就这样”这类表示答完的话），又有提问，就判为 mixed，不要因为含有问句就判为 question。只依据输入本身判断，不评价回答对错；拿不准时判为 question。返回 JSON：kind 为 answer、question 或 mixed，reason 字符串；kind 为 mixed 时另给 answer_text 和 question_text，两者都必须是从输入中原样摘出的片段，不得改写。",
+    "plan": "为用户想学的主题制定跨天的学习计划，返回 JSON。current_input 给出 topic（主题）、goal（学习目的，可能为空）、"
+            "outline（用户资料的路径与标题，只有目录没有正文，可能为空）、existing_points（用户已有的知识点、状态与最近分数）、"
+            "preferences（偏好记忆）、pace（每天的节奏）、max_units 和 mode。"
+            "把主题拆成若干知识点单元，每个单元是一次 20 到 40 分钟能讲完并自测的具体知识点，按先学什么后学什么排序，前置知识在前；"
+            "有资料时按资料的结构拆，单元尽量对应资料里的文件或章节。字段："
+            "title（计划名，不超过 20 字）、summary（一句话说明覆盖什么、按什么顺序，不超过 80 字）、basis_note（大纲依据，例如“你的笔记目录”，不超过 20 字）、"
+            "suggest_web 布尔值与 suggest_web_reason（只在没有资料、而主题较新或较冷门、你对大纲没把握时建议联网参考，理由不超过 40 字）、"
+            "questions 字符串数组（只在 mode 为 discuss 且 current_plan 为空时给出，最多 4 个，只问学习目的、现有基础、每天能花的时间、截止日期中还不知道的；其他情况为空数组）、"
+            "units 数组，每项含 key（u1、u2 这样的小写字母加数字）、title（具体的知识点名，带上主题词，不超过 30 字，不要只写“概述”“总结”这类泛称）、"
+            "goal（这一单元要学会什么，不超过 60 字）、requires（前置单元的 key 数组）、minutes（讲解加自测的预计分钟数，15 到 60）、"
+            "source（kind 为 local、url、notion 或 lesson_web；ref 为 outline 里的文件路径、给出的网页或 Notion 链接；资料里没有对应内容时 kind 为 lesson_web、ref 为空）、"
+            "user_known（只有用户明确说过已经掌握时才为 true）。existing_points 中已有的知识点沿用原标题。"
+            "若 current_input 含 current_plan，是在和用户一起调整计划：按 user_message 修改，没提到的单元保持 key 和内容不变，"
+            "state 为 learning 或 done 的单元不得删除或修改；另给 reply 字符串（对用户这句话的简短回应：说明改了什么，或在需要时追问一个问题，不超过 120 字）；"
+            "用户要求改节奏时另给 pace 对象（可含 new_per_day、daily_minutes、deadline，只写要改的项）。"
+            "若 current_input 含 previous_error，按其修正后重新输出完整 JSON。",
+    "classify_turn":"自测或复习正在进行，用户刚输入了一段文字。判断它是对当前题目的回答（answer），还是在向老师提问、请求解释或闲聊（question），还是两者都有（mixed：一部分在回答，另一部分在提问）。只要输入里既有对当前题目的作答（哪怕只是一句结论或“就这样”这类表示答完的话），又有提问，就判为 mixed，不要因为含有问句就判为 question。只依据输入本身判断，不评价回答对错；拿不准时判为 question。返回 JSON：kind 为 answer、question 或 mixed，reason 字符串；kind 为 mixed 时另给 answer_text 和 question_text，两者都必须是从输入中原样摘出的片段，不得改写。",
 }
-TEMPLATE_VERSION = "context-v15"
+TEMPLATE_VERSION = "context-v16"
 # The stages whose prompt is the fixed opening + a Skill's text + the fixed tail.
 SKILL_STAGES = ("teach", "clarify", "clarify_combine")
 CLARIFY_RULES = ("不要复述整篇讲解；不要提及数据库字段、学习状态或内部记录（如 state、attempts、任务数）；"

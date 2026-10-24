@@ -117,15 +117,17 @@ class Reminders:
         return title, moment, repeat, note
 
     def create(self, title: Any, at: Any, repeat: Any = "none", note: Any = "", *,
-               conversation_id: str | None = None, now: datetime | None = None) -> dict[str, Any]:
+               conversation_id: str | None = None, now: datetime | None = None,
+               plan_id: str | None = None) -> dict[str, Any]:
         now = now or local_now()
         title, moment, repeat, note = self.check(title, at, repeat, note, now)
         first = following(moment, repeat, now - timedelta(minutes=1))
         reminder_id = new_id()
         with self.store.transaction():
-            self.db.execute("""INSERT INTO reminders(id,title,note,at,repeat,next_at,status,conversation_id,created_at)
-                VALUES(?,?,?,?,?,?,'active',?,?)""", (reminder_id, title, note, stamp(moment), repeat,
-                                                      stamp(first) if first else None, conversation_id, self.store._ts()))
+            self.db.execute("""INSERT INTO reminders(id,title,note,at,repeat,next_at,status,conversation_id,created_at,plan_id)
+                VALUES(?,?,?,?,?,?,'active',?,?,?)""", (reminder_id, title, note, stamp(moment), repeat,
+                                                        stamp(first) if first else None, conversation_id,
+                                                        self.store._ts(), plan_id))
         return self.get(reminder_id)
 
     def active(self) -> list[dict[str, Any]]:
@@ -148,15 +150,19 @@ class Reminders:
 
     def fire(self, now: datetime | None = None) -> list[dict[str, Any]]:
         """Mark every due reminder as said and move it on; returns them, each with `late` when it came due
-        more than a few minutes ago (the workbench was not running then)."""
+        more than a few minutes ago (the workbench was not running then). A study plan's reminder says
+        what that day holds."""
         now = now or local_now()
         fired = []
+        said = {row["id"]: plan_title(self.store, row["plan_id"], row["title"]) for row in self.due(now)
+                if row.get("plan_id")}
         with self.store.transaction():
             for row in self.due(now):
                 nxt = following(parse(row["at"]), row["repeat"], now)
                 self.db.execute("""UPDATE reminders SET fired_at=?,fired_count=fired_count+1,next_at=?,status=?
                     WHERE id=?""", (stamp(now), stamp(nxt) if nxt else None, "active" if nxt else "done", row["id"]))
-                fired.append({**row, "late": now - parse(row["next_at"]) > LATE, "due_at": row["next_at"],
+                fired.append({**row, "title": said.get(row["id"], row["title"]),
+                              "late": now - parse(row["next_at"]) > LATE, "due_at": row["next_at"],
                               "next_at": stamp(nxt) if nxt else None})
         return fired
 
@@ -182,6 +188,31 @@ class Reminders:
 
     def in_range(self, start: date, end: date) -> list[dict[str, Any]]:
         return in_range(self.db, start, end)
+
+
+def plan_title(store: Store, plan_id: str, fallback: str) -> str:
+    """What a study plan's daily reminder says: the day's plan (plan_flow.today_line), or its own title."""
+    from .plan_flow import today_line
+    from .plans import Plans
+    try:
+        line = today_line(Plans(store).today(store.clock.today()))
+    except Exception:
+        return fallback
+    return f"学习计划 · {line}"[:TITLE_CHARS * 2] if line else fallback
+
+
+def follow_plan(store: Store, plan_id: str, active: bool, now: datetime | None = None) -> None:
+    """A plan's reminders stop while it is paused or over, and come back when it resumes (inside the
+    caller's transaction)."""
+    if not active:
+        store.db.execute("UPDATE reminders SET status='cancelled',next_at=NULL WHERE plan_id=? AND status='active'",
+                         (plan_id,))
+        return
+    now = now or local_now()
+    for row in store.db.execute("SELECT * FROM reminders WHERE plan_id=? AND status='cancelled'", (plan_id,)).fetchall():
+        nxt = following(parse(row["at"]), row["repeat"], now)
+        if nxt is not None:
+            store.db.execute("UPDATE reminders SET status='active',next_at=? WHERE id=?", (stamp(nxt), row["id"]))
 
 
 def in_range(db: Any, start: date, end: date) -> list[dict[str, Any]]:

@@ -15,8 +15,12 @@ import typer
 from . import config as user_config
 from . import contracts, gate, metrics, pricing, providers, regressions, traces, tracing
 from .conversations import Conversations
-from .flows import FlowInterrupted, resume_lesson, resume_target, run_lesson, run_quiz, short_id, show_outcome
+from .flows import (FlowInterrupted, resolve_prefix, resume_lesson, resume_target, run_lesson, run_quiz, short_id,
+                    show_outcome)
 from .notion import NotionReader
+from . import planner
+from .plan_flow import PlanDesk, card_text, terminal_plan_answer, today_text
+from .plans import Plans
 from .diagnostics import check_capabilities, check_capacity, check_model
 from .files import read_roots_from_env, write_roots_from_env
 from .local_env import load_local_env
@@ -138,6 +142,10 @@ def show_status(store: Store, full: bool = False) -> None:
             typer.echo(f"待继续讲解：{lesson['title']}  会话 {lesson['session_id']}")
         for point in state["needs_relearn"]:
             typer.echo(f"需补学：{point['title']}")
+        if planner.enabled():
+            view = Plans(store).today(store.clock.today())
+            if view["active"]:
+                typer.echo(today_text(view).replace("输入 /today start [编号] 开始。", "在对话里输入 /today start 开始。"))
 
 
 @app.callback(invoke_without_command=True)
@@ -413,6 +421,22 @@ class TerminalIO:
         if pick.isdigit() and 1 <= int(pick) <= len(folders):
             return "root:" + folders[int(pick) - 1]["path"]
         return "denied"
+
+    def plan_card(self, card: dict[str, Any]) -> str:
+        """A study plan as a table, then one line: a letter, or an edit such as `rm 3` or `move 4 2`."""
+        self._clear_progress()
+        typer.echo(card_text(card))
+        letters = ["y 确认", "d 一起调整", "l 稍后再定", "n 放弃"] + (["s 直接开始学习"] if card["single"] else []) \
+            + (["w 联网参考大纲"] if card["can_web"] else []) + (["u 撤销"] if card["can_undo"] else [])
+        typer.echo(typer.style("  " + "  ".join(letters) + "；修改：rm 编号、known 编号、back 编号、move 编号 位置、"
+                               "preset relaxed|standard|intense、days 每天个数、minutes 分钟、start 日期、deadline 日期",
+                               dim=True))
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("")
+            return "later"
+        return terminal_plan_answer(line, card)
 
 
 @app.command()
@@ -1199,6 +1223,116 @@ def forget(ctx: typer.Context, point: str) -> None:
     if typer.confirm(f"永久删除 {kp['title']} 及其所有资料、答案和任务？", default=False):
         store.forget(kp["id"])
         typer.echo("已删除。")
+
+
+
+plan_app = typer.Typer(help="学习计划：把一个主题拆成若干知识点，每天学一点")
+app.add_typer(plan_app, name="plan")
+
+
+def _plan_ref(store: Store, ref: str) -> str:
+    """A plan by its number in `plan list` or by an id prefix."""
+    plans = Plans(store).list()
+    if ref.isdigit() and len(ref) < 4:
+        number = int(ref)
+        if not 1 <= number <= len(plans):
+            raise typer.BadParameter(f"没有编号 {number}；plan list 列出了 {len(plans)} 份")
+        return plans[number - 1]["id"]
+    try:
+        return resolve_prefix(ref, [plan["id"] for plan in plans], "计划")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+
+@plan_app.command("list")
+def plan_list(ctx: typer.Context) -> None:
+    """列出所有学习计划和进度。"""
+    from .plans import overview
+    names = {"draft": "草稿", "active": "进行中", "paused": "已暂停", "completed": "已完成", "abandoned": "已放弃"}
+    items = overview(context_store(ctx).db)["plans"]
+    if not items:
+        typer.echo("还没有学习计划。用 zhiqiu plan new 主题 --from 资料目录 制定一份。")
+    for number, item in enumerate(items, 1):
+        late = f"，会比截止日晚 {item['late_days']} 天" if item["late_days"] else ""
+        typer.echo(f"{number}. 《{item['title']}》 {names[item['state']]}  {item['done']}/{item['total']}"
+                   f"  下一个：{item['next'] or '—'}  预计学完：{item['finish'] or '—'}{late}")
+
+
+@plan_app.command("show")
+def plan_show(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="plan list 的编号或计划 id 前缀")]) -> None:
+    """显示一份计划的知识点、日期与修订历史。"""
+    store = context_store(ctx)
+    desk = PlanDesk(store, None, TerminalIO())
+    plan_id = _plan_ref(store, ref)
+    typer.echo(card_text(desk.card(plan_id)))
+    for revision in Plans(store).revisions(plan_id)[-5:]:
+        typer.echo(typer.style(f"  第 {revision['revision']} 版：{revision['summary']}", dim=True))
+
+
+@plan_app.command("today")
+def plan_today(ctx: typer.Context) -> None:
+    """今天的学习安排：复习、按计划新学的知识点。"""
+    store = context_store(ctx)
+    typer.echo(today_text(Plans(store).today(store.clock.today())).replace(
+        "输入 /today start [编号] 开始。", "在对话里输入 /today start 开始。"))
+
+
+def _plan_state(ctx: typer.Context, ref: str, target: str, done: str) -> None:
+    store = context_store(ctx)
+    try:
+        plan = Plans(store).set_state(_plan_ref(store, ref), target, "user_cli")
+    except (ValueError, LookupError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"计划《{plan['title']}》{done}。")
+
+
+@plan_app.command("pause")
+def plan_pause(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="编号或 id 前缀")]) -> None:
+    """暂停一份计划：不再排新知识点，复习照常。"""
+    _plan_state(ctx, ref, "paused", "已暂停；复习照常")
+
+
+@plan_app.command("resume")
+def plan_resume(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="编号或 id 前缀")]) -> None:
+    """继续一份暂停的计划：从今天起重新排。"""
+    _plan_state(ctx, ref, "active", "已继续，从今天起重新安排")
+
+
+@plan_app.command("abandon")
+def plan_abandon(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="编号或 id 前缀")]) -> None:
+    """放弃一份计划；已经学过的知识点和复习都保留。"""
+    _plan_state(ctx, ref, "abandoned", "已放弃；学过的知识点和复习都保留")
+
+
+@plan_app.command("new")
+@traced("plan")
+def plan_new(ctx: typer.Context, topic: Annotated[str, typer.Argument(help="想学的主题")],
+             source: Annotated[Path | None, typer.Option("--from", help="本地资料文件或目录（只发送路径和标题）")] = None,
+             urls: Annotated[list[str] | None, typer.Option("--url", help="网页资料，可重复（只发送地址）")] = None,
+             notion_pages: Annotated[list[str] | None, typer.Option("--notion", help="Notion 页面，可重复（只发送链接）")] = None,
+             goal: Annotated[str, typer.Option("--goal", help="学来做什么，例如：下周面试")] = "") -> None:
+    """制定学习计划：生成草稿，在终端里修改或一起调整，确认后生效。"""
+    if not planner.enabled():
+        typer.echo("学习计划已在配置里关闭（[plan] enabled = false）。", err=True)
+        raise typer.Exit(1)
+    store = context_store(ctx)
+    io = TerminalIO()
+    service = _terminal(runtime(store, mcp=not ctx.obj["offline"]))
+    desk = PlanDesk(store, service, io, memory=MemoryService(store), offline=ctx.obj["offline"])
+    try:
+        signals = desk.signals(source, urls or [], notion_pages or [])
+        typer.echo("将发送：\n" + "\n".join(f"  {line}" for line in desk.consent_lines(signals)))
+        if not io.confirm("发送以上内容并生成计划草稿吗？"):
+            raise typer.Exit(0)
+        draft = desk.draft(topic, signals, goal=goal, sources={"path": str(source) if source else None,
+                                                               "urls": urls or [], "notion": notion_pages or []})
+        outcome = desk.card_loop(draft.plan_id)
+    except ValueError as exc:
+        typer.echo(f"没有制定计划：{exc}", err=True)
+        raise typer.Exit(1) from None
+    if outcome == "learn_now":
+        typer.echo("这个计划只有一个知识点：用 zhiqiu learn 直接学习它，草稿已保存。")
 
 
 if __name__ == "__main__":

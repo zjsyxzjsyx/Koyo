@@ -17,19 +17,21 @@ from typing import Any, Callable, Sequence
 
 import httpx
 
-from . import guardrails, prices, pricing, providers, tracing
+from . import guardrails, planner, prices, pricing, providers, tracing
 from . import history as history_search
 from .approvals import ApprovalPolicy
 from .context import ContextBudgetError, ContextTask
 from .conversations import Conversations, clean_title
 from .files import ADD_ROOT_HINT, FileRoots, OutsideRoots, grant_folders, read_root_file_spec, refused_location, write_file_spec, write_target
 from .flow import IllegalTransition
-from .flows import (MIN_PREFIX, FlowInterrupted, FlowIO, change_skill, describe_skills, outbound_lines, preapproved,
+from .flows import (MIN_PREFIX, FlowInterrupted, FlowIO, FlowResult, change_skill, describe_skills, outbound_lines, preapproved,
                     resolve_prefix, skills_of,
                     resume_lesson, resume_target, run_lesson, run_quiz, say, short_id, show_outcome,
                     show_outcome_detail, summarize_outcome)
 from .materials import Material
 from .memory import MemoryService
+from .plan_flow import PlanDesk, card_text, plan_context, today_line, today_text
+from .plans import Plans
 from .model import ModelContextOverflowError
 from .queries import status as status_query
 from .redact import redact
@@ -39,8 +41,9 @@ from .toolloop import LOOP_SECONDS, MAX_ROUNDS, Draft, LoopResult, ToolLoop, que
 from .tools import Approval, ToolError, ToolExecutor, ToolRegistry, ToolScope, ToolSpec, summarize_args
 
 CHAT_PERMISSIONS = frozenset({"read", "network", "write_file", "external_mcp", "propose"})
-PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory", "propose_reminder"})
-TRACED_COMMANDS = frozenset({"/learn", "/review", "/resume"})
+PROPOSE_TOOLS = frozenset({"propose_learn", "propose_review", "propose_resume", "propose_memory", "propose_reminder",
+                           "propose_plan"})
+TRACED_COMMANDS = frozenset({"/learn", "/review", "/resume", "/plan"})
 MEMORY_PREFIXES = ("pref.", "soul.")
 MEMORY_ITEM_CHARS = 300
 MEMORY_TOTAL_CHARS = 2000
@@ -60,7 +63,8 @@ CLOSING = "不要再调用工具，直接用文字给出本轮的回答。"
 HELP = ("对话命令：/status 查看状态；/learn 知识点 [--from 路径] [--url 网址] [--notion 页面]；"
         "/review [知识点]；/resume [短号]；/detail [短号] 查看评阅详情；/chats 列出最近的对话；/open 编号或短号 切换对话；"
         "/title 新标题 给对话改名；/compact 把较早的消息压缩成摘要；/memory 查看记忆；/skill 查看讲法，/skill 名称 知识点 指定讲法；"
-        "/model [模型名] 查看或切换模型；/archive 编号 归档对话；/new 开新对话。"
+        "/model [模型名] 查看或切换模型；/archive 编号 归档对话；/new 开新对话；"
+        "/plan 主题 [--from 路径] 制定学习计划，/plans 列出学习计划，/plan 编号 打开一份，/today 看今天的安排。"
         "其他输入直接与知秋对话。")
 # How many conversations /chats lists.
 CHATS_LISTED = 10
@@ -70,7 +74,7 @@ USER_TITLE_CHARS = 30
 # What the title stage sees of the first message and the first reply.
 TITLE_INPUT_CHARS = 500
 # A conversation opened by one of these commands is named after it, without a model call.
-RULE_TITLES = {"/learn": "学习：{}", "/review": "复习：{}", "/resume": "继续：{}"}
+RULE_TITLES = {"/learn": "学习：{}", "/review": "复习：{}", "/resume": "继续：{}", "/plan": "计划：{}"}
 _REASON = {"type": "string", "maxLength": 300}
 _STRINGS = {"type": "array", "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 1000}}
 
@@ -107,6 +111,14 @@ class ChatIO:
         text = (f"知秋想{verb}白名单外的文件：{offer['path']}（内容会发送到模型端点）"
                 + (f"\n{offer['preview']}" if offer.get("preview") else "") + "\n只允许这一次吗？")
         return "once" if self.inner.confirm(text) else "denied"
+
+    def plan_card(self, card: dict[str, Any]) -> str:
+        """A study plan card's answer; an IO without cards sees the plan as text and one question."""
+        hook = getattr(self.inner, "plan_card", None)
+        if callable(hook):
+            return hook(card)
+        say(self.inner, card_text(card))
+        return "activate" if self.inner.confirm("确认这个学习计划吗？") else "later"
 
     def confirm_tool(self, spec: Any, args: dict[str, Any], request_id: str | None = None) -> bool:
         # An IO that shows approvals as records of their own (the web workbench) gets the request id.
@@ -222,6 +234,9 @@ class ChatAgent:
         # Which governed tools run without asking, need the user's approval, or are withheld.
         self.policy = policy or ApprovalPolicy()
         self.io = ChatIO(io, self._on_stage)
+        self.desk = PlanDesk(store, service, self.io, memory=self.memory, offline=offline,
+                             conversation_id=lambda: self.conversation["id"] if self.conversation else None,
+                             network_allowed=lambda: self.policy.permissions["network"] != "deny")
         # JSON stages (lessons, questions, grading) report how much of their reply has arrived.
         if hasattr(service, "progress") and callable(getattr(io, "progress", None)):
             service.progress = self.io.progress
@@ -297,6 +312,7 @@ class ChatAgent:
         state = self.store.status()
         if state["open_attempts"] or self.store.pending_lessons():
             self.io.say("有未完成的自测或讲解：可以直接说“继续”，或输入 /resume。", kind="note")
+        self._say_today()
         count = len(self.chats.messages(self.conversation_id))
         self.io.say((f"接着「{self._title()}」（{count} 条消息）" if count else "新对话") + "。输入 /help 查看命令。",
                     kind="note")
@@ -498,9 +514,24 @@ class ChatAgent:
 
     # ----- one model turn ---------------------------------------------------------
 
+    def _say_today(self) -> None:
+        """The opening line about today's plan, and once in a while whether an idle plan should slow down."""
+        if not planner.enabled():
+            return
+        today = self.store.clock.today()
+        view = self.desk.plans.today(today)
+        line = today_line(view)
+        if line:
+            self.io.say(line, kind="note")
+        for item in view["slow_down"]:
+            self.io.say(f"计划《{item['title']}》已经连续 {item['days']} 个学习日没学了；要放慢节奏或暂停吗？"
+                        "输入 /plans 打开它调整。", kind="note")
+            self.desk.plans.asked_to_slow_down(item["plan_id"], today)
+
     def _status(self) -> dict[str, Any]:
         state = status_query(self.store.db, self.store.clock.today().isoformat())
-        return {
+        plans = plan_context(self.desk.plans.today(self.store.clock.today())) if planner.enabled() else ""
+        return {**({"plans": plans} if plans else {}),
             "due": [{"title": t["title"], "task_id": t["id"], "due": t["original_due_date"]} for t in state["due"]],
             "open_attempts": [{"title": a["title"], "attempt_id": a["id"], "kind": a["kind"], "state": a["state"]}
                               for a in state["open_attempts"]],
@@ -960,6 +991,124 @@ class ChatAgent:
             raise ValueError(f"资料不存在：{path}")
         return resolved
 
+    # ----- study plans ------------------------------------------------------------------
+
+    def _plan_study(self, args: dict[str, Any], typed: bool = False) -> tuple[str, Callable[[], Any]]:
+        """Make a study plan for a topic: one confirmation covers what is sent (an outline, not the text)."""
+        topic = args["topic"].strip()
+        self._point = topic
+        path, urls, notion = args.get("path"), list(args.get("urls") or []), list(args.get("notion") or [])
+        source = self._learn_path(path, typed) if path else None
+        signals = self.desk.signals(source, urls, notion)
+        lines = self.desk.consent_lines(signals)
+        goal = (args.get("goal") or "").strip()
+        sources = {"path": str(source) if source else None, "urls": urls, "notion": notion}
+        description = f"为“{topic}”制定学习计划"
+
+        def run() -> FlowResult | None:
+            if typed:
+                self.io.say("将发送：\n" + "\n".join(f"  {line}" for line in lines))
+                if not self.io.confirm("发送以上内容并生成计划草稿吗？"):
+                    guardrails.record(self.store, "confirmation_denied", "denied_by_user", "未获发送授权", point=topic)
+                    return FlowResult("未发送，没有生成计划", "")
+            draft = self.desk.draft(topic, signals, goal=goal, sources=sources)
+            return self._plan_card(draft.plan_id)
+        runner = _Runner(run, [] if typed else ["将发送：", *(f"  {line}" for line in lines)])
+        runner.consent = "同意即发送上面的内容并生成计划草稿；草稿要你再确认才生效，之前不会改动学习记录。"
+        return description, runner
+
+    def _plan_card(self, plan_id: str) -> FlowResult:
+        outcome = self.desk.card_loop(plan_id)
+        if outcome == "learn_now":
+            return self._learn_single(plan_id)
+        return FlowResult({"activated": "计划已生效", "saved": "草稿已保存", "dropped": "已放弃草稿"}[outcome], "")
+
+    def _learn_single(self, plan_id: str) -> FlowResult:
+        """A plan of one unit is just a lesson: drop the draft and learn that point."""
+        plan = self.desk.plans.get(plan_id)
+        unit = next(unit for unit in plan["units"] if unit["state"] == "pending")
+        self.desk.plans.set_state(plan_id, "abandoned", "learn_single")
+        args: dict[str, Any] = {"point": unit["title"]}
+        if unit["source_kind"] == "local":
+            args["path"] = unit["source_ref"]
+        elif unit["source_kind"] == "url":
+            args["urls"] = [unit["source_ref"]]
+        elif unit["source_kind"] == "notion":
+            args["notion"] = [unit["source_ref"]]
+        elif plan["sources"].get("path"):
+            args["path"] = plan["sources"]["path"]
+        else:
+            raise ValueError(f"《{unit['title']}》没有资料：请用 /learn {unit['title']} --from 路径 指定资料")
+        _, runner = self._plan_learn(args, typed=True)
+        return runner()
+
+    def _plan_command(self, rest: list[str]) -> None:
+        """`/plan 主题 [--from 路径] [--url 网址] [--notion 页面]` makes a plan; `/plan 编号` opens one of /plans."""
+        if rest and len(rest) == 1 and rest[0].isdigit():
+            plans = self.desk.plans.list(["draft", "active", "paused"])
+            number = int(rest[0])
+            if not 1 <= number <= len(plans):
+                raise ValueError(f"没有编号 {number}；/plans 列出了 {len(plans)} 份计划。")
+            plan = plans[number - 1]
+            self._run_plan(f"查看学习计划《{plan['title']}》", lambda: self._plan_card(plan["id"]), "/plan")
+            return
+        args = self._parse_learn(rest)
+        args["topic"] = args.pop("point")
+        self._run_plan(*self._plan_study(args, typed=True), "/plan")
+
+    def _today_command(self, rest: list[str]) -> None:
+        """`/today` shows the day; `/today start [编号]` starts one of its units; `/today ahead` learns ahead."""
+        view = self.desk.plans.today(self.store.clock.today())
+        if not rest:
+            self.io.say(today_text(view))
+            return
+        if rest[0] == "ahead":
+            if not view["ahead"]:
+                raise ValueError("现在没有可以提前学的知识点（今天的计划学完、时间还有余量时才能提前）")
+            item, ahead = view["ahead"], True
+        elif rest[0] == "start":
+            items = view["continuing"] + view["units"]
+            if not items:
+                raise ValueError("今天计划里没有要学的知识点；输入 /today 看看今天的安排")
+            number = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else 1
+            if not 1 <= number <= len(items):
+                raise ValueError(f"没有编号 {number}；今天有 {len(items)} 个")
+            item, ahead = items[number - 1], False
+        else:
+            raise ValueError("用法：/today、/today start [编号]、/today ahead")
+        self._run_plan(f"按计划学习《{item['title']}》", lambda: self._learn_unit(item, ahead=ahead), "/learn")
+
+    def _learn_unit(self, item: dict[str, Any], *, ahead: bool = False) -> Any:
+        """A plan unit's lesson with the unit's own material; one found online when it has none."""
+        self._point = item["title"]
+        kind, ref = item["source_kind"], item["source_ref"]
+        source = self._learn_path(ref, typed=True) if kind == "local" else None
+        result = run_lesson(self.io, self.store, self.service, item["title"], source=source,
+                            urls=[ref] if kind == "url" else [], notion_pages=[ref] if kind == "notion" else [],
+                            offline=self.offline, allow_empty=kind == "lesson_web")
+        if ahead:
+            self.desk.plans.recompute(self.store.clock.today(), force=True, cause="ahead", allow_earlier=True)
+        return result
+
+    def open_plan(self, plan_id: str) -> None:
+        """The plans page's 打开: the plan's card in this conversation."""
+        plan = self.desk.plans.get(plan_id)
+        if plan["state"] not in ("draft", "active", "paused"):
+            raise ValueError(f"计划《{plan['title']}》已经结束")
+        self._run_plan(f"查看学习计划《{plan['title']}》", lambda: self._plan_card(plan_id), "/plan")
+
+    def _plans_text(self) -> str:
+        plans = self.desk.plans.list(["draft", "active", "paused"])
+        if not plans:
+            return "还没有学习计划。说“我想系统学一下某个主题”，或输入 /plan 主题 [--from 路径]。"
+        names = {"draft": "草稿", "active": "进行中", "paused": "已暂停"}
+        lines = []
+        for number, plan in enumerate(plans, 1):
+            units = [unit for unit in self.desk.plans.units(plan["id"]) if unit["state"] != "skipped"]
+            done = sum(unit["state"] == "done" for unit in units)
+            lines.append(f"{number}. 《{plan['title']}》 {names[plan['state']]}  {done}/{len(units)}")
+        return "\n".join(lines + ["输入 /plan 编号 打开一份。"])
+
     def _plan_review(self, args: dict[str, Any]) -> tuple[str, Callable[[], Any]]:
         due = self.store.due_tasks()
         point = (args.get("point") or "").strip()
@@ -1027,6 +1176,8 @@ class ChatAgent:
                 lambda: resume_lesson(self.io, self.store, session_id, lambda: self.service))
 
     def _plan(self, name: str, args: dict[str, Any]) -> tuple[str, Callable[[], Any]]:
+        if name == "propose_plan":
+            return self._plan_study(args)
         if name == "propose_learn":
             return self._plan_learn(args)
         if name == "propose_review":
@@ -1060,7 +1211,7 @@ class ChatAgent:
         for line in notice:
             self.io.say(line)
         if notice:
-            self.io.say("开始学习即同意发送上面的资料，进入后不再另行确认。")
+            self.io.say(getattr(runner, "consent", "开始学习即同意发送上面的资料，进入后不再另行确认。"))
         if not self.io.confirm("要开始吗？"):
             self.chats.update_payload(message["id"], status="rejected")
             guardrails.record(self.store, "proposal_rejected", "denied_by_user", description, tool=name)
@@ -1150,7 +1301,16 @@ class ChatAgent:
                                             "请先合并旧条目，或请用户用 memory delete 删除", rule="memory_limit")
 
     def _proposal_specs(self) -> list[ToolSpec]:
-        return [
+        plan = [_proposal_spec(
+            "propose_plan", "用户想系统地学一个需要多次学习的主题（例如“想学 Redis”“系统学一下操作系统”）时，建议为它制定跨天的"
+            "学习计划：把主题拆成若干知识点，每天学一点。用户确认后知秋生成计划草稿，用户再确认才生效。只是一个具体的小知识点时"
+            "用 propose_learn。path 必须是可读目录中的文件或目录；goal 是用户说的学习目的（面试、工作等），没说就省略。",
+            {"type": "object", "additionalProperties": False, "required": ["topic"],
+             "properties": {"topic": {"type": "string", "minLength": 1, "maxLength": 100},
+                            "path": {"type": "string", "minLength": 1, "maxLength": 1000},
+                            "urls": _STRINGS, "notion": _STRINGS,
+                            "goal": {"type": "string", "maxLength": 200}, "reason": _REASON}})] if planner.enabled() else []
+        return plan + [
             _proposal_spec("propose_learn", "建议开始学习一个新知识点。用户确认后进入学习流程（会再次确认发送哪些资料）。"
                            "path 必须是可读目录中的文件或目录；也可以给网页或 Notion 页面。",
                            {"type": "object", "additionalProperties": False, "required": ["point"],
@@ -1224,6 +1384,12 @@ class ChatAgent:
                 self._run_plan(*self._plan_learn(self._parse_learn(rest), typed=True), name)
             elif name == "/review":
                 self._run_plan(*self._plan_review({"point": rest[0]} if rest else {}), name)
+            elif name == "/plan" and planner.enabled():
+                self._plan_command(rest)
+            elif name == "/plans" and planner.enabled():
+                self.io.say(self._plans_text())
+            elif name == "/today" and planner.enabled():
+                self._today_command(rest)
             elif name == "/skill":
                 self._skill(rest)
             elif name == "/resume":

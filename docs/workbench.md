@@ -54,6 +54,9 @@
 | `POST /api/chat/archive` | 9.2：`{"conversation_id", "archived": true｜false}` 归档或取消归档；当前对话 409 |
 | `POST /api/chat/new_in` | 9.2：`{"group_id"}` 在分组里开新对话，同“新对话”排进工作线程；202、404 或 409 |
 | `POST /api/reminders/create` | 9.2：`{"title", "at": "YYYY-MM-DD HH:MM", "repeat": "none"｜"daily"｜"weekdays"｜"weekly", "note"}` 新建提醒；已过的一次性时间、一年以后、格式不对时 400 |
+| `GET /api/plans` | 10.0：所有学习计划：`id`、`title`、`state`、`done`、`total`、`blocked`、`next`、`finish`、`deadline`、`late_days`、`pace` |
+| `GET /api/plans/{id}` | 10.0：一份计划的字段、`units`（日期、状态、分数、推迟原因）与 `revisions`（修订号、谁改的、改了什么）；不存在 404 |
+| `POST /api/plans/action` | 10.0：`{"plan_id", "action": "pause"｜"resume"｜"abandon"｜"up"｜"down"｜"open"}` 暂停、继续、放弃、调整先后（直接写入），`open` 排进工作线程、在对话里显示计划卡片（202）；对话正打开着这份计划的卡片时 409，非法转换 409 |
 | `POST /api/reminders/snooze`、`/cancel` | 9.2：`{"id", "minutes": 5｜10｜30｜60}` 稍后再提醒；`{"id"}` 取消（重复的也一并停止） |
 | `GET /api/roots` | 可读、可写目录，每项带来源（`env`／`workbench`）、是否存在、添加时的文件数与日期 |
 | `POST /api/roots/preview` | `{"kind": "read"｜"write", "path": "…"}` 检查并预览，不改动任何东西；不合规时 400 并给出原因 |
@@ -85,3 +88,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install-shortcut.ps1
 - 对话：每轮把正文片段交给界面（网页的草稿气泡、终端直接打印）；这一轮最后带了工具调用，就收起草稿（终端没法收回，补一行灰字“以上是调用工具前的说明，不是回答”）；没有工具调用的那一轮就是回答，存库内容与 7.2 相同。本轮出错、取消或变成建议时也收起草稿。
 - JSON 阶段（讲解、出题、评阅、澄清、评估等）：只统计收到了多少字，内容照旧先校验再显示。`zhiqiu learn`、`review`、`resume` 与 `chat` 在终端同一行原地刷新“正在生成讲解，已写约 N 字”；`zhiqiu mcp` 不显示（它的 stdout 是协议）。
 - 观测：`llm_calls` 新增 `ttft_ms`（第一个正文、推理或工具调用片段到达的耗时）与 `streamed`（schema v23，旧记录为空和 0）；trace 节点详情显示“首字”，`zhiqiu trace` 文字版也带上；`metrics` 与看板“指标与花费”按阶段显示首字 p50／p95，流式调用不足 5 次时显示“样本不足”。第 10 项运行契约 `stream_consistent`：每次成功的流式调用都有首字耗时，且不超过整次耗时。
+
+## 学习计划（10.0）
+
+- 对话里的计划卡片是一种提示（事件种类 `plan`，带 `card`）：表格、节奏、行内修改和底部按钮的回答都是文字，例如 `activate`、`discuss`、`later`、`drop`、`learn_now`、`web`、`undo`、`remove:u3`、`move:u2:up`、`known:u1`、`unknown:u1`、`preset:relaxed`、`pace:{...}`、`say:文字`；其他回答 400。修改后旧卡片收起，新卡片接着显示；停止或超时按“稍后再定”处理，草稿保留。
+- 右侧状态面板多一栏“今日”：今天要继续和新学的知识点、复习项数、合计估时、推迟的单元、会延期的计划和各计划的进度（`GET /api/chat/state` 的 `today`）。
+- 右侧日历用另一种颜色的点标出计划单元，点开某天能看到当天的计划（`GET /api/schedule` 每天多一项 `plan`，`summary.plan_today`）。
+- “学习计划”页列出全部计划，详见[学习计划](plans.md#管理)。

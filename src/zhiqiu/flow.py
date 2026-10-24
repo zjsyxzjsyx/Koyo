@@ -43,10 +43,31 @@ TRANSITIONS: dict[str, dict[str | None, frozenset[str]]] = {
     # What the chat shell is doing; only the program switches it, never the model.
     "conversation": {
         None: frozenset({"chat"}),
-        "chat": frozenset({"chat", "lesson", "self_test", "review"}),
+        "chat": frozenset({"chat", "lesson", "self_test", "review", "planning"}),
         "lesson": frozenset({"chat", "self_test"}),
         "self_test": frozenset({"chat"}),
         "review": frozenset({"chat"}),
+        # Working out a study plan together; it ends confirmed, dropped or saved, or by starting the lesson.
+        "planning": frozenset({"chat", "lesson"}),
+    },
+    # A study plan is a draft until the user confirms it; only then do its points and days exist for real.
+    "plan": {
+        None: frozenset({"draft"}),
+        "draft": frozenset({"draft", "active", "abandoned"}),
+        "active": frozenset({"active", "paused", "completed", "abandoned"}),
+        "paused": frozenset({"active", "abandoned"}),
+        "completed": frozenset(),
+        "abandoned": frozenset(),
+    },
+    # A unit is done only when its point's first self-test is; a point learned outside the plan counts too.
+    "plan_unit": {
+        None: frozenset({"pending", "skipped"}),
+        "pending": frozenset({"pending", "blocked", "learning", "skipped", "done"}),
+        # A held-back unit may still be learned when the user chooses to.
+        "blocked": frozenset({"blocked", "pending", "learning", "skipped", "done"}),
+        "learning": frozenset({"learning", "done"}),
+        "skipped": frozenset({"pending"}),
+        "done": frozenset(),
     },
 }
 
@@ -56,6 +77,8 @@ COLUMNS = {
     "knowledge_point": ("knowledge_points", "state"),
     "lesson": ("sessions", "lesson_state"),
     "conversation": ("conversations", "mode"),
+    "plan": ("study_plans", "state"),
+    "plan_unit": ("plan_units", "state"),
 }
 
 

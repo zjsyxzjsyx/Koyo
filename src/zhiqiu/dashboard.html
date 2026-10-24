@@ -180,6 +180,34 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .acard .head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
 .acard .acts { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 .acard .result { font-size: 12.5px; color: var(--ink2); margin-top: 8px; }
+.acard.plan { border-left-color: var(--accent); width: min(860px, 100%); }
+.acard.plan .sum { font-size: 12.5px; color: var(--ink2); margin: 4px 0 2px; }
+.acard.plan .warn { font-size: 12.5px; color: var(--warn); margin-top: 4px; }
+.acard.plan .pace { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12.5px; margin: 8px 0 4px; }
+.acard.plan .pace input { font: inherit; font-size: 12.5px; width: 64px; padding: 2px 6px; border: 1px solid var(--line2); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.acard.plan .pace input[type=date] { width: 132px; }
+.acard.plan .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 7px; overflow: hidden; }
+.acard.plan .seg button { font: inherit; font-size: 12px; padding: 2px 10px; border: 0; background: var(--panel); color: var(--ink2); cursor: pointer; }
+.acard.plan .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.acard.plan .ptable { width: 100%; overflow-x: auto; margin-top: 6px; }
+.acard.plan table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.acard.plan td, .acard.plan th { padding: 5px 6px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+.acard.plan th { color: var(--ink3); font-weight: 500; font-size: 11.5px; border-top: 0; }
+.acard.plan tr.rday td { color: var(--ink3); font-style: italic; }
+.acard.plan tr.skip td { color: var(--ink3); text-decoration: line-through; }
+.acard.plan tr.skip td.ops, .acard.plan tr.skip td.st { text-decoration: none; }
+.acard.plan td.ops { white-space: nowrap; }
+.acard.plan td.ops button { font: inherit; font-size: 11.5px; padding: 0 6px; border: 1px solid var(--line2); border-radius: 5px; background: var(--panel); color: var(--ink2); cursor: pointer; }
+.acard.plan td.ops button:hover { border-color: var(--ink3); }
+.acard.plan .goal { color: var(--ink3); font-size: 11.5px; }
+.acard.plan .st { color: var(--ink2); font-size: 11.5px; }
+.acard.plan .acts { flex-wrap: wrap; }
+.acard.plan .acts .btn, .acard.plan td.day { white-space: nowrap; }
+@media (max-width: 640px) {
+  .acard.plan td.src, .acard.plan th.src, .acard.plan .goal:not(.req) { display: none; }
+  .acard.plan td.ops button { display: block; width: 100%; margin: 2px 0; }
+  .acard.plan td.day { white-space: normal; min-width: 4.5em; }
+}
 .ocard { align-self: flex-start; width: min(760px, 100%); background: var(--panel); border: 1px solid var(--line2); border-left: 3px solid var(--accent); border-radius: 10px; padding: 12px 14px; }
 .ocard .head { font-weight: 600; margin-bottom: 6px; }
 .ocard .dim { padding: 2px 0; }
@@ -376,6 +404,10 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
 .cgrid .cd.today i { color: #fff; }
 .cal .clist { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
 .cgrid .cd b.rm { position: absolute; top: 3px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
+.cgrid .cd b.pl { position: absolute; top: 3px; left: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--k-stage); }
+.cal .prow { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-top: 1px solid var(--line); }
+.cal .prow .tg { font-size: 11px; color: var(--k-stage); white-space: nowrap; }
+.cal .prow.done .tt { color: var(--ink3); text-decoration: line-through; }
 .cgrid .cd { position: relative; }
 .cal .rrow { display: flex; gap: 6px; align-items: baseline; padding: 3px 0; border-top: 1px solid var(--line); }
 .cal .rrow:first-of-type { border-top: 0; }
@@ -472,6 +504,7 @@ blockquote { margin: 6px 0; padding: 4px 10px; border-left: 2px solid var(--acce
   <a data-view="approvals"><span data-icon="guard"></span>审批<span class="n" id="n-approvals"></span></a>
   <div class="grp">学习</div>
   <a data-view="schedule"><span data-icon="calendar"></span>复习日程<span class="n" id="n-schedule"></span></a>
+  <a data-view="plans"><span data-icon="flow"></span>学习计划</a>
   <a data-view="learn"><span data-icon="book"></span>学习记录<span class="n" id="n-learn"></span></a>
   <div class="navfoot">
     <label>范围 <select id="days"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="365">1 年</option></select></label>
@@ -510,8 +543,9 @@ document.querySelectorAll("[data-icon]").forEach((node) => { node.outerHTML = ic
 const STAGE = {assess: "资料评估", assess_chunk: "分段检查资料", assess_combine: "综合资料判断", teach: "讲解", clarify: "澄清",
   clarify_chunk: "分段澄清", clarify_combine: "综合澄清", next_question: "出题", grade: "评分", grade_extract: "分批评阅",
   grade_segment: "分段评阅", grade_combine: "维度合并评分", gather: "补充资料", synthesize: "归纳旧讲解", synthesize_batch: "分批归纳",
-  chat: "对话", chat_summary: "对话摘要", classify_turn: "识别输入"};
-const FLOW = {learn: "学习", quiz: "自测", review: "复习", resume_lesson: "继续讲解"};
+  chat: "对话", chat_summary: "对话摘要", classify_turn: "识别输入", plan: "制定计划"};
+const FLOW = {learn: "学习", quiz: "自测", review: "复习", resume_lesson: "继续讲解", "plan.draft": "生成计划草稿",
+  "plan.activate": "确认计划", "plan.revise": "修改计划", "plan.web_outline": "联网参考大纲", "plan.recompute": "重排计划"};
 const DIM = {concept: "概念准确", mechanism: "机制解释", application: "应用辨析"};
 const STATUS = {running: "运行中", ok: "完成", error: "出错", interrupted: "中断", done: "完成", pending: "未开始"};
 const END = {done: "完成", outcome: "已评阅", proposal: "提出建议", cancelled: "已取消", no_answer: "无回答", error: "出错",
@@ -520,8 +554,9 @@ const KIND = {first: "首次自测", review: "复习"};
 const RULE = {leak_check: "泄露检查", read_root: "读取白名单", write_root: "写入白名单", name_not_allowed: "工具不在本步骤",
   permission_denied: "权限类别不允许", confirmation_denied: "用户拒绝确认", confirmation_unavailable: "无法确认", policy_denied: "审批策略禁止", web_request_refused: "网页请求被拒",
   proposal_rejected: "拒绝提议", proposal_refused: "提议未通过校验", memory_limit: "记忆超限", loop_limit: "循环上限", question_shape: "题目形状超限",
-  output_invalid: "模型输出无效", illegal_transition: "非法状态转换", consent_missing: "未获发送授权"};
-const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", approvals: "审批", schedule: "复习日程", learn: "学习记录", roots: "目录白名单"};
+  output_invalid: "模型输出无效", illegal_transition: "非法状态转换", consent_missing: "未获发送授权",
+  endpoint_feature_disabled: "端点不支持的字段", plan_limit: "学习计划超限"};
+const VIEWS = {live: "实时", traces: "Trace", metrics: "指标与花费", failures: "失败", checks: "契约检查", approvals: "审批", schedule: "复习日程", learn: "学习记录", roots: "目录白名单", plans: "学习计划"};
 // Served by `zhiqiu web`, the page carries a per-start token for /api/chat/*; the read-only dashboard has none.
 const meta = (name) => document.querySelector(`meta[name="${name}"]`)?.content || "";
 const WB = {on: meta("zhiqiu-mode") === "workbench", token: meta("zhiqiu-token")};
@@ -601,6 +636,10 @@ function setHead(title, sub = "", act = "") {
 document.addEventListener("click", (event) => {
   const respond = event.target.closest("[data-respond]");
   if (respond) { chatRespond(respond); return; }
+  const planAction = event.target.closest("[data-plan-act]");
+  if (planAction) { planAct(planAction); return; }
+  const planDetail = event.target.closest("[data-plan-detail]");
+  if (planDetail) { location.hash = `plans/${encodeURIComponent(planDetail.dataset.planDetail)}`; return; }
   const vinstall = event.target.closest("[data-vinstall]");
   if (vinstall) { if (vinstall.dataset.vinstall === "go") voiceInstall(); else voiceHint(""); return; }
   const vundo = event.target.closest("[data-vundo],[data-vraw]");
@@ -732,7 +771,7 @@ function archSVG() {
     ${box("teach", 192, 356, 124, 48, "讲解", "learn")}
     ${box("quiz", 348, 356, 124, 48, "出题", "learn")}
     ${box("grade", 504, 356, 124, 48, "评阅", "learn")}
-    ${box("plan", 660, 356, 124, 48, "排程", "schedule")}
+    ${box("plan", 660, 356, 124, 48, "排程与计划", "plans")}
     ${flow("M160 380 L192 380", "e-flow-steps")}${flow("M316 380 L348 380", "e-flow-steps")}${flow("M472 380 L504 380", "e-flow-steps")}
     ${flow("M628 380 L660 380", "e-grade-plan")}
 
@@ -753,6 +792,7 @@ function stageNode(name) {
   if (name === "next_question" || name === "classify_turn") return "quiz";
   if (name.startsWith("grade")) return "grade";
   if (name === "chat_summary" || name === "conversation_title") return "chats";
+  if (name === "plan") return "plan";
   return null;
 }
 const TOOL_SOURCE = {policy: "自动", turn: "本轮已允许", user: "你批准的"};
@@ -773,9 +813,17 @@ const EVENT_SPEC = {
   ZeroAnswer: [["quiz"], [], "未作答"],
   GuardrailTriggered: [["guard"], [], "护栏拦截"],
   RootsChanged: [["context"], [], "目录白名单已变更"],
+  PlanDrafted: [["plan"], [], "生成计划草稿"],
+  PlanRevised: [["plan"], [], "计划已修改"],
+  PlanActivated: [["plan", "schedule"], ["e-plan-schedule"], "计划已生效"],
+  PlanRescheduled: [["plan", "schedule"], ["e-plan-schedule"], "计划已重排"],
+  UnitDone: [["plan", "kp"], [], "计划单元已学完"],
+  UnitBlocked: [["plan"], [], "计划单元推迟"],
+  UnitUnblocked: [["plan"], [], "计划单元恢复"],
 };
 // Business events that only go to the list.
-const EVENT_TEXT = {SkillChanged: "确定讲法", MaterialsRecorded: "记录资料", MaterialTransferApproved: "同意发送资料",
+const EVENT_TEXT = {PlanPaused: "计划已暂停", PlanResumed: "计划已继续", PlanCompleted: "计划已完成", PlanAbandoned: "计划已放弃",
+  UnitSkipped: "计划单元跳过", SkillChanged: "确定讲法", MaterialsRecorded: "记录资料", MaterialTransferApproved: "同意发送资料",
   LessonSections: "讲解分节", LessonRetrieval: "检索旧讲解", NoteRecorded: "记录笔记", TurnClassified: "识别输入",
   ClarificationExplained: "解答提问", ScoringAnswerSubmitted: "提交评分"};
 // The states StateChanged moves knowledge points, attempts and conversations through.
@@ -1272,7 +1320,17 @@ async function viewMetrics() {
     <div><h2>工具循环结束原因</h2><div class="card">${hbars(d.loops.end_reasons, (k) => END[k] || k)}</div></div>
     <div><h2>人工介入</h2><div class="card">${kv([["策略放行", num(d.human.policy_allowed ?? 0)], ["用户批准", num(d.human.user_approved ?? 0)],
       ["确认次数", num(d.human.confirmations_asked)], ["确认被拒", `${num(d.human.denied_by_user)}（${pct(d.human.denial_rate)}）`],
-      ["提议", esc(Object.entries(d.human.proposals).map(([k, v]) => `${k} ${v}`).join("，") || "无")], ["人工改分", num(d.human.review_revisions)], ["评分延期", num(d.grading.deferred)]])}</div></div></div>`;
+      ["提议", esc(Object.entries(d.human.proposals).map(([k, v]) => `${k} ${v}`).join("，") || "无")], ["人工改分", num(d.human.review_revisions)], ["评分延期", num(d.grading.deferred)]])}</div></div>
+    ${planMetrics(d.plans)}</div>`;
+}
+
+// Study plans (all time, not the range above): how they end, punctuality, and estimates against real time.
+function planMetrics(p) {
+  if (!p || !Object.keys(p.by_state || {}).length) return "";
+  const states = Object.entries(p.by_state).map(([k, v]) => `${(PLAN_STATE[k] || ["", k])[1]} ${v}`).join("，");
+  return `<div><h2>学习计划</h2><div class="card">${kv([["计划", esc(states)], ["完成率", pct(p.completion_rate)],
+    ["学完的知识点", num(p.units_done)], ["准时率", pct(p.on_time_rate)], ["平均延期", p.average_delay_days == null ? "—" : `${p.average_delay_days} 天`],
+    ["实际 ÷ 估计用时", p.estimate_ratio == null ? "—" : `×${p.estimate_ratio}`], ["自动重排", `${num(p.reschedules)} 次（复习日 ${num(p.review_day_moves)} 次）`]])}</div></div>`;
 }
 
 async function viewFailures() {
@@ -1319,6 +1377,63 @@ async function viewApprovals() {
     <div class="hint">每次询问都记一条，终端与网页共用；只保存描述的第一行和参数摘要，不保存写入的内容。${WB.on ? "本工作台正在等待的审批可以直接在这里批准或拒绝，与对话里的卡片是同一个提示。" : "在工作台（zhiqiu web）中可以直接批准。"}</div>`;
   // Refresh quickly while something here waits for the user.
   return waiting.length ? 1500 : undefined;
+}
+
+// ----- study plans: every plan with its progress, one plan's units and versions --------------------------
+const PLAN_STATE = {draft: ["warn", "草稿"], active: ["running", "进行中"], paused: ["", "已暂停"], completed: ["pass", "已完成"], abandoned: ["", "已放弃"]};
+const UNIT_STATE = {pending: "待学", learning: "学习中", done: "已学完", blocked: "推迟", skipped: "跳过"};
+const REV_BY = {model: "模型", user_card: "你在卡片上", web_outline: "联网参考", reschedule: "自动重排"};
+async function viewPlans() {
+  const d = await api("/api/plans");
+  const open = d.plans.filter((p) => ["draft", "active", "paused"].includes(p.state)).length;
+  setHead("学习计划", `${num(d.plans.length)} 份 · 进行中或待定 ${num(open)} 份`);
+  const nw = 'style="white-space:nowrap"';
+  const acts = (p) => !WB.on ? "" : [
+    ["draft", "active", "paused"].includes(p.state) ? `<button class="btn" data-plan-act="${esc(p.id)}:open">打开</button>` : "",
+    p.state === "active" ? `<button class="btn" data-plan-act="${esc(p.id)}:pause">暂停</button>` : "",
+    p.state === "paused" ? `<button class="btn" data-plan-act="${esc(p.id)}:resume">继续</button>` : "",
+    ["active", "paused"].includes(p.state) ? `<button class="btn" title="先排" data-plan-act="${esc(p.id)}:up">↑</button><button class="btn" title="后排" data-plan-act="${esc(p.id)}:down">↓</button>` : "",
+    ["draft", "active", "paused"].includes(p.state) ? `<button class="btn danger" data-plan-act="${esc(p.id)}:abandon">放弃</button>` : ""].join(" ");
+  const rows = d.plans.map((p) => { const [cls, label] = PLAN_STATE[p.state] || ["", p.state];
+    return `<tr><td><a class="lnk" data-plan-detail="${esc(p.id)}">${esc(p.title)}</a><div class="faint" style="font-size:11px">${esc(p.pace)}</div></td>
+      <td ${nw}>${pill(cls, label)}</td>
+      <td ${nw}><span class="minibar" style="display:inline-block;width:80px;vertical-align:middle"><span style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></span></span> ${num(p.done)}/${num(p.total)}${p.blocked ? ` <span class="faint">推迟 ${num(p.blocked)}</span>` : ""}</td>
+      <td>${esc(p.next || "—")}</td><td ${nw}>${p.finish ? esc(p.finish) : "—"}${p.late_days ? `<div class="warnc" style="font-size:11px">比截止日晚 ${num(p.late_days)} 天</div>` : ""}</td>
+      <td ${nw}>${acts(p)}</td></tr>`; }).join("");
+  $("#view").innerHTML = `<div class="card" style="padding:4px 8px">${d.plans.length ? `<table><thead><tr><th>计划</th><th ${nw}>状态</th><th ${nw}>进度</th><th>下一个</th><th ${nw}>预计学完</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">还没有学习计划。在对话里说“我想系统学一下某个主题”，或输入 /plan 主题 --from 资料目录。</div>`}</div>
+    <div class="err" id="planerr" style="color:var(--bad);font-size:12.5px;margin-top:6px"></div>
+    <div class="hint">计划只安排和提醒，每次学习都由你开始。多份计划同时进行时，每天的新知识点按先后轮流安排；暂停期间复习照常。${WB.on ? "“打开”会在对话里显示计划卡片，可以修改或一起调整。" : "在工作台（zhiqiu web）中可以打开和调整计划。"}</div>`;
+}
+
+async function viewPlan(id) {
+  const p = await api(`/api/plans/${encodeURIComponent(id)}`);
+  const [cls, label] = PLAN_STATE[p.state] || ["", p.state];
+  setHead(`学习计划《${p.title}》`, `${p.basis_note || ""}${p.deadline ? ` · 截止 ${p.deadline}` : ""}`, pill(cls, label));
+  const nw = 'style="white-space:nowrap"';
+  const units = p.units.map((u, i) => `<tr class="${u.state === "skipped" ? "faint" : ""}"><td class="num">${i + 1}</td><td ${nw}>${esc(u.planned_date || u.done_date || "—")}</td>
+    <td>${esc(u.title)}${u.goal ? `<div class="faint" style="font-size:11px">${esc(u.goal)}</div>` : ""}</td><td class="num">${num(u.minutes)}</td>
+    <td ${nw}>${esc(UNIT_STATE[u.state] || u.state)}${u.score != null ? ` · ${u.score} 分` : ""}</td><td>${esc(u.block_reason || "")}</td></tr>`).join("");
+  const revs = p.revisions.map((r) => `<tr><td class="num">${r.revision}</td><td ${nw}>${esc(REV_BY[r.by] || r.by)}</td><td>${esc(r.summary)}</td><td class="faint" ${nw}>${esc(r.created_at.slice(0, 16).replace("T", " "))}</td></tr>`).join("");
+  $("#view").innerHTML = `<p><a class="lnk" href="#plans">← 全部计划</a></p>
+    <div class="card" style="padding:4px 8px"><table><thead><tr><th>#</th><th ${nw}>日期</th><th>知识点</th><th class="num">分钟</th><th ${nw}>状态</th><th>说明</th></tr></thead><tbody>${units}</tbody></table></div>
+    <h3 style="margin-top:16px;font-size:14px">修订历史</h3>
+    <div class="card" style="padding:4px 8px"><table><thead><tr><th>版</th><th ${nw}>谁改的</th><th>改了什么</th><th ${nw}>时间</th></tr></thead><tbody>${revs}</tbody></table></div>`;
+}
+
+async function planAct(button) {
+  const [id, action] = button.dataset.planAct.split(":");
+  if (action === "abandon" && !confirm("放弃这份计划？已经学过的知识点和复习都会保留。")) return;
+  button.disabled = true;
+  try {
+    await post("/api/plans/action", {plan_id: id, action});
+    if (action === "open") { location.hash = "chat"; return; }
+    await viewPlans();
+  } catch (e) {
+    const node = $("#planerr");
+    if (node) node.textContent = e.message;
+    button.disabled = false;
+  }
 }
 
 function approvalAnswer(a, prompt) {
@@ -1759,8 +1874,59 @@ function grantCard(e) {
     <div class="acts">${button("once", "只允许这一次", "primary")}${button("root", "允许并加入白名单", "")}${button("denied", "拒绝", "danger")}</div></div>`;
 }
 
+// A study plan card: the dated units, the pace, and what the user may do with the draft (PRD 10.0 §5.3).
+const PLAN_DONE = {activate: "已确认", later: "已保存，稍后再定", drop: "已放弃", learn_now: "直接开始学习"};
+function planCard(e) {
+  const c = e.card || {}, id = esc(e.request_id), draft = c.state === "draft";
+  const pv = (value) => `data-respond="${id}" data-plan-value="${esc(value)}"`;
+  const head = `${draft ? "学习计划草稿" : "学习计划"}《${esc(c.title)}》 · ${num(c.count)} 个知识点${c.span ? " · " + esc(c.span) : ""}${c.finish ? ` · 预计 ${esc(c.finish_day)} 学完` : ""}`;
+  const warn = (t) => `<div class="warn">${esc(t)}</div>`;
+  const web = c.can_web ? ` <button class="btn" ${pv("web")}>联网参考大纲（约 ${num(c.web_searches)} 次搜索）</button>` : "";
+  const lines = [c.summary ? `<div class="sum">${esc(c.summary)}</div>` : "",
+    `<div class="sum">大纲依据：${esc(c.basis_note)}${c.basis === "model" ? web : ""}</div>`,
+    c.suggest_web && c.suggest_web_reason ? `<div class="sum">建议联网参考：${esc(c.suggest_web_reason)}</div>` : "",
+    c.late_days ? warn(`按当前节奏会比截止日 ${c.deadline} 晚 ${c.late_days} 天`) : "",
+    (c.moved_plans || []).length ? warn(`与进行中的计划轮流安排：${c.moved_plans.join("、")} 会相应顺延`) : "",
+    c.calibration ? `<div class="sum">按你最近的实际用时，估时 ×${c.calibration}</div>` : "",
+    ...(c.notes || []).map((n) => `<div class="sum">（${esc(n)}）</div>`)].join("");
+  const p = c.pace || {};
+  const seg = (c.presets || []).map((x) => `<button class="${x.name === p.preset ? "on" : ""}" ${pv("preset:" + x.name)}>${esc(x.label)}</button>`).join("");
+  const pace = `<div class="pace"><span class="seg">${seg}</span>
+    <label>每天 <input type="number" min="1" max="3" data-plan-field="new_per_day" value="${p.new_per_day}"> 个</label>
+    <label><input type="number" min="15" max="180" step="5" data-plan-field="daily_minutes" value="${p.daily_minutes}"> 分钟</label>
+    <label>开始 <input type="date" data-plan-field="start_date" value="${esc(p.start_date || "")}"></label>
+    <label>截止 <input type="date" data-plan-field="deadline" value="${esc(c.deadline || "")}"></label>
+    <button class="btn" data-respond="${id}" data-plan-pace="1">改节奏</button></div>`;
+  const reviews = [...(c.review_days || [])].sort(), shown = new Set();
+  const rows = [];
+  for (const u of c.units || []) {
+    for (const d of reviews) if (!shown.has(d) && u.date && d < u.date) { shown.add(d); rows.push(`<tr class="rday"><td></td><td>${esc(dayLabel(d))}</td><td colspan="5">复习日：只复习，不排新内容</td></tr>`); }
+    const skip = u.state === "skipped";
+    const ops = !u.editable ? "" : skip ? `<button ${pv("unknown:" + u.key)}>恢复</button>`
+      : `<button title="上移" ${pv(`move:${u.key}:up`)}>↑</button> <button title="下移" ${pv(`move:${u.key}:down`)}>↓</button> <button ${pv("known:" + u.key)}>已会</button> <button title="删除" ${pv("remove:" + u.key)}>✕</button>`;
+    rows.push(`<tr class="${skip ? "skip" : ""}"><td>${u.number}</td><td class="day">${skip ? "—" : esc(u.day)}</td>
+      <td>${esc(u.title)}${u.goal ? `<div class="goal">${esc(u.goal)}</div>` : ""}${u.requires.length ? `<div class="goal req">先学：${esc(u.requires.join("、"))}</div>` : ""}</td>
+      <td>${num(u.minutes)}</td><td class="src">${esc(u.source)}</td><td class="st">${esc(u.note || "")}</td><td class="ops">${ops}</td></tr>`);
+  }
+  const table = `<div class="ptable"><table><tr><th>#</th><th>日期</th><th>知识点</th><th>分钟</th><th class="src">资料</th><th>说明</th><th></th></tr>${rows.join("")}</table></div>`;
+  const main = c.single ? `<button class="btn primary" ${pv("learn_now")}>直接开始学习</button><button class="btn" ${pv("activate")}>仍按计划</button>`
+    : `<button class="btn primary" ${pv("activate")}>${draft ? "确认计划" : "保存"}</button>`;
+  const talk = c.discussing ? `<div class="pace"><input type="text" style="flex:1;min-width:200px;width:auto" maxlength="500"
+      data-plan-say placeholder="告诉知秋怎么改，例如：下周五面试，数据结构我已经会了"><button class="btn primary" data-respond="${id}" data-plan-send="1">发送</button></div>` : "";
+  const acts = `${talk}<div class="acts">${main}${c.discussing ? "" : `<button class="btn" ${pv("discuss")}>一起调整</button>`}
+    ${c.can_undo ? `<button class="btn" ${pv("undo")}>撤销</button>` : ""}<button class="btn" ${pv("later")}>稍后再定</button>
+    <button class="btn danger" ${pv("drop")}>放弃</button></div>`;
+  return `<div class="acard plan" data-card="${id}" data-plan="1"><div class="head">${icon("calendar")}${head}</div>${lines}
+    <div class="sum">节奏：${esc(p.text || "")}</div>${pace}${table}${acts}</div>`;
+}
+function dayLabel(iso) {
+  const d = new Date(iso + "T00:00:00");
+  return `${d.getMonth() + 1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+}
+
 function promptCard(e) {
   if (e.kind === "grant") return grantCard(e);
+  if (e.kind === "plan") return planCard(e);
   const buttons = (yes, no) => `<div class="acts"><button class="btn primary" data-respond="${esc(e.request_id)}" data-value="true">${yes}</button>
     <button class="btn danger" data-respond="${esc(e.request_id)}" data-value="false">${no}</button></div>`;
   if (e.kind === "approval") {
@@ -1775,15 +1941,23 @@ function promptCard(e) {
 
 function resolveCard(e) {
   const card = document.querySelector(`[data-card="${CSS.escape(e.request_id)}"]`);
-  const kind = card ? (card.dataset.grant ? "grant" : card.classList.contains("acard") ? (card.querySelector(".k-guard") ? "approval" : "confirm") : "ask") : null;
+  const kind = card ? (card.dataset.grant ? "grant" : card.dataset.plan ? "plan" : card.classList.contains("acard") ? (card.querySelector(".k-guard") ? "approval" : "confirm") : "ask") : null;
   const stopped = {stopped: "已停止", timeout: "超时未回答，已停止"}[e.reason];
+  if (card && kind === "plan" && !stopped && !(e.value in PLAN_DONE)) {
+    // An edit or a message about the plan: the revised card follows, so the old one goes.
+    card.remove();
+    if (typeof e.value === "string" && e.value.startsWith("say:")) chatAppend(`<div class="bubble user">${esc(e.value.slice(4))}</div>`);
+    if (C.ask === e.request_id) C.ask = null;
+    return;
+  }
   if (card && kind !== "ask") {
     card.classList.add("done");
     card.querySelector(".acts")?.remove();
     card.querySelector("[data-grant-root]")?.setAttribute("disabled", "");
     const where = e.origin === "approvals" ? "审批页" : "网页";
     const granted = typeof e.value === "string" ? (e.value === "once" ? "只允许这一次" : e.value.startsWith("root:") ? `已加入白名单：${e.value.slice(5)}` : "已拒绝") : "";
-    const label = stopped || (kind === "grant" ? granted : kind === "approval" ? (e.value ? `已批准（${where}）` : `已拒绝（${where}）`) : (e.value ? "是" : "否"));
+    card.querySelectorAll("button,input").forEach((b) => { b.disabled = true; });
+    const label = stopped || (kind === "plan" ? PLAN_DONE[e.value] : kind === "grant" ? granted : kind === "approval" ? (e.value ? `已批准（${where}）` : `已拒绝（${where}）`) : (e.value ? "是" : "否"));
     card.insertAdjacentHTML("beforeend", `<div class="result">${esc(label)} · ${clock(e.at_ns)}</div>`);
   } else if (stopped) {
     chatNote(stopped);
@@ -2112,7 +2286,7 @@ function chatEvent(e) {
   if (e.kind === "prices" || e.kind === "idle") modelLoad().catch(() => {});
   // A stage's reply is still arriving; anything said or asked next means it is done.
   if (e.kind === "progress") { C.progress = e; chatProgress(); return; }
-  if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, grant: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
+  if (e.kind in {say: 1, ask: 1, confirm: 1, approval: 1, grant: 1, plan: 1, idle: 1, error: 1} && C.progress) { C.progress = null; chatProgress(); }
   if (e.kind === "delta" || e.kind === "stream_reset") { chatDraft(e); return; }
   if (e.kind === "user") chatAppend(`<div class="bubble user">${esc(e.text)}${e.input_source === "voice" ? VOICE_MARK : ""}</div>`);
   else if (e.kind === "say" && e.stream_id && draftNode(e.stream_id, false)) {
@@ -2145,7 +2319,7 @@ function chatEvent(e) {
         box.dataset.centred = "1";
       });
     }
-  } else if (e.kind in {ask: 1, confirm: 1, approval: 1, grant: 1}) {
+  } else if (e.kind in {ask: 1, confirm: 1, approval: 1, grant: 1, plan: 1}) {
     chatAppend(promptCard(e));
     if (e.kind === "ask") C.ask = e.request_id;
   } else if (e.kind === "resolved") resolveCard(e);
@@ -2626,7 +2800,7 @@ function chatProgress() {
   node.textContent = p && C.busy ? ` · 正在生成${STAGE_NAMES[p.stage] || p.stage}，已写约 ${p.chars} 字` : "";
 }
 
-const MODE = {chat: "对话", lesson: "讲解", self_test: "自测", review: "复习"};
+const MODE = {chat: "对话", lesson: "讲解", self_test: "自测", review: "复习", planning: "制定计划"};
 
 const USAGE_PART = {rules: ["规则", "var(--k-turn)"], context: ["背景", "var(--k-stage)"], summary: ["摘要", "var(--k-loop)"],
   history: ["历史", "var(--k-llm)"]};
@@ -2688,27 +2862,34 @@ function calRender() {
     const cls = ["cd", day.date.slice(0, 7) !== month ? "out" : "", day.date < d.today ? "past" : "", count ? "has" : "",
       day.date === d.today ? "today" : "", day.date === C.cal.open ? "sel" : ""].filter(Boolean).join(" ");
     const mark = count ? `<i class="${count > d.limit ? "over" : ""}">${count}</i>` : day.done.length ? `<i class="ok">✓</i>` : "";
-    const reminders = day.reminders || [];
+    const reminders = day.reminders || [], plan = (day.plan || []).filter((p) => p.state !== "done");
     const tip = `${day.date}（${relDay(day.date, d.today)}）` + (count ? `：待复习 ${count} 个` : "") + (day.done.length ? `，完成 ${day.done.length} 次` : "")
-      + (reminders.length ? `，提醒 ${reminders.length} 个` : "");
-    return `<div class="${cls}" data-calday="${esc(day.date)}" title="${esc(tip)}">${Number(day.date.slice(8))}${mark}${reminders.length ? `<b class="rm"></b>` : ""}</div>`;
+      + (reminders.length ? `，提醒 ${reminders.length} 个` : "") + (plan.length ? `，计划新学 ${plan.length} 个` : "");
+    return `<div class="${cls}" data-calday="${esc(day.date)}" title="${esc(tip)}">${Number(day.date.slice(8))}${mark}${reminders.length ? `<b class="rm"></b>` : ""}${plan.length ? `<b class="pl"></b>` : ""}</div>`;
   }).join("");
   let list;
   const open = C.cal.open && d.days.find((day) => day.date === C.cal.open);
   if (open) {
     list = `<h5>${esc(open.date.slice(5))}（${relDay(open.date, d.today)}）</h5>${open.items.map(schItem).join("")}${schDone(open.done)}`
       + (open.items.length || open.done.length ? "" : `<div class="faint">这天没有复习安排</div>`)
-      + remindList(open.reminders || [], open.date >= d.today ? open.date : "");
+      + planList(open.plan || []) + remindList(open.reminders || [], open.date >= d.today ? open.date : "");
   } else {
     const today = d.days.find((day) => day.date === d.today);
     list = (d.overdue.length ? `<h5 class="bad">逾期 ${num(d.overdue.length)} 个</h5>${d.overdue.map(schItem).join("")}` : "")
       + `<h5>今天</h5>${today && today.items.length ? today.items.map(schItem).join("") : `<div class="faint">今天没有待复习的知识点</div>`}`
-      + (today ? schDone(today.done) : "") + remindList(today?.reminders || [], d.today);
+      + (today ? schDone(today.done) : "") + planList(today?.plan || []) + remindList(today?.reminders || [], d.today);
   }
   if (d.relearn.length) list += `<div class="faint" style="margin-top:6px">需要重学：${d.relearn.map(esc).join("、")}</div>`;
   node.innerHTML = `<h4>${icon("calendar")}复习计划<a class="lnk" data-view="schedule">完整日程 →</a></h4>
     <div class="cbadges">${badge(s.overdue, "bad", "逾期")}${badge(s.today, "hot", "今天")}${badge(s.next7, "", "未来 7 天")}${badge(s.reminders_today || 0, "warm", "今日提醒")}</div>
     ${nav}<div class="cgrid">${CAL_WEEKDAYS.map((w) => `<div class="wd">${w}</div>`).join("")}${cells}</div><div class="clist">${list}</div>`;
+}
+
+// Study plan units of a day in the calendar list.
+function planList(items) {
+  if (!items.length) return "";
+  return `<h5>学习计划</h5>` + items.map((p) => `<div class="prow${p.state === "done" ? " done" : ""}"><span class="tg">${esc(p.plan)}</span>
+    <span class="tt">${esc(p.title)} <span class="faint">${p.state === "learning" ? "学习中" : p.state === "done" ? "已学完" : `约 ${num(p.minutes)} 分钟`}</span></span></div>`).join("");
 }
 
 // ----- reminders: in the calendar, a small form to add one, and the card said when one is due -----
@@ -2835,8 +3016,24 @@ async function chatPanel() {
       : d.verification.passed ? `${pill("pass", "契约无违反")} <span class="faint">${num(d.verification.traces)} 条 trace</span>`
       : `${pill("fail", "有违反")} <span class="mono">${esc(d.verification.failed.join("、"))}</span> <a class="lnk" data-view="checks">查看 →</a>`}</div>`;
   const section = (title, iconName, html) => `<section><h4>${icon(iconName)}${title}</h4>${html}</section>`;
-  body.innerHTML = section("当前目标", "flow", goal) + section("上下文范围", "book", context) + section("执行状态", "activity", running) +
+  body.innerHTML = (d.today && d.today.active ? section("今日", "calendar", todayBlock(d.today)) : "") +
+    section("当前目标", "flow", goal) + section("上下文范围", "book", context) + section("执行状态", "activity", running) +
     section("风险动作", "guard", risk) + section("验证结果", "shield", result);
+}
+
+// Today's study plan in the status panel: what to learn, what is held back, how the plans stand.
+function todayBlock(t) {
+  const items = [...t.continuing.map((u) => [u, "继续"]), ...t.units.map((u) => [u, "新学"])];
+  const rows = items.map(([u, verb]) => `<div class="li"><span class="dot${verb === "继续" ? " live" : ""}"></span><span>${verb}《${esc(u.title)}》 <span class="faint">约 ${num(u.minutes)} 分钟 · ${esc(u.plan)}</span></span></div>`).join("");
+  const head = t.review_day && !t.units.length ? `<div>今天复习 ${num(t.reviews.length)} 项，是复习日</div>`
+    : `<div>${t.reviews.length ? `复习 ${num(t.reviews.length)} 项 · ` : ""}约 ${num(t.minutes)} 分钟</div>`;
+  const ahead = t.ahead ? `<div class="faint">今天的计划已完成；可以提前学《${esc(t.ahead.title)}》（输入 /today ahead）</div>`
+    : !items.length && t.done_today.length ? `<div class="faint">今天的计划已完成</div>` : "";
+  const blocked = t.blocked.map((u) => `<div class="faint">推迟《${esc(u.title)}》：${esc(u.reason || "")}</div>`).join("");
+  const late = t.late.map((p) => `<div class="warnc">《${esc(p.title)}》会比截止日晚 ${num(p.days)} 天</div>`).join("");
+  const plans = t.plans.map((p) => `<div class="li"><span>${esc(p.title)}</span><span class="minibar" style="flex:1;margin:0 6px"><span style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></span></span><span class="faint">${num(p.done)}/${num(p.total)}</span></div>`).join("");
+  return head + rows + ahead + blocked + late + `<div style="margin-top:6px">${plans}</div>` +
+    (items.length ? `<div class="faint" style="margin-top:4px">输入 /today start 开始</div>` : "");
 }
 
 // Events arrive on the SSE stream (/api/chat/stream) as they happen. This tick, once a second, only
@@ -3021,7 +3218,22 @@ async function chatRespond(button) {
   const card = button.closest(".acard");
   card?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
   const grant = button.dataset.grantValue;
-  const value = grant ? (grant === "root" ? `root:${card.querySelector("[data-grant-root]").value}` : grant) : button.dataset.value === "true";
+  let value = grant ? (grant === "root" ? `root:${card.querySelector("[data-grant-root]").value}` : grant) : button.dataset.value === "true";
+  if (button.dataset.planValue) value = button.dataset.planValue;
+  if (button.dataset.planSend) {
+    const text = card.querySelector("[data-plan-say]").value.trim();
+    if (!text) { card.querySelectorAll("button").forEach((b) => { b.disabled = false; }); return; }
+    value = "say:" + text;
+  }
+  if (button.dataset.planPace) {
+    const pace = {};
+    card.querySelectorAll("[data-plan-field]").forEach((input) => {
+      const name = input.dataset.planField;
+      if (input.value !== input.defaultValue) pace[name] = input.type === "number" ? Number(input.value) : (input.value || null);
+    });
+    if (!Object.keys(pace).length) { card.querySelectorAll("button").forEach((b) => { b.disabled = false; }); chatNote("节奏没有改动。"); return; }
+    value = "pace:" + JSON.stringify(pace);
+  }
   try {
     await post("/api/chat/respond", {request_id: button.dataset.respond, value});
   } catch (e) {
@@ -3075,8 +3287,10 @@ function route() {
     schedule(async () => { const running = await viewTrace(S.arg, !first); first = false; return running; }, 1500);
   } else if (view === "learn" && S.arg) {
     schedule(() => viewAttempt(S.arg), 0);
+  } else if (view === "plans" && S.arg) {
+    schedule(() => viewPlan(S.arg), 15000);
   } else {
-    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], approvals: [viewApprovals, 5000], schedule: [viewSchedule, 15000], learn: [viewLearn, 15000], roots: [viewRoots, 0], chat: [chatTick, 1000]};
+    const loaders = {live: [viewLive, 1500], traces: [viewTraces, 5000], metrics: [viewMetrics, 15000], failures: [viewFailures, 15000], checks: [viewChecks, 15000], approvals: [viewApprovals, 5000], schedule: [viewSchedule, 15000], learn: [viewLearn, 15000], roots: [viewRoots, 0], plans: [viewPlans, 15000], chat: [chatTick, 1000]};
     schedule(...loaders[S.view]);
   }
 }

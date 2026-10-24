@@ -9,7 +9,8 @@ import json
 import sqlite3
 import time
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+import statistics
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from . import pricing
@@ -183,7 +184,34 @@ def collect(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:
         "grading": {"deferred": deferred},
         "guardrails": dict(guards),
         "daily": dict(sorted(daily.items())),
+        "plans": plan_metrics(db),
     }
+
+
+def plan_metrics(db: sqlite3.Connection) -> dict[str, Any]:
+    """How study plans go: finished or given up, units on time, how late, estimates against real time."""
+    from . import plans as plan_store
+    try:
+        states = Counter(row[0] for row in db.execute("SELECT state FROM study_plans"))
+        done = db.execute("""SELECT kp_id,minutes,done_date,first_planned_date FROM plan_units
+            WHERE state='done' AND done_date IS NOT NULL""").fetchall()
+        reschedules = db.execute("SELECT summary FROM plan_revisions WHERE by='reschedule'").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    timed = [row for row in done if row["first_planned_date"]]
+    late = [(date.fromisoformat(row["done_date"]) - date.fromisoformat(row["first_planned_date"])).days for row in timed]
+    ratios = []
+    for row in done:
+        actual = plan_store.actual_minutes(db, row["kp_id"]) if row["kp_id"] else None
+        if actual and row["minutes"]:
+            ratios.append(actual / row["minutes"])
+    ended = states.get("completed", 0) + states.get("abandoned", 0)
+    return {"by_state": dict(states), "completion_rate": _rate(states.get("completed", 0), ended),
+            "units_done": len(done), "on_time_rate": _rate(sum(1 for days in late if days <= 0), len(late)),
+            "average_delay_days": round(sum(max(0, days) for days in late) / len(late), 1) if late else None,
+            "estimate_ratio": round(statistics.median(ratios), 2) if ratios else None,
+            "reschedules": len(reschedules),
+            "review_day_moves": sum(1 for row in reschedules if "复习" in (row["summary"] or ""))}
 
 
 def _pct(value: float | None) -> str:

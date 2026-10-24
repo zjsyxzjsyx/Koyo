@@ -469,7 +469,9 @@ def test_conversation_writes_pass_the_same_checks_as_input(served, path, body, k
 def test_compact_from_the_panel_folds_older_messages_and_the_usage_follows(served):
     server, bench, model = served
     model.summarize_chat = lambda previous, items: {"summary": f"覆盖{len(items)}条"}
-    assert call(server, "/api/chat/compact", "POST", {})[0] == 202  # too few messages: a note, no model call
+    status, data = call(server, "/api/chat/compact", "POST", {})
+    assert status == 202  # too few messages: a note, no model call
+    wait_event(server, ("idle",), after=data["next"])
     for index in range(6):
         data = call(server, "/api/chat/input", "POST", {"text": f"第{index}句"})[1]
         wait_event(server, ("idle",), after=data["next"])

@@ -34,6 +34,19 @@ code_files = true  # 读代码、配置等文本文件；false 时只读 .md 和
 extra_suffixes = []  # 另外要读的扩展名，例如 [".kt", ".lua"]
 respect_gitignore = true  # 扫描目录时跳过 .gitignore 里的文件
 
+# 学习计划：每天学多少新内容（新计划的默认值，每个计划还可以单独调）
+[plan]
+enabled = true  # 提供学习计划；false 时界面回到 9.2（已有计划的数据保留）
+preset = "standard"  # 节奏档位：relaxed 轻松（每天 1 个、30 分钟、周末休息），standard 标准（每天 1 个、45 分钟），intense 紧凑（每天 2 个、90 分钟）
+# new_per_day = 1  # 每天新知识点数（1～3），不填按档位
+# daily_minutes = 45  # 每天学习时长目标（分钟，含复习），不填按档位
+# rest_days = ["sat", "sun"]  # 休息日，不填按档位
+# review_minutes = 8  # 每项复习的估时（分钟）
+# unit_minutes = 30  # 模型没给估时时，一个知识点的估时（分钟）
+# max_units = 30  # 一个计划最多几个知识点
+remind_at = "20:00"  # 确认计划时询问每日提醒的默认时间（HH:MM）；写 off 则不询问
+# missed_prompt_days = 3  # 连续几个学习日没学就问一次要不要放慢
+
 # 对话中可读、可写的目录（与工作台“目录白名单”页添加的合并）
 [roots]
 read = []  # 对话中可以直接读取的目录

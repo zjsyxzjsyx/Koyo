@@ -169,6 +169,16 @@ def attempt_detail(db: sqlite3.Connection, attempt_id: str) -> dict[str, Any]:
             "voice_answers": voice_answers, "trace_ids": traces.resolve(db, attempt_id)}
 
 
+def plans_overview(db: sqlite3.Connection) -> dict[str, Any]:
+    from .plans import overview
+    return overview(db)
+
+
+def plan_detail(db: sqlite3.Connection, plan_id: str) -> dict[str, Any]:
+    from .plans import detail
+    return detail(db, plan_id)
+
+
 def schedule(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, Any]:
     """Review tasks for the week (Monday to Sunday) or the month grid (whole weeks) around a date."""
     view = query.get("view", ["week"])[0]
@@ -195,6 +205,12 @@ def schedule(db: sqlite3.Connection, query: dict[str, list[str]]) -> dict[str, A
     for day in data["days"]:
         day["reminders"] = [item for item in reminders if item["date"] == day["date"]]
     data["summary"]["reminders_today"] = sum(item["date"] == today.isoformat() for item in reminders)
+    # Study plan units too, a colour of their own.
+    from .plans import calendar as plan_calendar
+    units = plan_calendar(db, start, end)
+    for day in data["days"]:
+        day["plan"] = [item for item in units if item["date"] == day["date"]]
+    data["summary"]["plan_today"] = sum(item["date"] == today.isoformat() and item["state"] != "done" for item in units)
     return {**data, "view": view, "anchor": anchor.isoformat()}
 
 
@@ -234,6 +250,7 @@ ROUTES: dict[str, Callable[[sqlite3.Connection, dict[str, list[str]]], dict[str,
     "/api/attempts": attempt_list,
     "/api/approvals": approval_list,
     "/api/schedule": schedule,
+    "/api/plans": lambda db, query: plans_overview(db),
     "/api/summary": lambda db, query: {**traces.summary(db, _number(query, "days", 7, 0.01, 3650)),
                                        "failures": contracts.failures(db, _number(query, "days", 7, 0.01, 3650))["total"],
                                        "approvals_pending": db.execute("""SELECT COUNT(*) FROM approval_requests
@@ -244,6 +261,7 @@ DETAIL_ROUTES: dict[str, Callable[[sqlite3.Connection, str], dict[str, Any]]] = 
     "/api/trace/": trace_detail,
     "/api/attempt/": attempt_detail,
     "/api/llm/": traces.llm_detail,
+    "/api/plans/": lambda db, ident: plan_detail(db, ident),
 }
 
 
@@ -299,6 +317,8 @@ def chat_state(server: "DashboardServer", query: dict[str, list[str]]) -> dict[s
                     "tools": context.get("tools", True), "path_grants": context.get("path_grants", False),
                     # Worked out by the worker after each turn; None when it could not be estimated.
                     "usage": context.get("usage")},
+        # Today's study plan as the worker last saw it (plans.Plans.today), None without plans.
+        "today": context.get("today"),
         "running": [{"trace_id": run["trace_id"], "chain": run["chain"], "elapsed_ms": run["elapsed_ms"],
                      "llm_calls": run["llm_calls"]} for run in running],
         "risk": {"policy": context.get("policy"), "policy_text": context.get("policy_text", ""),
@@ -857,6 +877,47 @@ def reminder_snooze(server: DashboardServer, data: dict[str, Any]) -> tuple[int,
                      on="reminders")
 
 
+PLAN_ACTIONS = {"pause": "paused", "resume": "active", "abandon": "abandoned"}
+
+
+def plan_action(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Pause, resume, abandon or reorder a plan here at once; open one as a card in the chat (by the worker).
+
+    A plan whose card the chat is waiting on is only changed through that card."""
+    from .flow import IllegalTransition
+    from .plans import Plans
+    from .store import Store
+    bench = server.workbench
+    try:
+        plan_id, action = _text_arg(data, "plan_id"), _text_arg(data, "action")
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    if action not in (*PLAN_ACTIONS, "up", "down", "open"):
+        return HTTPStatus.BAD_REQUEST, {"error": "action 只能是 pause、resume、abandon、up、down 或 open"}
+    if any(item["kind"] == "plan" and (item.get("card") or {}).get("plan_id") == plan_id for item in bench.io.pending()):
+        return HTTPStatus.CONFLICT, {"error": "对话里正打开着这份计划的卡片，请在卡片上修改"}
+    if action == "open":
+        if bench.control(("plan", plan_id)):
+            return HTTPStatus.ACCEPTED, {"accepted": True, "next": bench.io.last_seq}
+        return HTTPStatus.CONFLICT, {"error": "先回答或停止当前提示，等这一轮结束再打开计划"}
+    store = Store(server.db_path)
+    try:
+        plans = Plans(store)
+        if action in ("up", "down"):
+            plans.move_priority(plan_id, action)
+        else:
+            plans.set_state(plan_id, PLAN_ACTIONS[action], "user_page")
+        return HTTPStatus.OK, {"ok": True, **plans_overview(store.db)}
+    except LookupError as exc:
+        return HTTPStatus.NOT_FOUND, {"error": str(exc).strip("'\"")}
+    except IllegalTransition as exc:
+        return HTTPStatus.CONFLICT, {"error": f"这份计划现在不能{ {'pause': '暂停', 'resume': '继续', 'abandon': '放弃'}[action] }（{exc.current}）"}
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    finally:
+        store.close()
+
+
 def reminder_cancel(server: DashboardServer, data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return _organize(server, lambda reminders: {"reminder": reminders.cancel(_text_arg(data, "id"))}, on="reminders")
 
@@ -882,6 +943,7 @@ ACTIONS: dict[str, Callable[[DashboardServer, dict[str, Any]], tuple[int, dict[s
     "/api/reminders/create": reminder_create,
     "/api/reminders/snooze": reminder_snooze,
     "/api/reminders/cancel": reminder_cancel,
+    "/api/plans/action": plan_action,
 }
 
 

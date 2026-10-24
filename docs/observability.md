@@ -67,6 +67,7 @@ Trace、看板、指标与花费、护栏、Eval、发布门禁与诊断命令�
 ### Eval：场景套件、运行契约与失败沉淀
 
 - **运行契约检查**（`zhiqiu check [--days 7] [--json]`）：对已记录的运行逐项给出 PASS／FAIL／证据不足（没有可检查的数据时说“证据不足”，不当作通过），有 FAIL 时退出码为 1。检查项：工具循环轮数与结束原因（`loop_rounds`）、工具调用轮次在循环之内（`tool_round_bound`）、提议之后同一轮不再执行工具（`proposal_stops_round`）、写文件必须由用户批准、对话中的联网与外部 MCP 调用须经策略或用户批准（`confirmed_side_effects`；v19 之前没有来源的记录按用户批准计）、每次询问都有审批记录且结果与被决定的调用一致、没有超过 30 分钟仍未取消的待审批（`approvals_consistent`）、状态迁移按转换表重放且首尾衔接（`state_replay`）、模型与工具调用都挂在存在的 span 上（`trace_linked`）、没有遗留的运行中 span（`spans_closed`）、7.2 起每次讲解和澄清都记下了所用 Skill（`skills_recorded`）、8.0 起每次成功的流式模型调用都有不超过整次耗时的首字耗时（`stream_consistent`）。全部通过只说明程序守住了规则，不代表讲解或评分质量。
+- **学习计划的运行契约**（10.0，`plans_consistent`）：进行中的计划里每天的新知识点不超过上限、前置单元排在前面、学完的单元都有完成的首次自测、推迟的单元都写了原因。
 - **场景套件**（`tests/test_scenarios.py`）：用脚本化模型端到端运行学习→自测→评分、对话调用工具、提议→确认→流程→回到对话、自测中提问隔离、泄露拦截与确认被拒、中断与恢复，以及 V6 的默认策略（联网放行、写文件询问）、`deny` 配置、网页工作台上拒绝写文件、网页工作台上完成讲解与自测；每个场景结束后契约检查必须没有 FAIL，trace 必须是一棵连通的树。`tests/test_contracts.py` 用人为构造的违规记录检验每个检查器确实会判 FAIL。
 - **失败分类**（`zhiqiu failures [--days 7] [--json]`）：模型错误、上下文溢出、无效输出（按阶段，不允许的追问单列 `invalid_followup`）、工具超时与错误、各护栏、工具循环上限、评分延期、流程中断与出错，每类附最近的样例 trace。用户有意拒绝（护栏动作为 `denied_by_user` 的 `confirmation_denied`、`proposal_rejected`）是用户的决定，不算失败：单独列在 `intentional` 里，不计入总数和看板导航上的失败数；`confirmation_unavailable`（无法确认）仍算失败（V7）。
 - **失败沉淀**：输出未通过校验时，模型原文（脱敏、最多 2 万字）写入 `llm_failures`，`forget`／`chat forget` 一并删除。`zhiqiu failures export FAILURE_ID --to tests\regressions\NAME.json --expect rejected|recovered` 导出为回归样例，`tests/test_regressions.py` 把每个样例重放进同一套校验。第一条样例来自 V4 遗留的“不允许的追问”：V5 起出题校验失败会带着校验错误重试一次（`QUESTION_RETRIES=1`），重试给出合法题目即恢复。
@@ -126,3 +127,10 @@ uv run --python 3.12 python examples/long_answer_samples.py
 `--runs N` 把同一批样本评分 N 次、写入各自的数据库，并按平均精确一致率判定。`--out DIR` 把数据库与生成文件写到别处，不覆盖本地已有的标注结果。每次真实评分都会追加一条记录到 `labels/eval-runs.jsonl`（含评分提示指纹），供 `zhiqiu gate` 核对。
 
 `live_v5_smoke.py` 在临时数据库中用真实模型跑一轮对话（调用工具）和一次完整学习（讲解→自测→评分），然后核对 trace 树完整、`check` 没有 FAIL、指标里有 token；运行时可另开 `zhiqiu --db <脚本打印的路径> dashboard` 观察实时进度。
+
+## 学习计划的观测（10.0）
+
+- trace：`plan.draft`（生成草稿）、`plan.revise`（一起调整的每一轮）、`plan.web_outline`（联网参考大纲）、`plan.activate`（确认）、`plan.recompute`（日期有变化的每日重排，属性里有改了几个单元和原因）；草稿和修改用的模型调用是上下文任务 `plan`。
+- 事件：`PlanDrafted`、`PlanRevised`、`PlanActivated`、`PlanRescheduled`、`UnitDone`、`UnitBlocked`、`UnitUnblocked` 会点亮实时页的“排程与计划”框，其余计划事件只进列表。
+- 指标（`metrics` 与看板“指标”页的“学习计划”一组，不受天数范围影响）：各状态的计划数、完成率（完成 ÷ 结束）、学完的知识点数、准时率（学完日期不晚于最初排定的日期）、平均延期天数、实际 ÷ 估计用时的中位数、自动重排次数及其中因复习日而顺延的次数。
+- 护栏 `plan_limit`：计划的知识点超过上限，或一份计划讨论超过 12 轮。草稿不合规的模型原文照常进 `llm_failures`，可以导出为回归样例。

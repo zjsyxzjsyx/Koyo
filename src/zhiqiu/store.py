@@ -19,7 +19,7 @@ from .scoring import (RUBRIC_VERSION, DimensionGrade, QuestionAssessment, assess
                       rating_for)
 
 # Opening an older file migrates a backed-up copy first, then swaps it in.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 # Review attempts a day may start; the schedule shows the days that would go over it.
 DAILY_REVIEW_LIMIT = 3
 LLM_FAILURE_CHARS = 20_000
@@ -645,6 +645,42 @@ class Store:
                     conversation_id TEXT, created_at TEXT NOT NULL, fired_at TEXT, fired_count INTEGER NOT NULL DEFAULT 0)""")
                 self.db.execute("CREATE INDEX IF NOT EXISTS reminders_due ON reminders(status, next_at)")
                 self.db.execute("PRAGMA user_version=25")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 26:
+            with self.transaction():
+                # Study plans: a topic split into knowledge points spread over days (see plans.py). The model
+                # proposes the units; the program checks them, dates them and moves them along.
+                self.db.execute("""CREATE TABLE IF NOT EXISTS study_plans (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, topic TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '',
+                    topic_kp_id TEXT REFERENCES knowledge_points(id) ON DELETE SET NULL,
+                    state TEXT NOT NULL,
+                    basis TEXT NOT NULL CHECK(basis IN ('materials','web','model')), basis_note TEXT NOT NULL DEFAULT '',
+                    new_per_day INTEGER NOT NULL, daily_minutes INTEGER NOT NULL, rest_days TEXT NOT NULL DEFAULT '[]',
+                    remind_at TEXT, preset TEXT NOT NULL DEFAULT 'standard',
+                    start_date TEXT NOT NULL, deadline TEXT, sources_json TEXT NOT NULL DEFAULT '{}',
+                    meta_json TEXT NOT NULL DEFAULT '{}', conversation_id TEXT, priority INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 0, recomputed_on TEXT, missed_asked_on TEXT,
+                    created_at TEXT NOT NULL, activated_at TEXT, ended_at TEXT)""")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS plan_units (
+                    id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES study_plans(id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL, key TEXT NOT NULL, title TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '',
+                    requires_json TEXT NOT NULL DEFAULT '[]', minutes INTEGER NOT NULL,
+                    source_kind TEXT NOT NULL CHECK(source_kind IN ('local','url','notion','lesson_web')),
+                    source_ref TEXT NOT NULL DEFAULT '',
+                    kp_id TEXT REFERENCES knowledge_points(id) ON DELETE SET NULL,
+                    state TEXT NOT NULL, skip_reason TEXT CHECK(skip_reason IN ('known','user_known','removed')),
+                    planned_date TEXT, first_planned_date TEXT, done_date TEXT, score INTEGER, block_reason TEXT,
+                    UNIQUE(plan_id, key))""")
+                self.db.execute("CREATE INDEX IF NOT EXISTS plan_units_plan ON plan_units(plan_id, seq)")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS plan_revisions (
+                    id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES study_plans(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL,
+                    by TEXT NOT NULL CHECK(by IN ('model','user_card','web_outline','reschedule')),
+                    summary TEXT NOT NULL DEFAULT '', snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(plan_id, revision))""")
+                # A plan's daily reminder is an ordinary reminder that names the plan.
+                if "plan_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(reminders)")}:
+                    self.db.execute("ALTER TABLE reminders ADD COLUMN plan_id TEXT")
+                self.db.execute("PRAGMA user_version=26")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -714,7 +750,50 @@ class Store:
                 SELECT ?,id FROM materials WHERE kp_id=? AND active=1""", (message_id, kp_id))
         if kind in ("lesson", "lesson_resume") and attempt_id is None:
             flow.transition(self, "lesson", session_id, "teaching", kind, kp_id=kp_id)
+            self._plan_units_started(kp_id)
         return message_id
+
+    # ----- study plan units follow their points (plans.py keeps the plans themselves) -----------------
+
+    def _plan_units(self, kp_id: str) -> list[sqlite3.Row]:
+        return self.db.execute("""SELECT u.id,u.state,u.plan_id FROM plan_units u JOIN study_plans p ON p.id=u.plan_id
+            WHERE u.kp_id=? AND p.state IN ('active','paused')""", (kp_id,)).fetchall()
+
+    def _plan_dirty(self, plan_id: str) -> None:
+        # The daily pass runs again the next time the plan is read; learning means no longer idle.
+        self.db.execute("""UPDATE study_plans SET recomputed_on=NULL,
+            meta_json=json_remove(meta_json,'$.idle_since') WHERE id=?""", (plan_id,))
+
+    def _plan_units_started(self, kp_id: str) -> None:
+        for unit in self._plan_units(kp_id):
+            if unit["state"] in ("pending", "blocked"):
+                flow.transition(self, "plan_unit", unit["id"], "learning", "lesson_started", kp_id=kp_id)
+                self._plan_dirty(unit["plan_id"])
+
+    def _plan_units_after_test(self, kp_id: str, first_total: int | None) -> None:
+        """A first self-test finished: its units are done. A review only asks the plans to look again
+        (a unit held back by this point may be released)."""
+        today = self.clock.today().isoformat()
+        for unit in self._plan_units(kp_id):
+            if first_total is not None and unit["state"] in ("pending", "blocked", "learning"):
+                flow.transition(self, "plan_unit", unit["id"], "done", "first_test_completed", kp_id=kp_id)
+                self.db.execute("""UPDATE plan_units SET score=?,done_date=?,planned_date=COALESCE(planned_date,?),
+                    block_reason=NULL WHERE id=?""", (first_total, today, today, unit["id"]))
+                self._event(kp_id, None, "UnitDone", {"plan_id": unit["plan_id"], "unit_id": unit["id"],
+                                                      "cause": "first_test_completed", "score": first_total})
+                if not self.db.execute("SELECT 1 FROM plan_units WHERE plan_id=? AND state NOT IN ('done','skipped')",
+                                       (unit["plan_id"],)).fetchone():
+                    plan = self.db.execute("SELECT state,topic_kp_id FROM study_plans WHERE id=?",
+                                           (unit["plan_id"],)).fetchone()
+                    if plan["state"] == "active":
+                        flow.transition(self, "plan", unit["plan_id"], "completed", "all_units_finished",
+                                        kp_id=plan["topic_kp_id"])
+                        self.db.execute("UPDATE study_plans SET ended_at=? WHERE id=?", (self._ts(), unit["plan_id"]))
+                        self.db.execute("""UPDATE reminders SET status='cancelled',next_at=NULL
+                            WHERE plan_id=? AND status='active'""", (unit["plan_id"],))
+                        self._event(plan["topic_kp_id"], None, "PlanCompleted",
+                                    {"plan_id": unit["plan_id"], "cause": "all_units_finished"})
+            self._plan_dirty(unit["plan_id"])
 
     def record_message(self, kp_id: str, role: str, kind: str, content: str,
                        attempt_id: str | None = None, source_message_id: str | None = None) -> str:
@@ -1106,18 +1185,22 @@ class Store:
         return self.db.execute("SELECT * FROM knowledge_points WHERE id=? OR title=?", (title_or_id, title_or_id)).fetchone()
 
     def ensure_knowledge_point(self, title: str, parent_id: str | None = None) -> str:
+        with self.transaction():
+            return self._ensure_knowledge_point(title, parent_id)
+
+    def _ensure_knowledge_point(self, title: str, parent_id: str | None = None) -> str:
+        """Inside the caller's transaction (activating a study plan creates several at once)."""
         title = title.strip()
         if not title:
             raise ValueError("knowledge point title is required")
-        with self.transaction():
-            row = self.get_knowledge_point(title)
-            if row:
-                return row["id"]
-            kp_id = new_id()
-            self.db.execute("INSERT INTO knowledge_points(id,title,parent_id,created_at) VALUES(?,?,?,?)", (kp_id, title, parent_id, self._ts()))
-            self._event(kp_id, None, "KnowledgePointCreated", {"title": title, "parent_id": parent_id})
-            flow.enter(self, "knowledge_point", kp_id, "active", "created", kp_id=kp_id)
-            return kp_id
+        row = self.get_knowledge_point(title)
+        if row:
+            return row["id"]
+        kp_id = new_id()
+        self.db.execute("INSERT INTO knowledge_points(id,title,parent_id,created_at) VALUES(?,?,?,?)", (kp_id, title, parent_id, self._ts()))
+        self._event(kp_id, None, "KnowledgePointCreated", {"title": title, "parent_id": parent_id})
+        flow.enter(self, "knowledge_point", kp_id, "active", "created", kp_id=kp_id)
+        return kp_id
 
     def add_materials(self, kp_id: str, materials: list[dict[str, str]]) -> None:
         with self.transaction():
@@ -1446,6 +1529,7 @@ class Store:
             flow.transition(self, "attempt", attempt_id, "completed", f"finalize_{reason}",
                             kp_id=attempt["kp_id"], attempt_id=attempt_id)
             self.db.execute("UPDATE attempts SET ended_at=?,finish_reason=? WHERE id=?", (now, reason, attempt_id))
+            self._plan_units_after_test(attempt["kp_id"], result.total if attempt["kind"] == "first" else None)
             self._queue_episode_job(attempt["kp_id"], review_id)
             self._event(attempt["kp_id"], attempt_id, "ReviewSaved", {"review_id": review_id, "kind": kind, "total": result.total})
             if task_id:

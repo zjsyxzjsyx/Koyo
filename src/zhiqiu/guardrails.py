@@ -36,6 +36,7 @@ RULES = {
     "consent_missing": "资料或端点未获发送授权",
     "question_shape": "题目超出一题一问的形状限制（重出后仍超出，已保存）",
     "endpoint_feature_disabled": "模型端点不支持的请求字段，已停止发送",
+    "plan_limit": "学习计划的知识点数或一轮修改次数超过上限",
 }
 REASON_CHARS = 500
 

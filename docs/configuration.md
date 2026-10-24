@@ -34,6 +34,7 @@ uv run --python 3.12 python examples/demo.py
 | `[model]` | `base_url`、`model`、`api_key`、`stream`、窗口与预算（`window`、`output_reserve`、`margin`、`budgets`） |
 | `[web]` | `port`（默认 8765）、`open`（启动后打开浏览器）、`db`（数据库文件，留空用 `%LOCALAPPDATA%\zhiqiu\state.sqlite`）、`default_command`（`web` 或 `status`） |
 | `[learn]` | `offline`：相当于每次都加 `--offline` |
+| `[plan]` | 10.0 学习计划：`enabled`、`preset`（`relaxed`、`standard`、`intense`）、`new_per_day`、`daily_minutes`、`rest_days`、`review_minutes`、`unit_minutes`、`max_units`、`remind_at`（写 `off` 不问提醒）、`missed_prompt_days`；不写的按档位（见[学习计划](plans.md#每天负荷与排期)） |
 | `[materials]` | 学习资料的上限与类型：`max_chars`、`max_file_bytes`、`max_files`、`code_files`、`extra_suffixes`、`respect_gitignore`（见[学习](learning.md#资料类型与上限90)） |
 | `[roots]` | `read`、`write`（对话中的可读、可写目录，与工作台页面添加的合并）、`skills`（自己的教学 Skill 目录） |
 | `[voice]` | `auto_download`（`ask`、`always`、`never`）、`mirror_url`、`model`、`language`、`threads` |

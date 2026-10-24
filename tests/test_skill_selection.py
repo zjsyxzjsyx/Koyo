@@ -56,7 +56,7 @@ def test_new_text_in_the_general_teach_prompt_is_only_the_diagram_rule():
 def test_skill_parameters_shape_the_length_diagram_and_answer_sentences():
     skill = parse_text(LEETCODE, "x", "user", "leetcode")
     teach = system_message("teach", skill)["content"]
-    assert "[context-v15/teach · leetcode@1]" in teach and "分成 2 到 4 节，每节正文不超过 250 字" in teach
+    assert "[context-v16/teach · leetcode@1]" in teach and "分成 2 到 4 节，每节正文不超过 250 字" in teach
     assert "diagram" not in teach and "先用一个很小的输入手推一遍" in teach
     # Fixed rules come after the Skill's text, so a Skill cannot drop them.
     assert teach.index("先用一个很小的输入") < teach.index("返回 JSON：sections") < teach.index(DATA_RULE)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable
 
 from . import flow, tracing
@@ -217,9 +217,41 @@ def stream_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) -> 
     return _result("stream_consistent", len(rows), problems, "流式模型调用都记下了首字耗时，且不超过整次调用的耗时")
 
 
+def plans_consistent(db: sqlite3.Connection, since_ns: int, since_iso: str) -> dict[str, Any]:
+    """Active study plans as the rules say: no day over the new-unit limit, prerequisites first, a done
+    unit backed by a completed first self-test, a held-back unit with its reason."""
+    try:
+        plans = db.execute("SELECT id,title,new_per_day FROM study_plans WHERE state='active'").fetchall()
+    except sqlite3.OperationalError:
+        return _result("plans_consistent", 0, [], "没有学习计划")
+    today = date.today().isoformat()
+    problems: list[dict[str, Any]] = []
+    per_day: dict[str, int] = defaultdict(int)
+    limit = max((plan["new_per_day"] for plan in plans), default=0)
+    for plan in plans:
+        units = {row["key"]: row for row in db.execute("SELECT * FROM plan_units WHERE plan_id=?", (plan["id"],))}
+        for unit in units.values():
+            where = {"plan_id": plan["id"], "plan": plan["title"], "unit": unit["title"]}
+            if unit["state"] == "pending" and unit["planned_date"] and unit["planned_date"] >= today:
+                per_day[unit["planned_date"]] += 1
+                for key in json.loads(unit["requires_json"] or "[]"):
+                    req = units.get(key)
+                    if req is not None and req["state"] in ("pending", "blocked") and (
+                            req["planned_date"] is None or req["planned_date"] > unit["planned_date"]):
+                        problems.append({**where, "problem": f"排在前置《{req['title']}》之前"})
+            if unit["state"] == "done" and not db.execute("""SELECT 1 FROM attempts WHERE kp_id=? AND kind='first'
+                    AND state='completed'""", (unit["kp_id"],)).fetchone():
+                problems.append({**where, "problem": "标为学完但没有完成的首次自测"})
+            if unit["state"] == "blocked" and not unit["block_reason"]:
+                problems.append({**where, "problem": "推迟但没有写原因"})
+    problems += [{"date": day, "problem": f"这天排了 {count} 个新知识点，超过每天 {limit} 个"}
+                 for day, count in sorted(per_day.items()) if count > limit]
+    return _result("plans_consistent", len(plans), problems, "学习计划的每日上限、前置顺序与学完记录一致")
+
+
 CHECKS: tuple[Callable[[sqlite3.Connection, int, str], dict[str, Any]], ...] = (
     loop_rounds, tool_round_bound, proposal_stops_round, confirmed_side_effects, approvals_consistent,
-    state_replay, trace_linked, spans_closed, skills_recorded, stream_consistent)
+    state_replay, trace_linked, spans_closed, skills_recorded, stream_consistent, plans_consistent)
 
 
 def check(db: sqlite3.Connection, days: float = 7) -> dict[str, Any]:

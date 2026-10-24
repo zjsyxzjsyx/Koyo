@@ -446,7 +446,8 @@ def _traced(name: str, result: FlowResult) -> FlowResult:
 
 def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Path | None = None,
                urls: list[str] | None = None, notion_pages: list[str] | None = None,
-               offline: bool = False, approve: Callable[..., bool] | None = None) -> FlowResult:
+               offline: bool = False, approve: Callable[..., bool] | None = None,
+               allow_empty: bool = False) -> FlowResult:
     """Prepare and teach a point, then follow lesson commands until /done, /end or /pause.
 
     approve: consent already collected by the caller (see `preapproved`); otherwise the user is asked.
@@ -454,15 +455,16 @@ def run_lesson(io: FlowIO, store: Store, service: Any, point: str, *, source: Pa
     """
     with tracing.span(store, "flow", "learn", point=point):
         return _traced("learn", _run_lesson(io, store, service, point, source, urls or [],
-                                                   notion_pages or [], offline, approve))
+                                                   notion_pages or [], offline, approve, allow_empty))
 
 
 def _run_lesson(io: FlowIO, store: Store, service: Any, point: str, source: Path | None,
                 urls: list[str], notion_pages: list[str], offline: bool,
-                approve: Callable[..., bool] | None) -> FlowResult:
+                approve: Callable[..., bool] | None, allow_empty: bool = False) -> FlowResult:
     tracing.progress(step="准备资料")
     kp_id, lesson, materials = service.prepare(point, source, approve or approver(io), offline=offline,
-                                               urls=urls, notion_pages=notion_pages)
+                                               urls=urls, notion_pages=notion_pages,
+                                               **({"allow_empty": True} if allow_empty else {}))
     tracing.link(kp_id=kp_id)
     tracing.progress(step="讲解")
     _stage(io, "lesson", "point", kp_id)

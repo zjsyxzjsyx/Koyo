@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .flows import FlowInterrupted
+from .plan_flow import valid_answer as plan_answer
 from .store import Store
 
 # The longest a prompt waits for an answer; afterwards it is treated as stopped.
@@ -24,7 +25,7 @@ WAIT_S = 30 * 60
 # Events kept in memory; older ones are dropped (the page reloads history from the database).
 KEEP_EVENTS = 2000
 # Kinds of prompt that wait for an answer, and the type of answer each accepts.
-PROMPTS = {"ask": str, "confirm": bool, "approval": bool, "grant": str}
+PROMPTS = {"ask": str, "confirm": bool, "approval": bool, "grant": str, "plan": str}
 # Where on the page an answer was given: the chat card, or the approvals page for a waiting approval.
 ORIGINS = ("chat", "approvals")
 # Pieces of a streamed answer are sent together: at most every this many seconds, or once this many
@@ -42,7 +43,7 @@ class UserInput:
     source: str = "text"
     voice: dict[str, Any] | None = None
 # What the page can ask the worker to do besides a line of input; each runs between turns only.
-CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5, "compact": 0, "model": 1, "new_in": 1}
+CONTROLS = {"switch": 1, "new": 0, "rename": 2, "roots": 5, "compact": 0, "model": 1, "new_in": 1, "plan": 1}
 _STOPPED = object()
 _CLOSE = object()
 
@@ -150,6 +151,8 @@ class WebIO:
                 raise ValueError(f"这个提示需要{'文字' if PROMPTS[kind] is str else '是或否'}")
             if kind == "grant" and not (value in ("once", "denied") or value.startswith("root:")):
                 raise ValueError("路径授权只能回答 once、denied 或 root:目录")
+            if kind == "plan" and not plan_answer(value):
+                raise ValueError("学习计划卡片不认识这个回答")
             if origin == "approvals" and kind != "approval":
                 raise ValueError("审批页只能回答工具审批")
             del self._waiting[request_id]
@@ -266,6 +269,11 @@ class WebIO:
         if answer is _STOPPED:
             raise FlowInterrupted
         return answer
+
+    def plan_card(self, card: dict[str, Any]) -> str:
+        """A study plan card; stopping or leaving it unanswered keeps the draft for later."""
+        answer = self._wait("plan", text=f"学习计划《{card['title']}》", card=card)
+        return "later" if answer is _STOPPED else answer
 
     def confirm_request(self, spec: Any, args: dict[str, Any], approval_request_id: str | None) -> bool:
         """confirm_tool with the id of the approval request the agent recorded for it.
@@ -445,6 +453,7 @@ class Workbench:
             self._tools_context(agent)
             self._usage_context(agent)
             self._model_context(agent)
+            self._today_context(agent)
         except BaseException as exc:
             self._error = exc
             self._ready.set()
@@ -482,6 +491,7 @@ class Workbench:
                     self._tools_context(agent)
                     self._usage_context(agent)
                     self._model_context(agent)
+                    self._today_context(agent)
                     with self._lock:
                         self._busy = False
                     self.io.emit("idle", conversation_id=self.conversation_id)
@@ -501,6 +511,16 @@ class Workbench:
         self.context = {**self.context, "tools": available() if callable(available) else True,
                         "path_grants": bool(policy is not None and policy.path_grants()),
                         "search": search() if callable(search) else None}
+
+    def _today_context(self, agent: Any) -> None:
+        """Today's study plan for the status panel; only a hint, so never an error."""
+        desk = getattr(agent, "desk", None)
+        try:
+            from . import planner
+            view = desk.plans.today(agent.store.clock.today()) if desk is not None and planner.enabled() else None
+        except Exception:
+            view = None
+        self.context = {**self.context, "today": view}
 
     def _model_context(self, agent: Any) -> None:
         self.context = {**self.context, "model": str(getattr(agent, "model_name", "") or "")}
@@ -537,6 +557,8 @@ class Workbench:
                 agent.use_model(*args)
             elif name == "new_in":
                 agent.new(*args)
+            elif name == "plan":
+                agent.open_plan(*args)
             elif name == "roots":
                 agent.change_roots(*args)
                 self._roots_context(agent)
