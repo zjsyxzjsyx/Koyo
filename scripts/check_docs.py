@@ -4,6 +4,7 @@ Usage: uv run python scripts/check_docs.py [--base GIT_REF]   (default a31a27a, 
 
 Every non-empty line of the old README must appear verbatim in README.md or docs/*.md, unless it is
 listed below as rewritten on purpose. Relative links (and their files) must exist; anchors are not checked.
+README.en.md (the short English README) and README.md must link to each other.
 """
 from __future__ import annotations
 
@@ -59,6 +60,20 @@ def new_files() -> list[Path]:
     return [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
 
 
+def english_readme() -> list[str]:
+    """README.en.md (10.0): its links resolve, and the two READMEs point at each other."""
+    english = ROOT / "README.en.md"
+    if not english.exists():
+        return ["缺少 README.en.md"]
+    problems = [f"README.en.md → {target}" for target in LINK.findall(english.read_text(encoding="utf-8"))
+                if "://" not in target and not (ROOT / target).exists()]
+    if "(README.md)" not in english.read_text(encoding="utf-8"):
+        problems.append("README.en.md 没有链接到 README.md")
+    if "(README.en.md)" not in (ROOT / "README.md").read_text(encoding="utf-8"):
+        problems.append("README.md 没有链接到 README.en.md")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="a31a27a")
@@ -76,6 +91,7 @@ def main() -> int:
                 continue
             if not (path.parent / target).exists():
                 broken.append(f"{path.relative_to(ROOT)} → {target}")
+    broken += english_readme()
     readme_lines = len((ROOT / "README.md").read_text(encoding="utf-8").splitlines())
     for line in missing:
         print(f"缺少：{line[:120]}")
